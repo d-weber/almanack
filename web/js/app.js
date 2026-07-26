@@ -48,7 +48,9 @@ let chromeEl = null;
 let viewEl = null;
 let tabsEl = null;
 let bannerEl = null;
+let panelEl = null;
 let renderToken = 0;
+let panelToken = 0;
 let lastRefresh = 0;
 let lastConfirm = 0;
 let pendingHash = null;
@@ -61,8 +63,24 @@ function buildShell() {
   bannerEl = h('div', { class: 'banners' });
   chromeEl = h('div', { class: 'chrome' });
   viewEl = h('main', { class: 'view', id: 'view' });
+  panelEl = h('aside', { class: 'panel', hidden: true });
   tabsEl = h('nav', { class: 'tabbar' });
-  mount(root, bannerEl, chromeEl, viewEl, tabsEl);
+  mount(root, bannerEl, chromeEl, viewEl, panelEl, tabsEl);
+}
+
+// On a wide screen an event opens beside the calendar rather than replacing it, so
+// you can still see the week you are editing against. There is no room for that on a
+// phone, where the same routes render full screen exactly as before.
+function openPanel() {
+  panelEl.hidden = false;
+  root.classList.add('is-panel-open');
+}
+
+function closePanel() {
+  if (panelEl.hidden) return;
+  panelEl.hidden = true;
+  clear(panelEl);
+  root.classList.remove('is-panel-open');
 }
 
 function isPublicPath(path) {
@@ -225,6 +243,7 @@ function calendarHeader(view, date) {
 /** Swap the main area, discarding results of a navigation that was superseded. */
 async function show(builder, { chrome = null, tabs = true } = {}) {
   const token = ++renderToken;
+  closePanel();
   paintBanners();
   clear(chromeEl);
   if (chrome) chromeEl.appendChild(chrome);
@@ -265,6 +284,31 @@ function plainScreen(builder) {
   return show(builder, { chrome: null, tabs: false });
 }
 
+// panelScreen renders an event next to the calendar on a wide screen, and full
+// screen on a narrow one. The calendar underneath is re-rendered first, so the panel
+// always opens against the month or week you were actually looking at.
+async function panelScreen(builder, ctx) {
+  if (!DESKTOP.matches) {
+    return plainScreen(builder);
+  }
+  const date = (ctx && ctx.query && ctx.query.get('date')) || state.cursor || todayISO();
+  const view = state.view === 'agenda' ? 'agenda' : state.view;
+  await calendarScreen(view, { query: new URLSearchParams(`d=${date}`) });
+
+  const token = ++panelToken;
+  openPanel();
+  mount(panelEl, spinner());
+  try {
+    const node = await builder();
+    if (token !== panelToken) return;
+    mount(panelEl, node);
+    panelEl.scrollTop = 0;
+  } catch (err) {
+    if (token !== panelToken) return;
+    mount(panelEl, errorBox(err, () => reload()));
+  }
+}
+
 function tabScreen(builder) {
   return show(builder, { chrome: null, tabs: true });
 }
@@ -296,15 +340,15 @@ function registerRoutes() {
 
   route('/event/new', (ctx) => {
     if (!guardAuth(ctx)) return;
-    plainScreen(() => renderEventEditor({ query: ctx.query }));
+    panelScreen(() => renderEventEditor({ query: ctx.query }), ctx);
   });
   route('/event/:id/:date', (ctx) => {
     if (!guardAuth(ctx)) return;
-    plainScreen(() => renderEventDetail(ctx.params));
+    panelScreen(() => renderEventDetail(ctx.params), ctx);
   });
   route('/event/:id/:date/edit', (ctx) => {
     if (!guardAuth(ctx)) return;
-    plainScreen(() => renderEventEditor({ id: ctx.params.id, date: ctx.params.date, query: ctx.query }));
+    panelScreen(() => renderEventEditor({ id: ctx.params.id, date: ctx.params.date, query: ctx.query }), ctx);
   });
 
   route('/search', (ctx) => { if (guardAuth(ctx)) tabScreen(() => renderSearch()); });

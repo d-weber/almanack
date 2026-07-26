@@ -193,6 +193,11 @@ a { color: var(--accent); }
   position: relative;
 }
 
+/* The event panel exists only where there is room for it beside the calendar. On a
+   phone the same routes render full screen and this element is never shown. */
+.panel { display: none; }
+.panel[hidden] { display: none; }
+
 .tabbar {
   flex: 0 0 auto;
   display: flex;
@@ -271,16 +276,18 @@ a { color: var(--accent); }
   min-width: 0;
 }
 
+/* The month and year is the one label on this screen that must stay readable, so it
+   never gives ground: when the panel opens and the bar gets narrower, the view
+   switch shrinks and then the row wraps, rather than the title ellipsing to "J". */
 .app-bar-nav .app-title {
   margin-left: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .app-bar-actions { flex: 1 1 0; justify-content: flex-end; }
 
 .view-switch {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -1624,6 +1631,58 @@ a { color: var(--accent); }
   .banners { grid-area: banners; }
   .chrome { grid-area: chrome; }
   .view { grid-area: view; }
+
+  /* Opening an event adds a column rather than replacing the calendar: the point is
+     to keep the week you are editing against in view. */
+  .app.is-panel-open {
+    grid-template-columns: 232px minmax(0, 1fr) minmax(360px, 30vw);
+    grid-template-areas:
+      "tabs banners panel"
+      "tabs chrome  panel"
+      "tabs view    panel";
+  }
+
+  .app.is-collapsed.is-panel-open {
+    grid-template-columns: 68px minmax(0, 1fr) minmax(360px, 30vw);
+  }
+
+  /* With a column given to the panel, the calendar's own bar is genuinely narrow —
+     narrow enough that fitting five controls on one line clipped the month and year.
+     The view switch takes its own line here, exactly as it does on a phone, which is
+     the same trade for the same reason. */
+  .app.is-panel-open .app-bar-row { flex-wrap: wrap; }
+  .app.is-panel-open .app-bar-nav { flex: 1 1 auto; }
+  .app.is-panel-open .app-bar-actions { flex: 0 0 auto; }
+  .app.is-panel-open .view-switch {
+    order: 3;
+    flex: 1 0 100%;
+    margin-left: 0;
+  }
+  .app.is-panel-open .view-switch .segment { flex: 1 1 0; }
+
+  .app.is-panel-open .panel:not([hidden]) {
+    display: block;
+    grid-area: panel;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+  }
+
+  /* Inside the panel the screen chrome is a panel header, not a page header. */
+  .app.is-panel-open .panel .screen { height: auto; }
+  .app.is-panel-open .panel .screen-bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+  }
+  .app.is-panel-open .panel .screen-body {
+    max-width: none;
+    margin: 0;
+    padding-bottom: calc(var(--gap) * 2);
+  }
 
   .tabbar {
     grid-area: tabs;
