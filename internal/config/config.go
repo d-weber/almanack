@@ -1,0 +1,372 @@
+// Package config turns a configuration file and the environment into a validated Config.
+//
+// Every setting the binary has is exposed here, because the machine that deploys this
+// (Ansible, in this deployment) must be able to configure the whole application by
+// templating one file. Nothing is hidden in a code constant that would require a
+// rebuild to change.
+//
+// The file format is deliberately systemd's EnvironmentFile format — KEY=VALUE, #
+// comments, optional quotes — so a single templated file can be used either as
+// `EnvironmentFile=` in a unit or passed as `agenda --config <path>`, with no
+// translation step and no second format to maintain.
+//
+// Precedence: environment variable > config file > built-in default.
+package config
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// DefaultPath is consulted when no config path is given and the file exists.
+const DefaultPath = "/etc/agenda/agenda.conf"
+
+// DefaultSourceURL is deliberately empty: only whoever publishes a build knows where
+// its source lives. Set AGENDA_SOURCE_URL and the About screen links to it — which is
+// how an AGPL-3.0 network service offers its source to the people using it (section
+// 13). If you deploy a modified version, point it at *your* source, not upstream's.
+const DefaultSourceURL = ""
+
+// Config is the whole runtime configuration.
+type Config struct {
+	// Dev turns on the local development affordances: the /dev endpoints, a file
+	// mail sink instead of SMTP, a controllable clock, and cookies without Secure so
+	// http://localhost works. It must never be set on the family server.
+	Dev bool
+
+	ListenAddr string // AGENDA_LISTEN
+	BaseURL    string // AGENDA_BASE_URL — public origin, used in invite links and emails
+	DataPath   string // AGENDA_DATA — the SQLite file
+	BackupDir  string // AGENDA_BACKUP_DIR
+
+	TZName   string // AGENDA_TZ
+	FamilyTZ *time.Location
+
+	// TrustedProxies are the peers whose X-Forwarded-For header may be believed.
+	// Behind a reverse proxy every request appears to come from the proxy, so
+	// without this the login rate limiter would share one bucket for the whole
+	// family — lock one person out and you lock out everyone.
+	TrustedProxies []string // AGENDA_TRUSTED_PROXIES, CSV
+
+	// Mail. The binary only ever talks to a local MTA: when the family's provider
+	// next changes its authentication rules, that is an OS config edit, not an
+	// application rebuild.
+	SMTPAddr   string // AGENDA_SMTP
+	MailFrom   string // AGENDA_MAIL_FROM
+	OwnerEmail string // AGENDA_OWNER_EMAIL — receives failure alerts and the ops heartbeat
+	MailDir    string // AGENDA_MAIL_DIR — dev only: where the file sink writes .eml files
+
+	VAPIDPublic  string // AGENDA_VAPID_PUBLIC
+	VAPIDPrivate string // AGENDA_VAPID_PRIVATE
+	VAPIDSubject string // AGENDA_VAPID_SUBJECT — mailto: contact, required by RFC 8292
+
+	AlsaceMoselle bool // AGENDA_ALSACE_MOSELLE — the two extra public holidays
+
+	// SourceURL is where this build's source can be obtained. Agenda is AGPL-3.0:
+	// if you modify it and let other people use it over a network, section 13
+	// obliges you to offer them the source of *your* version. The app shows this
+	// link in its About screen, which is the simplest way to comply.
+	SourceURL string // AGENDA_SOURCE_URL
+
+	PlanHorizon   time.Duration // AGENDA_PLAN_HORIZON — how far ahead notifications are materialized
+	SchedulerTick time.Duration // AGENDA_TICK — how often the outbox is drained
+
+	// HeartbeatTime is when the daily ops summary is mailed to OwnerEmail (HH:MM,
+	// family time). A family server has no pager, so this mail — and its absence —
+	// is the monitoring. Empty disables it.
+	HeartbeatTime string // AGENDA_HEARTBEAT_TIME
+
+	// Backup retention, applied by `agenda backup --prune`. Generational rather than
+	// "last N days", so that corruption discovered late is still recoverable.
+	KeepHourly  int // AGENDA_BACKUP_KEEP_HOURLY
+	KeepDaily   int // AGENDA_BACKUP_KEEP_DAILY
+	KeepWeekly  int // AGENDA_BACKUP_KEEP_WEEKLY
+	KeepMonthly int // AGENDA_BACKUP_KEEP_MONTHLY
+
+	LogLevel  string // AGENDA_LOG_LEVEL — debug|info|warn|error
+	LogFormat string // AGENDA_LOG_FORMAT — text|json
+
+	// ConfigPath records where settings were read from, for logging and /healthz.
+	ConfigPath string
+}
+
+// Load reads the config file (if any) and the environment, then validates. Pass an
+// empty path to use AGENDA_CONFIG, or DefaultPath when that exists.
+func Load(path string) (Config, error) {
+	if path == "" {
+		path = os.Getenv("AGENDA_CONFIG")
+	}
+	if path == "" {
+		if _, err := os.Stat(DefaultPath); err == nil {
+			path = DefaultPath
+		}
+	}
+
+	file := map[string]string{}
+	if path != "" {
+		var err error
+		file, err = ParseFile(path)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+
+	get := func(key, def string) string {
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			return v
+		}
+		if v, ok := file[key]; ok && v != "" {
+			return v
+		}
+		return def
+	}
+	getBool := func(key string, def bool) bool {
+		v := get(key, "")
+		if v == "" {
+			return def
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return def
+		}
+		return b
+	}
+	getInt := func(key string, def int) int {
+		v := get(key, "")
+		if v == "" {
+			return def
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return def
+		}
+		return n
+	}
+	getDur := func(key string, def time.Duration) time.Duration {
+		v := get(key, "")
+		if v == "" {
+			return def
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return def
+		}
+		return d
+	}
+
+	c := Config{
+		ConfigPath:     path,
+		Dev:            getBool("AGENDA_DEV", false),
+		ListenAddr:     get("AGENDA_LISTEN", "127.0.0.1:8080"),
+		BaseURL:        strings.TrimRight(get("AGENDA_BASE_URL", ""), "/"),
+		DataPath:       get("AGENDA_DATA", ""),
+		BackupDir:      get("AGENDA_BACKUP_DIR", ""),
+		TZName:         get("AGENDA_TZ", "Europe/Paris"),
+		TrustedProxies: splitCSV(get("AGENDA_TRUSTED_PROXIES", "127.0.0.1,::1")),
+		SMTPAddr:       get("AGENDA_SMTP", "127.0.0.1:25"),
+		MailFrom:       get("AGENDA_MAIL_FROM", ""),
+		OwnerEmail:     get("AGENDA_OWNER_EMAIL", ""),
+		MailDir:        get("AGENDA_MAIL_DIR", ""),
+		VAPIDPublic:    get("AGENDA_VAPID_PUBLIC", ""),
+		VAPIDPrivate:   get("AGENDA_VAPID_PRIVATE", ""),
+		VAPIDSubject:   get("AGENDA_VAPID_SUBJECT", ""),
+		AlsaceMoselle:  getBool("AGENDA_ALSACE_MOSELLE", false),
+		SourceURL:      get("AGENDA_SOURCE_URL", DefaultSourceURL),
+		PlanHorizon:    getDur("AGENDA_PLAN_HORIZON", 48*time.Hour),
+		SchedulerTick:  getDur("AGENDA_TICK", 30*time.Second),
+		HeartbeatTime:  get("AGENDA_HEARTBEAT_TIME", "08:00"),
+		KeepHourly:     getInt("AGENDA_BACKUP_KEEP_HOURLY", 48),
+		KeepDaily:      getInt("AGENDA_BACKUP_KEEP_DAILY", 14),
+		KeepWeekly:     getInt("AGENDA_BACKUP_KEEP_WEEKLY", 8),
+		KeepMonthly:    getInt("AGENDA_BACKUP_KEEP_MONTHLY", 24),
+		LogLevel:       get("AGENDA_LOG_LEVEL", "info"),
+		LogFormat:      get("AGENDA_LOG_FORMAT", "text"),
+	}
+
+	loc, err := time.LoadLocation(c.TZName)
+	if err != nil {
+		return Config{}, fmt.Errorf("AGENDA_TZ %q: %w", c.TZName, err)
+	}
+	c.FamilyTZ = loc
+
+	if c.Dev {
+		if c.DataPath == "" {
+			c.DataPath = filepath.Join("devdata", "agenda.db")
+		}
+		if c.BaseURL == "" {
+			c.BaseURL = "http://" + strings.Replace(c.ListenAddr, "127.0.0.1", "localhost", 1)
+		}
+		if c.MailDir == "" {
+			c.MailDir = filepath.Join(filepath.Dir(c.DataPath), "mail")
+		}
+		if c.MailFrom == "" {
+			c.MailFrom = "agenda@localhost"
+		}
+		if c.OwnerEmail == "" {
+			c.OwnerEmail = "owner@localhost"
+		}
+		if c.VAPIDSubject == "" {
+			c.VAPIDSubject = "mailto:" + c.OwnerEmail
+		}
+	}
+	if c.BackupDir == "" && c.DataPath != "" {
+		c.BackupDir = filepath.Join(filepath.Dir(c.DataPath), "backups")
+	}
+
+	if err := c.validate(); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+func (c Config) validate() error {
+	var problems []string
+	if c.DataPath == "" {
+		problems = append(problems, "AGENDA_DATA is required (path to the SQLite file)")
+	}
+	if c.BaseURL == "" {
+		problems = append(problems, "AGENDA_BASE_URL is required (used in invite links and emails)")
+	}
+	if c.HeartbeatTime != "" && !validHHMM(c.HeartbeatTime) {
+		problems = append(problems, "AGENDA_HEARTBEAT_TIME must be HH:MM (or empty to disable)")
+	}
+	if !c.Dev {
+		if !strings.HasPrefix(c.BaseURL, "https://") {
+			problems = append(problems, "AGENDA_BASE_URL must be https outside dev mode: PWA installation and Web Push both require a secure origin")
+		}
+		if c.MailFrom == "" {
+			problems = append(problems, "AGENDA_MAIL_FROM is required")
+		}
+		if c.OwnerEmail == "" {
+			problems = append(problems, "AGENDA_OWNER_EMAIL is required: it receives failure alerts, and without it nothing on this server fails loudly")
+		}
+		if c.VAPIDPublic == "" || c.VAPIDPrivate == "" {
+			problems = append(problems, "AGENDA_VAPID_PUBLIC and AGENDA_VAPID_PRIVATE are required (generate once with `agenda gen-vapid`; never rotate them, as that invalidates every push subscription)")
+		}
+		if c.VAPIDSubject == "" {
+			problems = append(problems, "AGENDA_VAPID_SUBJECT is required, e.g. mailto:you@example.org")
+		}
+	}
+	if len(problems) > 0 {
+		hint := ""
+		if c.ConfigPath == "" {
+			hint = "\n\nNo configuration file was read. Pass --config <path>, set AGENDA_CONFIG, or place one at " + DefaultPath + ".\nSee agenda.conf.example for a complete annotated file."
+		} else {
+			hint = "\n\nConfiguration file: " + c.ConfigPath
+		}
+		return errors.New("configuration problems:\n  - " + strings.Join(problems, "\n  - ") + hint)
+	}
+	return nil
+}
+
+// ParseFile reads a systemd EnvironmentFile-style KEY=VALUE file.
+func ParseFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open config %s: %w", path, err)
+	}
+	defer f.Close()
+
+	out := map[string]string{}
+	sc := bufio.NewScanner(f)
+	line := 0
+	for sc.Scan() {
+		line++
+		text := strings.TrimSpace(sc.Text())
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		// Tolerate a leading "export " so the same file can also be sourced by a shell.
+		text = strings.TrimPrefix(text, "export ")
+
+		key, value, found := strings.Cut(text, "=")
+		if !found {
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE, got %q", path, line, text)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		if key == "" {
+			return nil, fmt.Errorf("%s:%d: empty key", path, line)
+		}
+		out[key] = value
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	return out, nil
+}
+
+// Redacted returns the configuration as ordered key/value lines with secrets masked,
+// for logging at startup and for the /healthz detail view.
+func (c Config) Redacted() []string {
+	mask := func(s string) string {
+		if s == "" {
+			return "(unset)"
+		}
+		if len(s) <= 8 {
+			return "********"
+		}
+		return s[:4] + "…" + s[len(s)-2:]
+	}
+	return []string{
+		"config_path=" + orNone(c.ConfigPath),
+		"dev=" + strconv.FormatBool(c.Dev),
+		"listen=" + c.ListenAddr,
+		"base_url=" + c.BaseURL,
+		"data=" + c.DataPath,
+		"backup_dir=" + c.BackupDir,
+		"tz=" + c.TZName,
+		"trusted_proxies=" + strings.Join(c.TrustedProxies, ","),
+		"smtp=" + c.SMTPAddr,
+		"mail_from=" + orNone(c.MailFrom),
+		"owner_email=" + orNone(c.OwnerEmail),
+		"vapid_public=" + mask(c.VAPIDPublic),
+		"vapid_private=" + mask(c.VAPIDPrivate),
+		"vapid_subject=" + orNone(c.VAPIDSubject),
+		"alsace_moselle=" + strconv.FormatBool(c.AlsaceMoselle),
+		"source_url=" + orNone(c.SourceURL),
+		"plan_horizon=" + c.PlanHorizon.String(),
+		"tick=" + c.SchedulerTick.String(),
+		"heartbeat_time=" + orNone(c.HeartbeatTime),
+		"log_level=" + c.LogLevel,
+	}
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(unset)"
+	}
+	return s
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func validHHMM(s string) bool {
+	h, m, ok := strings.Cut(s, ":")
+	if !ok || len(h) != 2 || len(m) != 2 {
+		return false
+	}
+	hh, err1 := strconv.Atoi(h)
+	mm, err2 := strconv.Atoi(m)
+	return err1 == nil && err2 == nil && hh >= 0 && hh < 24 && mm >= 0 && mm < 60
+}

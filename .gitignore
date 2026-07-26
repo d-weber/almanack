@@ -1,0 +1,28 @@
+# Build output
+/agenda
+/dist/
+
+# Local development state (DB, dev mail sink, dev push sink, backups)
+/devdata/
+*.db
+*.db-wal
+*.db-shm
+
+# Local env overrides
+.env
+.env.local
+
+# Python caches (tools/)
+__pycache__/
+*.pyc
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# e2e tooling (dev-only, never part of the production build)
+/e2e/node_modules/
+/e2e/test-results/
+/e2e/playwright-report/

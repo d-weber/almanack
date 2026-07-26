@@ -1,0 +1,67 @@
+name: Bug report
+description: Something behaves differently from how it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything security-related, please use
+        [the security policy](https://github.com/../../security/policy) instead of a public issue.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `agenda version`, or the commit you built.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Calendar display (month / week / agenda)
+        - Recurring events
+        - Reminders or notifications
+        - Accounts, invites, sign-in
+        - Installing or running the server
+        - Something else
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### If this is about an event or a reminder
+
+        Three details make a calendar bug reproducible, and they are almost always the
+        ones missing. Please fill in the next section — a bug in a recurring all-day
+        event across a daylight-saving change is a completely different bug from the
+        same symptom on a one-off timed event.
+
+  - type: textarea
+    id: event
+    attributes:
+      label: The event involved
+      description: Timezone, all-day or timed, one-off or recurring (and the repeat rule), and the dates concerned.
+      placeholder: |
+        Timezone: Europe/Paris
+        All-day or timed: timed, 16:30–17:15
+        Recurring: weekly on Tuesdays, from 2026-03-24, no end
+        Dates where it goes wrong: 2026-03-31 (the Sunday after the clocks changed)
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs
+      description: Anything the server printed around the time. Please remove email addresses first.
+      render: text

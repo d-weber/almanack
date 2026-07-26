@@ -1,0 +1,634 @@
+package notify
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strconv"
+	"time"
+
+	"agenda/internal/domain"
+	"agenda/internal/events"
+)
+
+// Plan materializes everything that comes due between now and the horizon.
+//
+// It is safe to call as often as you like: UNIQUE(user_id, kind, source_ref,
+// due_at) with INSERT OR IGNORE means re-planning the same window inserts
+// nothing, and a row that has already been sent or skipped is never resurrected.
+// That structural idempotency is why the scheduler can simply re-plan on every
+// tick instead of tracking what it has already done.
+func (n *Notifier) Plan(ctx context.Context) error {
+	now := n.now()
+	if err := n.checkClock(now); err != nil {
+		return err
+	}
+	return n.plan(ctx, now, now.Add(n.horizon))
+}
+
+// plan enqueues every notification whose slot falls in [from, to]. CatchUp calls
+// it with a `from` in the past to backfill the gap an outage left.
+//
+// One failing user or one malformed reminder must not stop the pass: errors are
+// collected and returned together, and the horizon marker is only advanced when
+// the whole pass was clean, so a partial failure is retried rather than sealed
+// behind a marker that says the work was done.
+func (n *Notifier) plan(ctx context.Context, from, to time.Time) error {
+	if to.Before(from) {
+		from = to
+	}
+	prefs, err := n.st.ListAllPrefs(ctx)
+	if err != nil {
+		return fmt.Errorf("plan: %w", err)
+	}
+	byUser := make(map[int64]domain.NotificationPrefs, len(prefs))
+	for _, p := range prefs {
+		byUser[p.UserID] = p
+	}
+
+	errs := []error{
+		n.planReminders(ctx, from, to),
+		n.planDigests(ctx, from, to, prefs),
+		n.planSummaries(ctx, from, to, prefs),
+		n.planActivity(ctx, byUser),
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("plan: %w", err)
+	}
+	if err := n.st.SetMeta(ctx, MetaPlannedThrough, to.Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("plan: record horizon: %w", err)
+	}
+	return nil
+}
+
+// plannedThrough reads how far the planner last got. A missing or unparseable
+// value is treated as "never planned", which makes CatchUp a no-op backfill on a
+// fresh database rather than a walk back to the epoch.
+func (n *Notifier) plannedThrough(ctx context.Context) (time.Time, error) {
+	v, err := n.st.GetMeta(ctx, MetaPlannedThrough)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if v == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		slog.Warn("planner horizon marker is unreadable, treating it as unset", "value", v, "error", err)
+		return time.Time{}, nil
+	}
+	return t.UTC(), nil
+}
+
+func (n *Notifier) enqueue(ctx context.Context, userID int64, kind domain.NotificationKind, sourceRef string, p payload, due time.Time) error {
+	body, err := encodePayload(p)
+	if err != nil {
+		return err
+	}
+	return n.st.EnqueueNotification(ctx, domain.QueuedNotification{
+		UserID:    userID,
+		Kind:      kind,
+		SourceRef: sourceRef,
+		Payload:   body,
+		DueAt:     due.UTC().Truncate(time.Second),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Reminders
+// ---------------------------------------------------------------------------
+
+// planReminders walks every reminder in the database — a few hundred rows at
+// family scale — grouped by owner, because the visibility rules that decide
+// whether a person may be reminded about an occurrence are per person.
+func (n *Notifier) planReminders(ctx context.Context, from, to time.Time) error {
+	all, err := n.st.ListAllReminders(ctx)
+	if err != nil {
+		return err
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	byUser := map[int64][]domain.Reminder{}
+	for _, r := range all {
+		byUser[r.UserID] = append(byUser[r.UserID], r)
+	}
+	users := make([]int64, 0, len(byUser))
+	for id := range byUser {
+		users = append(users, id)
+	}
+	sort.Slice(users, func(i, j int) bool { return users[i] < users[j] })
+
+	var errs []error
+	for _, userID := range users {
+		if err := n.planUserReminders(ctx, userID, byUser[userID], from, to); err != nil {
+			errs = append(errs, fmt.Errorf("reminders for user %d: %w", userID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []domain.Reminder, from, to time.Time) error {
+	byEvent := map[int64][]domain.Reminder{}
+	byRecurrence := map[int64][]domain.Reminder{}
+	var maxLead time.Duration
+	for _, r := range rs {
+		switch {
+		case r.EventID != nil:
+			byEvent[*r.EventID] = append(byEvent[*r.EventID], r)
+		case r.RecurrenceID != nil:
+			byRecurrence[*r.RecurrenceID] = append(byRecurrence[*r.RecurrenceID], r)
+		default:
+			continue // the schema's CHECK forbids this; be defensive anyway
+		}
+		if l := lead(r); l > maxLead {
+			maxLead = l
+		}
+	}
+
+	// A reminder fires before its occurrence, so the occurrences that can produce
+	// a slot inside [from, to] reach as far ahead as the longest lead. Bounding
+	// the expansion window by the actual reminders rather than by a guess is what
+	// keeps "two weeks before Maman's birthday" working without expanding a year
+	// of recurrences on every tick.
+	//
+	// The extra day on each side covers all-day reminders, whose slot can land up
+	// to a day after the start of the day they are anchored to.
+	fromDate := domain.DateIn(from, n.loc).AddDays(-1)
+	toDate := domain.DateIn(to.Add(maxLead), n.loc).AddDays(1)
+
+	occs, err := n.ev.UserOccurrences(ctx, userID, fromDate, toDate)
+	if err != nil {
+		return err
+	}
+
+	recurrenceOfSeries := map[int64]*int64{}
+	var errs []error
+	for _, occ := range occs {
+		// Source references are keyed on the *series* event for a recurring
+		// occurrence, because that is the id internal/events prunes by when an
+		// occurrence moves or the series changes shape.
+		sourceEvent := occ.Event.ID
+		if occ.SeriesEventID != nil {
+			sourceEvent = *occ.SeriesEventID
+		}
+
+		seen := map[int64]bool{}
+		var cands []domain.Reminder
+		add := func(list []domain.Reminder) {
+			for _, r := range list {
+				if !seen[r.ID] {
+					seen[r.ID] = true
+					cands = append(cands, r)
+				}
+			}
+		}
+		add(byEvent[occ.Event.ID])
+		if sourceEvent != occ.Event.ID {
+			add(byEvent[sourceEvent])
+		}
+
+		recurrenceID := occ.RecurrenceID
+		if recurrenceID == nil && occ.SeriesEventID != nil {
+			// An override copy is a standalone event row, so its series-level
+			// reminders have to be found through the template it replaced.
+			rid, err := n.recurrenceOfSeries(ctx, *occ.SeriesEventID, recurrenceOfSeries)
+			if err != nil {
+				errs = append(errs, err)
+			} else {
+				recurrenceID = rid
+			}
+		}
+		if recurrenceID != nil {
+			add(byRecurrence[*recurrenceID])
+		}
+
+		for _, r := range cands {
+			due, ok := n.reminderDue(occ, r)
+			if !ok {
+				continue
+			}
+			if due.Before(from) || due.After(to) {
+				continue
+			}
+			p := payload{
+				Kind:     domain.KindReminder,
+				EventID:  sourceEvent,
+				OccDate:  occ.OccurrenceDate,
+				Title:    truncateRunes(occ.Title, maxTitleRunes),
+				Location: truncateRunes(occ.Location, maxTitleRunes),
+				AllDay:   occ.AllDay,
+			}
+			if occ.AllDay {
+				p.EventDate = occ.StartDate
+			} else {
+				p.EventStart = occ.StartsAt.UTC()
+			}
+			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID)
+			if err := n.enqueue(ctx, userID, domain.KindReminder, ref, p, due); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// recurrenceOfSeries resolves a series template event id to its recurrence id,
+// memoised for the pass.
+func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
+	if rid, ok := cache[eventID]; ok {
+		return rid, nil
+	}
+	e, err := n.st.EventByID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("series template %d: %w", eventID, err)
+	}
+	cache[eventID] = e.RecurrenceID
+	return e.RecurrenceID, nil
+}
+
+// lead is how far ahead of its occurrence a reminder fires, used only to size the
+// expansion window. The all-day case adds a day because at_time_local can be late
+// in the day the reminder is anchored to.
+func lead(r domain.Reminder) time.Duration {
+	switch {
+	case r.OffsetMinutes != nil:
+		if d := time.Duration(*r.OffsetMinutes) * time.Minute; d > 0 {
+			return d
+		}
+	case r.DaysBefore != nil:
+		if *r.DaysBefore >= 0 {
+			return time.Duration(*r.DaysBefore+1) * 24 * time.Hour
+		}
+	}
+	return 0
+}
+
+// reminderDue computes the instant a reminder fires for one occurrence.
+//
+// The two shapes are stored differently because they are different: a timed event
+// is "N minutes before the start", which is an offset in absolute time; an all-day
+// event is "09:00, D days before", which is a wall-clock time in the family
+// timezone and cannot be expressed as an offset from midnight. Doing the all-day
+// arithmetic in local time is also what makes it survive a DST change: 09:00 stays
+// 09:00 whether that is 08:00 or 07:00 UTC.
+//
+// The cross-shape cases (a timed reminder left behind on an event that was turned
+// all-day, or the reverse) are handled rather than dropped. A reminder that stops
+// firing because someone ticked "journée entière" is exactly the silent failure
+// this application exists to prevent.
+func (n *Notifier) reminderDue(occ domain.Occurrence, r domain.Reminder) (time.Time, bool) {
+	if occ.AllDay {
+		d := occ.StartDate
+		if d.IsZero() {
+			return time.Time{}, false
+		}
+		if r.DaysBefore != nil {
+			h, m, ok := parseHM(r.AtTimeLocal)
+			if !ok {
+				slog.Warn("reminder has an unreadable at_time_local", "reminder", r.ID, "value", r.AtTimeLocal)
+				return time.Time{}, false
+			}
+			return d.AddDays(-*r.DaysBefore).At(h, m, n.loc), true
+		}
+		if r.OffsetMinutes != nil {
+			return d.In(n.loc).Add(-time.Duration(*r.OffsetMinutes) * time.Minute), true
+		}
+		return time.Time{}, false
+	}
+
+	if occ.StartsAt.IsZero() {
+		return time.Time{}, false
+	}
+	if r.OffsetMinutes != nil {
+		return occ.StartsAt.Add(-time.Duration(*r.OffsetMinutes) * time.Minute), true
+	}
+	if r.DaysBefore != nil {
+		h, m, ok := parseHM(r.AtTimeLocal)
+		if !ok {
+			slog.Warn("reminder has an unreadable at_time_local", "reminder", r.ID, "value", r.AtTimeLocal)
+			return time.Time{}, false
+		}
+		return domain.DateIn(occ.StartsAt, n.loc).AddDays(-*r.DaysBefore).At(h, m, n.loc), true
+	}
+	return time.Time{}, false
+}
+
+// ---------------------------------------------------------------------------
+// Digests
+// ---------------------------------------------------------------------------
+
+// planDigests queues one row per enabled user per day, at their chosen local
+// time, carrying that day's occurrences.
+func (n *Notifier) planDigests(ctx context.Context, from, to time.Time, prefs []domain.NotificationPrefs) error {
+	var errs []error
+	days := daysCovering(from, to, n.loc)
+	for _, p := range prefs {
+		if !p.DigestEnabled {
+			continue
+		}
+		h, m, ok := parseHM(p.DigestTime)
+		if !ok {
+			slog.Warn("digest time is unreadable, skipping this user", "user", p.UserID, "value", p.DigestTime)
+			continue
+		}
+		for _, day := range days {
+			// The slot is a wall-clock time in the family timezone, so it lands
+			// on a different UTC instant either side of a DST change — which is
+			// the whole point: 07:30 is 07:30 in March and in November.
+			due := day.At(h, m, n.loc)
+			if due.Before(from) || due.After(to) {
+				continue
+			}
+			occs, err := n.ev.UserOccurrences(ctx, p.UserID, day, day)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("digest for user %d on %s: %w", p.UserID, day, err))
+				continue
+			}
+			if len(occs) == 0 && !p.DigestOnEmpty {
+				continue
+			}
+			if err := n.enqueue(ctx, p.UserID, domain.KindDigest, events.DigestSourceRef(day), digestPayload(day, occs), due); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// digestPayload keeps a count and the first few truncated titles. The client
+// fetches the rest on notificationclick, which is what keeps the encrypted body
+// under the aes128gcm ceiling on a busy Saturday.
+func digestPayload(day domain.Date, occs []domain.Occurrence) payload {
+	p := payload{Kind: domain.KindDigest, Day: day, Total: len(occs)}
+	for i, occ := range occs {
+		if i >= maxDigestItems {
+			break
+		}
+		it := digestItem{Title: truncateRunes(occ.Title, maxTitleRunes), AllDay: occ.AllDay}
+		if !occ.AllDay {
+			it.StartsAt = occ.StartsAt.UTC()
+		}
+		p.Items = append(p.Items, it)
+	}
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// Summaries
+// ---------------------------------------------------------------------------
+
+// planSummaries queues the batched activity notification for users who asked for
+// one instead of a push per change.
+//
+// Its payload is deliberately empty of content: the changes a summary reports have
+// not happened yet when the row is materialized up to 48 hours ahead. The count and
+// the wording are resolved at delivery time, and a day with nothing to report is
+// skipped there rather than pushed.
+func (n *Notifier) planSummaries(ctx context.Context, from, to time.Time, prefs []domain.NotificationPrefs) error {
+	var errs []error
+	days := daysCovering(from, to, n.loc)
+	for _, p := range prefs {
+		if !p.DailySummaryMode {
+			continue
+		}
+		h, m, ok := parseHM(p.SummaryTime)
+		if !ok {
+			slog.Warn("summary time is unreadable, skipping this user", "user", p.UserID, "value", p.SummaryTime)
+			continue
+		}
+		for _, day := range days {
+			due := day.At(h, m, n.loc)
+			if due.Before(from) || due.After(to) {
+				continue
+			}
+			pl := payload{Kind: domain.KindSummary, Day: day}
+			if err := n.enqueue(ctx, p.UserID, domain.KindSummary, events.SummarySourceRef(day), pl, due); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// ---------------------------------------------------------------------------
+// Activity
+// ---------------------------------------------------------------------------
+
+// planActivity turns new activity_log rows into notifications for the members they
+// concern.
+//
+// Notifying from the log rather than from the edit itself is what makes the
+// pipeline crash-proof: the edit and its log row land in the same transaction, so
+// a crash between the edit and the notification loses nothing — the next pass
+// finds the row still sitting past the cursor.
+//
+// Activity rows are exempt from the [from, to] window: their slot is when the
+// change happened, which is always in the past, and they are meant to go out on
+// the next tick.
+func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.NotificationPrefs) error {
+	cals, err := n.allCalendarIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(cals) == 0 {
+		return nil
+	}
+	raw, err := n.st.GetMeta(ctx, MetaActivityCursor)
+	if err != nil {
+		return err
+	}
+	if raw == "" {
+		// First ever pass. Start from the present: replaying a decade of history
+		// into everyone's notification tray is not a welcome.
+		newest, err := n.st.ListActivity(ctx, cals, 1, time.Time{})
+		if err != nil {
+			return err
+		}
+		var start int64
+		if len(newest) > 0 {
+			start = newest[0].ID
+		}
+		return n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(start, 10))
+	}
+	cursor, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fmt.Errorf("activity cursor %q is unreadable: %w", raw, err)
+	}
+
+	acts, err := n.activitySince(ctx, cals, cursor)
+	if err != nil {
+		return err
+	}
+
+	actors := map[int64]string{}
+	calendars := map[int64]string{}
+	highest := cursor
+	var errs []error
+	for _, a := range acts {
+		if err := n.planOneActivity(ctx, a, prefs, actors, calendars); err != nil {
+			errs = append(errs, err)
+			continue // do not advance past a row that failed to fan out
+		}
+		if a.ID > highest {
+			highest = a.ID
+		}
+	}
+	if highest != cursor {
+		// The cursor moves only after the rows are durably in the outbox, so a
+		// crash in between re-reads them and INSERT OR IGNORE absorbs the repeat.
+		if err := n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(highest, 10)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs map[int64]domain.NotificationPrefs,
+	actors, calendars map[int64]string) error {
+
+	members, err := n.st.ListMembers(ctx, a.CalendarID)
+	if err != nil {
+		return fmt.Errorf("members of calendar %d: %w", a.CalendarID, err)
+	}
+	if _, ok := actors[a.UserID]; !ok {
+		u, err := n.st.UserByID(ctx, a.UserID)
+		if err != nil {
+			// A removed member's changes still happened; name them nothing
+			// rather than dropping the notification.
+			actors[a.UserID] = ""
+		} else {
+			actors[a.UserID] = u.DisplayName
+		}
+	}
+	if _, ok := calendars[a.CalendarID]; !ok {
+		c, err := n.st.CalendarByID(ctx, a.CalendarID)
+		if err != nil {
+			return fmt.Errorf("calendar %d: %w", a.CalendarID, err)
+		}
+		calendars[a.CalendarID] = c.Name
+	}
+
+	var participants []int64
+	if a.EventID != nil && a.Action != domain.ActionEventDeleted {
+		if ps, err := n.st.ListParticipants(ctx, *a.EventID); err == nil {
+			participants = ps
+		}
+	}
+
+	p := payload{
+		Kind:       domain.KindActivity,
+		ActivityID: a.ID,
+		Action:     a.Action,
+		Actor:      actors[a.UserID],
+		Calendar:   truncateRunes(calendars[a.CalendarID], maxTitleRunes),
+		Title:      truncateRunes(a.Title, maxTitleRunes),
+	}
+	if a.EventID != nil {
+		p.EventID = *a.EventID
+	}
+	ref := events.ActivitySourceRef(a.ID)
+
+	var errs []error
+	for _, m := range members {
+		switch {
+		case m.UserID == a.UserID: // nobody needs telling what they just did
+			continue
+		case m.Muted:
+			continue
+		}
+		pr, ok := prefs[m.UserID]
+		if !ok || !pr.ActivityPush || pr.DailySummaryMode {
+			// Summary mode replaces individual activity pushes with one batched
+			// row per day; sending both would defeat the setting.
+			continue
+		}
+		// A deleted event has no participant rows left to check, so
+		// participating-only cannot filter it; the change still concerns the
+		// calendar and goes out.
+		if m.ParticipatingOnly && participants != nil && !containsID(participants, m.UserID) {
+			continue
+		}
+		if err := n.enqueue(ctx, m.UserID, domain.KindActivity, ref, p, a.At); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// activitySince returns log entries newer than cursor, oldest first.
+//
+// The store exposes ListActivity as a newest-first, time-cursored feed for the
+// activity screen, so this pages backwards until it meets the cursor. Between two
+// 30-second ticks a family produces a handful of rows and the first page is always
+// enough; the loop exists for the catch-up case.
+func (n *Notifier) activitySince(ctx context.Context, cals []int64, cursor int64) ([]domain.Activity, error) {
+	const page = 200
+	var out []domain.Activity
+	seen := map[int64]bool{}
+	var before time.Time
+
+	for pass := 0; pass < 50; pass++ {
+		batch, err := n.st.ListActivity(ctx, cals, page, before)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		reached := false
+		for _, a := range batch {
+			if a.ID <= cursor {
+				reached = true
+				continue
+			}
+			if !seen[a.ID] {
+				seen[a.ID] = true
+				out = append(out, a)
+			}
+		}
+		oldest := batch[len(batch)-1].At
+		if reached || len(batch) < page {
+			break
+		}
+		if !before.IsZero() && !oldest.Before(before) {
+			break // the cursor stopped moving; stop rather than loop forever
+		}
+		before = oldest
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// allCalendarIDs is the union of every user's calendars.
+//
+// The store has no "list all calendars" — every read is scoped to a member, which
+// is the right default for an authorisation-sensitive API. The planner is the one
+// caller that legitimately needs the whole set, and at family scale the union of
+// ten memberships is cheaper than adding an unscoped query somebody could later
+// reach for from a handler.
+func (n *Notifier) allCalendarIDs(ctx context.Context) ([]int64, error) {
+	users, err := n.st.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	for _, u := range users {
+		cals, err := n.st.ListCalendarsForUser(ctx, u.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range cals {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				out = append(out, c.ID)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}

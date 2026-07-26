@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest something the calendar should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [the architecture document](../../blob/main/docs/architecture.md#what-it-deliberately-does-not-do)
+        first. CalDAV and calendar sync, per-event chat, photo albums, shared lists and
+        multi-tenancy are deliberate omissions rather than missing work, and a request
+        for one of those is likely to be declined — though a good argument is welcome.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that is awkward or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. The problem matters more than the proposed solution.
+
+  - type: textarea
+    id: group
+    attributes:
+      label: Your group
+      description: Who uses this calendar — a family, a team, a club? How many people? It helps to know who a change would serve.

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Matches the floor in go.mod: crypto/hkdf entered the standard library in 1.24.
+          go-version: '1.24'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # The scheduler shares state with HTTP handlers, so the race detector earns its
+      # place in CI rather than being something to remember to run.
+      - name: Test with the race detector
+        run: go test -race ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/agenda
+
+  frontend:
+    name: Frontend integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The browser code has no toolchain, so these are the checks a build step would
+      # otherwise have caught: unresolved module imports, a module missing from the
+      # service worker's precache list, and translation keys used but never defined.
+      - name: Check imports, precache list and translations
+        run: python3 .github/scripts/check_frontend.py

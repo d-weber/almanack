@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Agenda">
+  <title>Agenda</title>
+  <rect width="512" height="512" rx="112" ry="112" fill="#3b7ddd"/>
+  <rect x="160" y="88" width="28" height="68" rx="14" fill="#dbe6f8"/>
+  <rect x="324" y="88" width="28" height="68" rx="14" fill="#dbe6f8"/>
+  <rect x="96" y="128" width="320" height="288" rx="40" ry="40" fill="#ffffff"/>
+  <path d="M96 168a40 40 0 0 1 40-40h240a40 40 0 0 1 40 40v34H96z" fill="#2f68bd"/>
+  <circle cx="172" cy="270" r="24" fill="#e8743b"/>
+  <circle cx="256" cy="270" r="24" fill="#3aa757"/>
+  <circle cx="340" cy="270" r="24" fill="#d6558a"/>
+  <circle cx="172" cy="348" r="24" fill="#e0a800"/>
+  <circle cx="256" cy="348" r="24" fill="#7952b3"/>
+  <circle cx="340" cy="348" r="24" fill="#dbe6f8"/>
+</svg>
