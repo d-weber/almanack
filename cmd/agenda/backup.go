@@ -4,13 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"agenda/internal/clock"
 	"agenda/internal/config"
+	"agenda/internal/httpapi"
+	"agenda/internal/store"
 )
 
 // Backups are the last line of defence for a family's calendar, so this command is
@@ -24,7 +28,15 @@ import (
 // rather than the source is what turns silent corruption into a loud failure: a
 // non-zero exit here is the signal the operator alerts on.
 
-const backupTimeLayout = "20060102-1504"
+const backupTimeLayout = "20060102-150405"
+
+// uriPath percent-encodes the characters that would otherwise be read as URI syntax,
+// so a data directory containing '?' or '#' opens the file it names rather than a
+// different, empty database.
+func uriPath(p string) string {
+	r := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
+	return r.Replace(p)
+}
 
 type backupResult struct {
 	Path    string
@@ -33,7 +45,40 @@ type backupResult struct {
 	Pruned  int
 }
 
+// runBackup takes a snapshot and records the outcome where /healthz can find it.
+//
+// Recording matters as much as the snapshot: the health endpoint has always known
+// how to report "the last backup is too old", but nothing wrote the value, so the
+// check could never fire. A server whose backup timer was never installed reported
+// itself healthy indefinitely — the exact silent failure the whole design is
+// arranged to prevent.
 func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (backupResult, error) {
+	res, err := takeBackup(ctx, cfg, dir, prune)
+	outcome := "ok"
+	if err != nil {
+		outcome = err.Error()
+	}
+	if noteErr := recordBackupOutcome(ctx, cfg, outcome); noteErr != nil {
+		slog.Warn("could not record the backup result for /healthz", "error", noteErr)
+	}
+	return res, err
+}
+
+// recordBackupOutcome opens the live database briefly to leave a breadcrumb. A
+// failure here is reported but never masks the backup's own result.
+func recordBackupOutcome(ctx context.Context, cfg config.Config, outcome string) error {
+	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clock.Real{})
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := st.SetMeta(ctx, httpapi.MetaLastBackupAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	return st.SetMeta(ctx, httpapi.MetaLastBackupResult, outcome)
+}
+
+func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (backupResult, error) {
 	start := time.Now()
 	if dir == "" {
 		dir = cfg.BackupDir
@@ -55,7 +100,12 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 	// on the leftover from the previous attempt.
 	_ = os.Remove(tmp)
 
-	src, err := sql.Open("sqlite", "file:"+cfg.DataPath+"?_pragma=busy_timeout(10000)")
+	// sql.Open would happily create a database at a path that does not exist — on an
+	// unmounted volume that means silently backing up nothing.
+	if _, err := os.Stat(cfg.DataPath); err != nil {
+		return backupResult{}, fmt.Errorf("database %s: %w", cfg.DataPath, err)
+	}
+	src, err := sql.Open("sqlite", "file:"+uriPath(cfg.DataPath)+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		return backupResult{}, fmt.Errorf("open database: %w", err)
 	}
@@ -90,7 +140,7 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 	res := backupResult{Path: final, Bytes: info.Size(), Elapsed: time.Since(start)}
 
 	if prune {
-		n, err := pruneBackups(dir, cfg)
+		n, err := pruneBackups(dir, cfg, filepath.Base(final))
 		if err != nil {
 			return res, fmt.Errorf("prune old snapshots: %w", err)
 		}
@@ -102,7 +152,7 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 // verify runs SQLite's own integrity check against the snapshot. Checking the copy is
 // the point: a backup that faithfully preserves a corrupt page is not a backup.
 func verify(ctx context.Context, path string) error {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(10000)")
+	db, err := sql.Open("sqlite", "file:"+uriPath(path)+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		return fmt.Errorf("open snapshot for verification: %w", err)
 	}
@@ -132,6 +182,32 @@ func verify(ctx context.Context, path string) error {
 			strings.Join(problems, "\n  "))
 	}
 
+	// integrity_check validates the b-trees, not the relationships between them.
+	// Orphan rows are something the application itself can produce, and a snapshot
+	// is the last place they should pass unnoticed.
+	fkRows, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("foreign key check: %w", err)
+	}
+	var broken []string
+	for fkRows.Next() {
+		var table, parent string
+		var rowid, fkid sql.NullInt64
+		if err := fkRows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			fkRows.Close()
+			return fmt.Errorf("foreign key check: %w", err)
+		}
+		broken = append(broken, fmt.Sprintf("%s row %d references a missing %s", table, rowid.Int64, parent))
+	}
+	fkRows.Close()
+	if err := fkRows.Err(); err != nil {
+		return fmt.Errorf("foreign key check: %w", err)
+	}
+	if len(broken) > 0 {
+		return fmt.Errorf("snapshot has %d dangling reference(s) — the database is inconsistent:\n  %s",
+			len(broken), strings.Join(broken, "\n  "))
+	}
+
 	// A structurally sound file that is not this application's database would also
 	// pass integrity_check, so confirm the schema is present too.
 	var n int
@@ -147,7 +223,14 @@ func verify(ctx context.Context, path string) error {
 // pruneBackups keeps generations rather than a flat window: hourly for a couple of
 // days, then one a day, one a week, one a month. Corruption is often noticed late,
 // and a flat "keep 14 days" quietly destroys every clean copy while nobody is looking.
-func pruneBackups(dir string, cfg config.Config) (int, error) {
+func pruneBackups(dir string, cfg config.Config, keepAlways string) (int, error) {
+	// Every limit at zero reads naturally as "do not prune", and used to mean the
+	// opposite: no bucket kept anything, so the sweep removed every snapshot in the
+	// directory — including the one this run had just written and already reported
+	// as a success.
+	if cfg.KeepHourly <= 0 && cfg.KeepDaily <= 0 && cfg.KeepWeekly <= 0 && cfg.KeepMonthly <= 0 {
+		return 0, nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err
@@ -173,6 +256,11 @@ func pruneBackups(dir string, cfg config.Config) (int, error) {
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].when.After(snaps[j].when) })
 
 	keep := map[string]bool{}
+	// Whatever the retention arithmetic says, the snapshot this run just verified
+	// is not a candidate for deletion.
+	if keepAlways != "" {
+		keep[keepAlways] = true
+	}
 	buckets := []struct {
 		limit  int
 		format string

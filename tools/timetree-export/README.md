@@ -4,7 +4,7 @@ Dumps every TimeTree calendar an account can see, as raw JSON, using the private
 the TimeTree web app uses. TimeTree has no export feature; this is the only way out.
 
 Standard library only, Python 3.10+. Nothing to install. What to do with the output is
-[docs/timetree-migration.md](../../docs/timetree-migration.md).
+[docs/timetree-migration.md](../../docs/migrating-from-timetree.md).
 
 ## Preferred: borrow a browser session
 

@@ -6,6 +6,13 @@
 # Go may not be on PATH (it is installed under ~/.local/go for this machine).
 GO ?= $(shell command -v go 2>/dev/null || echo $(HOME)/.local/go/bin/go)
 
+ifeq ($(wildcard $(GO)),)
+ifeq ($(shell command -v $(GO) 2>/dev/null),)
+$(error Go 1.25+ is required and was not found. Install it from https://go.dev/dl/ \
+or set GO=/path/to/go)
+endif
+endif
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 DEVDATA := devdata
@@ -42,6 +49,7 @@ test-v: ## Run all tests, verbose
 
 .PHONY: cover
 cover: ## Run tests with a coverage summary
+	@mkdir -p $(DEVDATA)
 	$(GO) test -coverprofile=$(DEVDATA)/coverage.out ./... && \
 	$(GO) tool cover -func=$(DEVDATA)/coverage.out | tail -30
 
@@ -106,8 +114,11 @@ vendor: ## Vendor and pin every dependency (run before tagging a release)
 
 .PHONY: e2e
 e2e: ## Browser smoke tests (dev-only; needs npx playwright)
-	@command -v npx >/dev/null 2>&1 || { echo "npx not installed — skipping browser tests"; exit 0; }
-	cd e2e && npx playwright test
+	@if command -v npx >/dev/null 2>&1; then \
+		cd e2e && npx playwright test; \
+	else \
+		echo "npx not installed — skipping browser tests"; \
+	fi
 
 .PHONY: clean
 clean: ## Remove build output and local dev state

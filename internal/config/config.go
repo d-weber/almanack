@@ -27,6 +27,21 @@ import (
 // DefaultPath is consulted when no config path is given and the file exists.
 const DefaultPath = "/etc/agenda/agenda.conf"
 
+// known is every setting this binary reads, so a misspelling can be reported rather
+// than ignored. Keep it in step with agenda.conf.example.
+var known = map[string]bool{
+	"AGENDA_CONFIG": true, "AGENDA_DEV": true, "AGENDA_LISTEN": true,
+	"AGENDA_BASE_URL": true, "AGENDA_DATA": true, "AGENDA_BACKUP_DIR": true,
+	"AGENDA_TZ": true, "AGENDA_ALSACE_MOSELLE": true, "AGENDA_SOURCE_URL": true,
+	"AGENDA_TRUSTED_PROXIES": true, "AGENDA_SMTP": true, "AGENDA_MAIL_FROM": true,
+	"AGENDA_OWNER_EMAIL": true, "AGENDA_MAIL_DIR": true, "AGENDA_HEARTBEAT_TIME": true,
+	"AGENDA_VAPID_PUBLIC": true, "AGENDA_VAPID_PRIVATE": true, "AGENDA_VAPID_SUBJECT": true,
+	"AGENDA_PLAN_HORIZON": true, "AGENDA_TICK": true,
+	"AGENDA_BACKUP_KEEP_HOURLY": true, "AGENDA_BACKUP_KEEP_DAILY": true,
+	"AGENDA_BACKUP_KEEP_WEEKLY": true, "AGENDA_BACKUP_KEEP_MONTHLY": true,
+	"AGENDA_LOG_LEVEL": true, "AGENDA_LOG_FORMAT": true,
+}
+
 // DefaultSourceURL is deliberately empty: only whoever publishes a build knows where
 // its source lives. Set AGENDA_SOURCE_URL and the About screen links to it — which is
 // how an AGPL-3.0 network service offers its source to the people using it (section
@@ -126,6 +141,11 @@ func Load(path string) (Config, error) {
 		}
 		return def
 	}
+	// A misspelt value used to fall back to the default in silence, so
+	// AGENDA_ALSACE_MOSELLE=yes — the natural spelling — quietly switched the two
+	// extra public holidays back off. Collect the complaint instead; the reporting
+	// at the end of Load already knows how to present it.
+	var bad []string
 	getBool := func(key string, def bool) bool {
 		v := get(key, "")
 		if v == "" {
@@ -133,6 +153,7 @@ func Load(path string) (Config, error) {
 		}
 		b, err := strconv.ParseBool(v)
 		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s=%q is not a true/false value (use true or false)", key, v))
 			return def
 		}
 		return b
@@ -144,6 +165,7 @@ func Load(path string) (Config, error) {
 		}
 		n, err := strconv.Atoi(v)
 		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s=%q is not a whole number", key, v))
 			return def
 		}
 		return n
@@ -155,6 +177,7 @@ func Load(path string) (Config, error) {
 		}
 		d, err := time.ParseDuration(v)
 		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s=%q is not a duration (try 30s, 10m, 48h)", key, v))
 			return def
 		}
 		return d
@@ -219,19 +242,45 @@ func Load(path string) (Config, error) {
 		c.BackupDir = filepath.Join(filepath.Dir(c.DataPath), "backups")
 	}
 
-	if err := c.validate(); err != nil {
+	// An unrecognised key is almost always a typo, and the settings are a closed set
+	// — silently ignoring AGENDA_TZZ books every event in the wrong timezone.
+	for key := range file {
+		if !strings.HasPrefix(key, "AGENDA_") {
+			continue
+		}
+		if !known[key] {
+			bad = append(bad, fmt.Sprintf("%s is not a setting this version understands (check the spelling against agenda.conf.example)", key))
+		}
+	}
+
+	if err := c.validate(bad); err != nil {
 		return Config{}, err
 	}
 	return c, nil
 }
 
-func (c Config) validate() error {
-	var problems []string
+func (c Config) validate(problems []string) error {
 	if c.DataPath == "" {
 		problems = append(problems, "AGENDA_DATA is required (path to the SQLite file)")
 	}
 	if c.BaseURL == "" {
 		problems = append(problems, "AGENDA_BASE_URL is required (used in invite links and emails)")
+	}
+	switch strings.ToLower(c.LogLevel) {
+	case "debug", "info", "warn", "error":
+	default:
+		problems = append(problems, fmt.Sprintf("AGENDA_LOG_LEVEL=%q must be debug, info, warn or error", c.LogLevel))
+	}
+	switch strings.ToLower(c.LogFormat) {
+	case "text", "json":
+	default:
+		problems = append(problems, fmt.Sprintf("AGENDA_LOG_FORMAT=%q must be text or json", c.LogFormat))
+	}
+	if c.PlanHorizon <= 0 {
+		problems = append(problems, "AGENDA_PLAN_HORIZON must be positive")
+	}
+	if c.SchedulerTick <= 0 {
+		problems = append(problems, "AGENDA_TICK must be positive")
 	}
 	if c.HeartbeatTime != "" && !validHHMM(c.HeartbeatTime) {
 		problems = append(problems, "AGENDA_HEARTBEAT_TIME must be HH:MM (or empty to disable)")

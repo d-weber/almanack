@@ -10,11 +10,11 @@ One static Go binary. One SQLite file. A hand-written PWA with no build step.
 ![Month view](docs/screenshots/month-desktop-light.png)
 
 ```sh
-git clone <this repo> && cd agenda
 make seed && make dev          # http://localhost:8080 — maman@example.org / motdepasse
 ```
 
-That is the entire setup. No npm, no Docker, no database server, no API keys.
+That is the entire setup. [Go 1.25+](https://go.dev/dl/) is the only prerequisite —
+no npm, no Docker, no database server, no API keys.
 
 ## What you get
 

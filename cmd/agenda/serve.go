@@ -66,6 +66,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		Store: st, Events: eventSvc, Push: sender, Mailer: mail, Catalog: catalog,
 		Clock: clk, Location: cfg.FamilyTZ, BaseURL: cfg.BaseURL,
 		Horizon: cfg.PlanHorizon, Tick: cfg.SchedulerTick,
+		OwnerEmail: cfg.OwnerEmail, HeartbeatTime: cfg.HeartbeatTime,
 	})
 	if err != nil {
 		return fmt.Errorf("notification scheduler: %w", err)

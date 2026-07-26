@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -225,6 +226,21 @@ func (s *Server) handleUserAvatar(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	// Every other id-scoped route is gated on membership; this one was not, so any
+	// account could walk the id space and collect the avatars of people it shares no
+	// calendar with. Answer 404 rather than 403: whether that id exists is itself
+	// something the caller has no business learning.
+	if id != userOf(r.Context()).ID {
+		shared, err := s.sharesACalendar(r.Context(), userOf(r.Context()).ID, id)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if !shared {
+			fail(w, r, fmt.Errorf("avatar of user %d: %w", id, domain.ErrNotFound))
+			return
+		}
+	}
 	data, err := s.store.Avatar(r.Context(), id)
 	if err != nil {
 		fail(w, r, err)
@@ -245,4 +261,23 @@ func (s *Server) handleUserAvatar(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("write avatar", "user", id, "error", err)
 	}
+}
+
+// sharesACalendar reports whether two people can see each other at all — the
+// membership relation the rest of the API gates on, asked from the other direction.
+func (s *Server) sharesACalendar(ctx context.Context, a, b int64) (bool, error) {
+	cals, err := s.store.ListCalendarsForUser(ctx, a)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range cals {
+		member, err := s.store.IsMember(ctx, c.ID, b)
+		if err != nil {
+			return false, err
+		}
+		if member {
+			return true, nil
+		}
+	}
+	return false, nil
 }

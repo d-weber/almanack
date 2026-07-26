@@ -13,7 +13,7 @@ work. Most review comments a change would otherwise attract are already answered
 
 ## Getting set up
 
-Go 1.24 or newer, and nothing else.
+Go 1.25 or newer, and nothing else.
 
 ```sh
 make seed && make dev     # http://localhost:8080 — maman@example.org / motdepasse

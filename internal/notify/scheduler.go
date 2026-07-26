@@ -148,6 +148,12 @@ func (n *Notifier) Tick(ctx context.Context) error {
 	n.noteStep(now)
 
 	err := errors.Join(n.Plan(ctx), n.Dispatch(ctx))
+	// The operator's daily note rides the same loop. A failure to send it is
+	// reported but must not mark the tick itself as failed: the family's reminders
+	// matter more than the housekeeping mail.
+	if hbErr := n.maybeSendHeartbeat(ctx); hbErr != nil {
+		slog.Error("daily heartbeat", "error", hbErr)
+	}
 	n.noteTick(now, err)
 	return err
 }

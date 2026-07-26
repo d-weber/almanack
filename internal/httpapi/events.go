@@ -45,11 +45,11 @@ type reminderRequest struct {
 // what an edit *means* — overrides, splitting, which reminders survive — lives in
 // internal/events; this only translates.
 func (req eventRequest) input() (events.Input, error) {
-	title, err := cleanText(req.Title, maxNameLen*2, "the title")
+	title, err := cleanSingleLine(req.Title, maxNameLen*2, "the title")
 	if err != nil {
 		return events.Input{}, err
 	}
-	location, err := cleanText(req.Location, maxNameLen*3, "the location")
+	location, err := cleanSingleLine(req.Location, maxNameLen*3, "the location")
 	if err != nil {
 		return events.Input{}, err
 	}

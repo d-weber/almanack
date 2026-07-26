@@ -48,6 +48,9 @@ func (n *Notifier) plan(ctx context.Context, from, to time.Time) error {
 		byUser[p.UserID] = p
 	}
 
+	n.planned = map[string]bool{}
+	defer func() { n.planned = nil }()
+
 	errs := []error{
 		n.planReminders(ctx, from, to),
 		n.planDigests(ctx, from, to, prefs),
@@ -55,7 +58,12 @@ func (n *Notifier) plan(ctx context.Context, from, to time.Time) error {
 		n.planActivity(ctx, byUser),
 	}
 	if err := errors.Join(errs...); err != nil {
+		// A partial pass has an incomplete picture of what should exist, so it
+		// must not delete anything.
 		return fmt.Errorf("plan: %w", err)
+	}
+	if err := n.reconcile(ctx, from, to); err != nil {
+		return fmt.Errorf("plan: reconcile outbox: %w", err)
 	}
 	if err := n.st.SetMeta(ctx, MetaPlannedThrough, to.Format(time.RFC3339)); err != nil {
 		return fmt.Errorf("plan: record horizon: %w", err)
@@ -87,13 +95,60 @@ func (n *Notifier) enqueue(ctx context.Context, userID int64, kind domain.Notifi
 	if err != nil {
 		return err
 	}
+	at := due.UTC().Truncate(time.Second)
+	if n.planned != nil {
+		n.planned[queueKey(userID, kind, sourceRef, at)] = true
+	}
 	return n.st.EnqueueNotification(ctx, domain.QueuedNotification{
 		UserID:    userID,
 		Kind:      kind,
 		SourceRef: sourceRef,
 		Payload:   body,
-		DueAt:     due.UTC().Truncate(time.Second),
+		DueAt:     at,
 	})
+}
+
+// queueKey mirrors the outbox's UNIQUE constraint.
+func queueKey(userID int64, kind domain.NotificationKind, sourceRef string, due time.Time) string {
+	return fmt.Sprintf("%d|%s|%s|%s", userID, kind, sourceRef, due.UTC().Format(time.RFC3339))
+}
+
+// reconcilable are the kinds the planner recomputes in full on every pass, and
+// therefore the only ones it may delete. Activity notifications are event-sourced
+// through a cursor rather than recomputed, so a pass that no longer produces one
+// says nothing about whether it is still wanted.
+var reconcilable = []domain.NotificationKind{
+	domain.KindReminder, domain.KindDigest, domain.KindSummary,
+}
+
+// reconcile deletes undelivered rows in the planned window that this pass would no
+// longer create. Adding was never the hard part: five different edits invalidate
+// the outbox — changing a reminder, moving an event, muting a calendar, switching
+// the digest off, moving its time — and expecting each of them to remember to
+// prune is how a reminder someone deleted still goes off. Recomputing the window
+// and removing whatever is no longer in it covers all of them at once, including
+// the ones nobody has thought of yet.
+func (n *Notifier) reconcile(ctx context.Context, from, to time.Time) error {
+	rows, err := n.st.ListUnsentByKind(ctx, from, to, reconcilable)
+	if err != nil {
+		return err
+	}
+	removed := 0
+	for _, row := range rows {
+		if n.planned[queueKey(row.UserID, row.Kind, row.SourceRef, row.DueAt)] {
+			continue
+		}
+		if err := n.st.DeleteQueued(ctx, row.ID); err != nil {
+			return err
+		}
+		removed++
+		slog.Debug("dropped a notification the plan no longer calls for",
+			"kind", row.Kind, "source", row.SourceRef, "due", row.DueAt)
+	}
+	if removed > 0 {
+		slog.Info("outbox reconciled", "dropped", removed)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +265,7 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if !ok {
 				continue
 			}
-			if due.Before(from) || due.After(to) {
+			if due.After(to) {
 				continue
 			}
 			p := payload{
@@ -225,6 +280,16 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 				p.EventDate = occ.StartDate
 			} else {
 				p.EventStart = occ.StartsAt.UTC()
+			}
+			// A slot already in the past is still queued, as long as the event it
+			// warns about has not happened yet. Refusing here is how an appointment
+			// added twenty minutes before it starts — with a thirty-minute reminder,
+			// so its slot is already gone — produced no notification at all, on this
+			// tick or any later one. Whether a late row is worth delivering is a
+			// question the delivery path already answers, in one place: staleness()
+			// says a late warning beats no warning while the event is ahead.
+			if due.Before(from) && !p.eventStillAhead(from, n.loc) {
+				continue
 			}
 			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID)
 			if err := n.enqueue(ctx, userID, domain.KindReminder, ref, p, due); err != nil {

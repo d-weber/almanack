@@ -196,6 +196,10 @@ repair banner and email is forced on.
 Kept under ~3 900 bytes (aes128gcm ceiling is 4 096). Digests carry a count and the first few
 truncated titles; the full day is fetched when the notification is clicked.
 
+### `GET /locales/{lang}.json`
+The translation catalog the browser loads, served from the same files the server uses
+for notification text. `fr` and `en`; anything else is a 404.
+
 ## Operational
 
 - `GET /healthz` — no auth. `{"status":"ok|degraded", "checks":{…}}`, 200 or 503.

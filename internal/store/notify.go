@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"agenda/internal/domain"
@@ -658,6 +659,43 @@ func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	if err != nil {
 		return fmt.Errorf("set meta %q: %w", key, mapErr(err))
+	}
+	return nil
+}
+
+// ListUnsentByKind returns undelivered notifications of the given kinds whose slot
+// falls in [from, to]. The planner uses it to reconcile: rows it would no longer
+// create are stale and must go, or a reminder someone deleted still fires.
+func (s *Store) ListUnsentByKind(ctx context.Context, from, to time.Time, kinds []domain.NotificationKind) ([]domain.QueuedNotification, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(kinds))
+	args := []any{mustInstant(from), mustInstant(to)}
+	for i, k := range kinds {
+		placeholders[i] = "?"
+		args = append(args, string(k))
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+queueCols+`
+		  FROM notification_queue
+		 WHERE sent_at IS NULL AND skipped IS NULL
+		   AND due_at >= ? AND due_at <= ?
+		   AND kind IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY due_at, id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list unsent notifications by kind: %w", mapErr(err))
+	}
+	return collectQueued(rows, "list unsent notifications by kind")
+}
+
+// DeleteQueued removes one undelivered notification. It refuses to touch a row that
+// has already been delivered: the outbox is also the record of what was sent.
+func (s *Store) DeleteQueued(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM notification_queue WHERE id = ? AND sent_at IS NULL`, id)
+	if err != nil {
+		return fmt.Errorf("delete queued notification %d: %w", id, mapErr(err))
 	}
 	return nil
 }

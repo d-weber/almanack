@@ -214,18 +214,13 @@ func (s *Service) updateOccurrence(ctx context.Context, actor int64, template do
 func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, splitDate domain.Date, in Input) (domain.Event, error) {
 	now := s.clk.Now()
 
-	// 1. End the old series the day before the split. Until is inclusive.
-	oldRec := rec
-	until := splitDate.AddDays(-1)
-	oldRec.Until = &until
-	if err := recur.Validate(oldRec); err != nil {
-		return domain.Event{}, fmt.Errorf("closing the original series: %w", err)
-	}
-	if err := s.st.UpdateRecurrence(ctx, oldRec); err != nil {
-		return domain.Event{}, fmt.Errorf("close series %d at %s: %w", rec.ID, until, err)
-	}
-
-	// 2. Start a new series at the split, carrying the edits.
+	// 1. Work out both halves and check them BEFORE writing anything.
+	//
+	// This ordering is the whole point. Closing the original series first and
+	// validating the replacement afterwards meant a rejected edit — moving an
+	// occurrence past the series' own end date is enough — returned an error to the
+	// user while having already deleted every remaining occurrence. "Nothing
+	// happened" on screen, half the series gone in the database.
 	newEvent := s.apply(domain.Event{CalendarID: template.CalendarID, CreatedBy: actor, CreatedAt: now}, in, actor, now)
 	newRec := rec
 	if in.Recurrence != nil {
@@ -233,9 +228,43 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 	}
 	newRec.ID = 0
 	newRec.DTStart = s.startDateOf(newEvent)
-	newRec.Until = rec.Until // the original end date, if it had one
+	newRec.Until = rec.Until
+
+	if in.Recurrence == nil {
+		// The client does not resend the pattern for this scope — the server owns
+		// the split — so moving an occurrence to another weekday or day of the month
+		// has to move the pattern with it. Without this the new series carried on at
+		// the old day and the occurrence the user had just moved did not exist at all.
+		newRec = reanchor(newRec, splitDate, newRec.DTStart)
+	}
+	// Moving an occurrence past the end of its own series leaves exactly one
+	// occurrence rather than an impossible range.
+	if newRec.Until != nil && newRec.Until.Before(newRec.DTStart) {
+		last := newRec.DTStart
+		newRec.Until = &last
+	}
 	if err := recur.Validate(newRec); err != nil {
 		return domain.Event{}, fmt.Errorf("starting the new series: %w", err)
+	}
+	// Whatever the re-anchoring produced, a series must contain its own start;
+	// otherwise the edit silently swallows the occurrence it was meant to move.
+	if !recur.Occurs(newRec, newRec.DTStart) {
+		return domain.Event{}, fmt.Errorf("%w: the new repeat pattern does not include %s, the date being moved",
+			domain.ErrInvalid, newRec.DTStart)
+	}
+
+	oldRec := rec
+	until := splitDate.AddDays(-1)
+	oldRec.Until = &until
+	if err := recur.Validate(oldRec); err != nil {
+		return domain.Event{}, fmt.Errorf("closing the original series: %w", err)
+	}
+
+	// 2. Write. These are still separate statements — see the note on atomicity in
+	// docs/architecture.md — but nothing here can now fail for a reason that was
+	// knowable beforehand.
+	if err := s.st.UpdateRecurrence(ctx, oldRec); err != nil {
+		return domain.Event{}, fmt.Errorf("close series %d at %s: %w", rec.ID, until, err)
 	}
 	created, err := s.st.CreateEvent(ctx, newEvent, &newRec)
 	if err != nil {
@@ -250,6 +279,15 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 	if err := s.st.RepointOverrides(ctx, rec.ID, newRecID, splitDate); err != nil {
 		return domain.Event{}, fmt.Errorf("move overrides to the split series: %w", err)
 	}
+	// An override only survives if the new pattern still produces its date. When the
+	// pattern moved — Tuesdays to Wednesdays — the ones it no longer produces would
+	// otherwise become rows nothing can reach: invisible to the series (which does
+	// not generate that date) and hidden from the plain-event query (which excludes
+	// anything an override points at). Detaching them turns each back into an
+	// ordinary event the family can still see and deal with.
+	if err := s.detachUnreachableOverrides(ctx, newRecID, newRec); err != nil {
+		return domain.Event{}, err
+	}
 
 	// 4. Carry everyone's reminders across, or the second half goes quiet.
 	if err := s.copyReminders(ctx, rec.ID, newRecID); err != nil {
@@ -262,6 +300,70 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 
 	s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
 	return created, nil
+}
+
+// reanchor moves a repeat pattern's day-selectors so that the pattern still
+// describes the occurrence the user dragged. Frequencies anchored purely on the
+// start date (daily, yearly, and weekly with no explicit weekdays) need nothing.
+func reanchor(r domain.Recurrence, from, to domain.Date) domain.Recurrence {
+	if from.Equal(to) {
+		return r
+	}
+	switch r.Freq {
+	case domain.FreqWeekly:
+		if len(r.ByWeekday) == 0 {
+			return r
+		}
+		delta := (int(to.Weekday()) - int(from.Weekday()) + 7) % 7
+		if delta == 0 {
+			return r
+		}
+		shifted := make([]time.Weekday, 0, len(r.ByWeekday))
+		for _, wd := range r.ByWeekday {
+			shifted = append(shifted, time.Weekday((int(wd)+delta)%7))
+		}
+		r.ByWeekday = shifted
+	case domain.FreqMonthly:
+		switch {
+		case r.ByMonthday != nil:
+			day := to.Day
+			r.ByMonthday = &day
+		case r.WeekOrdinal != nil:
+			ordinal := (to.Day-1)/7 + 1
+			r.WeekOrdinal = &ordinal
+			r.ByWeekday = []time.Weekday{to.Weekday()}
+		case r.MonthLastDay:
+			// Still the last day? Then the rule still says what the user means.
+			if !to.Equal(domain.LastDayOfMonth(to.Year, to.Month)) {
+				day := to.Day
+				r.MonthLastDay = false
+				r.ByMonthday = &day
+			}
+		}
+	}
+	return r
+}
+
+// detachUnreachableOverrides removes override rows whose date the pattern no longer
+// produces, leaving any edited copy as a standalone event rather than an orphan.
+func (s *Service) detachUnreachableOverrides(ctx context.Context, recurrenceID int64, rec domain.Recurrence) error {
+	overrides, err := s.st.Overrides(ctx, recurrenceID)
+	if err != nil {
+		return err
+	}
+	for date, ov := range overrides {
+		if recur.Occurs(rec, date) {
+			continue
+		}
+		if err := s.st.DeleteOverride(ctx, recurrenceID, date); err != nil {
+			return fmt.Errorf("detach override %s: %w", date, err)
+		}
+		if ov != nil {
+			slog.Info("an edited occurrence no longer fits its series and is now a separate event",
+				"event", *ov, "date", date)
+		}
+	}
+	return nil
 }
 
 // copyReminders duplicates every user's reminders from one series to another.
@@ -337,6 +439,9 @@ func (s *Service) Delete(ctx context.Context, actor, eventID int64, scope domain
 }
 
 func (s *Service) cancelOccurrence(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, occDate domain.Date) error {
+	if !recur.Occurs(rec, occDate) {
+		return fmt.Errorf("%w: %s is not an occurrence of event %d", domain.ErrNotFound, occDate, template.ID)
+	}
 	overrides, err := s.st.Overrides(ctx, rec.ID)
 	if err != nil {
 		return err

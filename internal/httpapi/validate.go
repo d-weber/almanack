@@ -71,6 +71,16 @@ func normalizeColor(raw string) (string, error) {
 
 // cleanText trims a free-text field and rejects control characters, which have no place
 // in a title and are how a log line or a mail header gets forged.
+// cleanSingleLine is cleanText for fields rendered on one line and — the reason this
+// exists — interpolated into an email Subject. cleanText deliberately tolerates
+// newlines for multi-line notes, but a newline in an event title makes the mailer
+// refuse the whole message, so one such title silently costs every participant their
+// reminder email: the channel that exists precisely because iOS push dies quietly.
+func cleanSingleLine(raw string, max int, what string) (string, error) {
+	r := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "\t", " ")
+	return cleanText(r.Replace(raw), max, what)
+}
+
 func cleanText(raw string, max int, what string) (string, error) {
 	text := strings.TrimSpace(raw)
 	if len([]rune(text)) > max {

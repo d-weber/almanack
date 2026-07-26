@@ -17,8 +17,9 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          # Matches the floor in go.mod: crypto/hkdf entered the standard library in 1.24.
-          go-version: '1.24'
+          # Matches the floor in go.mod. Kept exact rather than "stable" so that a
+          # future toolchain bump is a deliberate commit, not a silent CI change.
+          go-version: '1.25'
           check-latest: true
 
       - name: gofmt

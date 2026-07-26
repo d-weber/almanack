@@ -151,6 +151,12 @@ type Options struct {
 	// MinPlausibleTime is the clock floor described above. Zero means 2026-01-01;
 	// main may raise it to the build timestamp.
 	MinPlausibleTime time.Time
+
+	// OwnerEmail and HeartbeatTime configure the daily note to whoever runs the
+	// server. Leave either empty to disable it — at the cost of the only signal
+	// that says the machine is still doing its job.
+	OwnerEmail    string
+	HeartbeatTime string
 }
 
 // Notifier plans, delivers and catches up. One instance is created at startup and
@@ -176,6 +182,14 @@ type Notifier struct {
 	pushFailures map[string]int
 	caughtUp     bool
 	catchUp      CatchUpSummary
+
+	// planned collects what the pass in progress decided should exist, so that
+	// reconcile can delete undelivered rows that are no longer called for. It is
+	// non-nil only for the duration of a planning pass.
+	planned map[string]bool
+
+	ownerEmail  string
+	heartbeatAt string
 }
 
 // New builds a Notifier. It fails when a required dependency is missing, and —
@@ -207,6 +221,8 @@ func New(o Options) (*Notifier, error) {
 		tick:         o.Tick,
 		minTime:      o.MinPlausibleTime,
 		pushFailures: map[string]int{},
+		ownerEmail:   o.OwnerEmail,
+		heartbeatAt:  o.HeartbeatTime,
 	}
 	if n.horizon <= 0 {
 		n.horizon = DefaultHorizon

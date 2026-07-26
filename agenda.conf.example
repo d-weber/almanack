@@ -143,8 +143,10 @@ AGENDA_BACKUP_KEEP_MONTHLY=24
 #
 # Logs go to stdout; under systemd that means journald, with no files to rotate.
 
-AGENDA_LOG_LEVEL=info      # debug | info | warn | error
-AGENDA_LOG_FORMAT=text     # text | json
+# One of: debug, info, warn, error
+AGENDA_LOG_LEVEL=info
+# One of: text, json
+AGENDA_LOG_FORMAT=text
 
 
 # ---------------------------------------------------------------------------

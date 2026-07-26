@@ -5,7 +5,7 @@ no push service. This document is the tour.
 
 ## Prerequisites
 
-Go (1.24+). On this machine it lives at `~/.local/go/bin/go`; the Makefile finds it there
+Go (1.25+). On this machine it lives at `~/.local/go/bin/go`; the Makefile finds it there
 automatically, so `make` works whether or not it is on your `PATH`. Add it permanently with:
 
 ```sh
