@@ -23,8 +23,16 @@ const SAFE_SCHEMES = /^(https?:|mailto:|tel:)/i;
 
 // safeHref rejects anything that could execute (javascript:, data:, vbscript:).
 // Relative URLs, absolute paths and fragments are kept as-is.
+//
+// Control characters are removed first, and the *stripped* value is what gets returned.
+// Both halves of that matter. The URL parser deletes ASCII tab, LF and CR from anywhere
+// in a URL and strips leading C0 controls and spaces, so it decides the scheme of a
+// string this function never saw: 'java<TAB>script:' matches no scheme here, falls
+// through as "some kind of path", and becomes javascript: inside setAttribute. Stripping
+// only for the test and then returning the original would leave that second reading
+// intact — the check would be honest and the value handed on would not be.
 export function safeHref(url) {
-  const s = String(url == null ? '' : url).trim();
+  const s = String(url == null ? '' : url).replace(/[\x00-\x20]/g, '').trim();
   if (s === '') return null;
   if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return SAFE_SCHEMES.test(s) ? s : null;
   // Scheme-relative //evil.example is still http(s); everything else is a path.

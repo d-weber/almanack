@@ -357,6 +357,32 @@ Notable changes to this project. The format follows
   nothing tells it that it has been replaced — an observer on a detached target never fires
   again, so there is no moment at which it could notice.
   ([#19](https://github.com/d-weber/almanack/issues/19))
+- **Security: a link on an event could be written so that it executed instead of opening.**
+  Every URL this app puts on the page goes through one function, `safeHref()`, which reads
+  the scheme and refuses anything that is not `http`, `https`, `mailto` or `tel`. It read the
+  scheme off the string as typed, and the browser reads it off something else: the URL parser
+  removes tab, newline and carriage return from anywhere in a URL, and strips control
+  characters from the front of one, before deciding what the scheme is. So `java<TAB>script:`
+  matched no scheme at all, was waved through as "some kind of path", and became
+  `javascript:` the moment it was written into the page. A link beginning with an invisible
+  NUL did the same. Nothing was executing in practice — the Content-Security-Policy this app
+  ships with has no `script-src` and no `unsafe-inline`, and it blocks a `javascript:` link
+  outright — but a single policy header is not what the guardrail was supposed to be, and a
+  household member is not a stranger you have promised nothing to. `safeHref()` now removes
+  those characters *and* hands on what it removed them from, which is the half that matters:
+  checking a cleaned string and then returning the dirty one leaves the browser reading the
+  same URL it always did. One consequence a family may notice: a space inside a link is
+  removed along with the control characters, so a link that was pasted with one in it needs
+  the space taken out or written as `%20`.
+  The server no longer stores such a link either. It already refused anything that did not
+  begin with `http://` or `https://` — which is why nothing here was reachable in practice —
+  and it now also refuses a link holding a tab or a line break, because a link holding one
+  is not the link printed on the screen. Existing calendars are unaffected in the way that
+  matters: the rule runs when an event is saved and nowhere else, so an event stored by 0.2.0
+  with a tab in its link still lists, still opens and still sends its reminders. Editing that
+  one event is refused until the stray character is taken out of the link box, which is the
+  price of the check and is said in those words rather than as a failure to save.
+  ([#20](https://github.com/d-weber/almanack/issues/20))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

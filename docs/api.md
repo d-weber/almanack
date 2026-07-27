@@ -157,6 +157,11 @@ All-day form omits `starts_at`/`ends_at` and sends `start_date`/`end_date` (incl
 reminders as `{ "days_before":1, "at_time_local":"09:00" }`. `recurrence` and `reminders` are
 optional; `reminders` apply to the caller only. → `201 { "event": Event }`
 
+`url` may be empty or must begin with `http://` or `https://`, up to 500 characters, and may
+not contain a tab or a line break: the browser's URL parser removes those from a URL before
+it decides what the scheme is, so a link holding one is not the link it displays. Both are
+`400 invalid`.
+
 ### `GET /api/v1/events/{id}?date=YYYY-MM-DD`
 Detail for one occurrence (`date` = `occurrence_date`, required for series, ignored for
 an edited occurrence's own id). `recurrence` is the **series'**, so an edited occurrence

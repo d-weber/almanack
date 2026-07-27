@@ -53,12 +53,9 @@ func (req eventRequest) input() (events.Input, error) {
 	if err != nil {
 		return events.Input{}, err
 	}
-	link, err := cleanText(req.URL, 500, "the link")
+	link, err := cleanLink(req.URL)
 	if err != nil {
 		return events.Input{}, err
-	}
-	if link != "" && !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
-		return events.Input{}, invalidf("a link must start with http:// or https://")
 	}
 	notes, err := cleanText(req.Notes, maxTextLen, "the notes")
 	if err != nil {

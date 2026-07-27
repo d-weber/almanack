@@ -267,6 +267,16 @@ nodes and attaches handlers with `addEventListener`; the CSP ships without `unsa
 so an inline `onclick` is a dead button rather than a shortcut, and `innerHTML` with server
 data is forbidden outright.
 
+An attribute that becomes a URL — `href`, `src`, `action` — goes through `safeHref()`, which
+strips control characters *before* it reads the scheme and then hands on the stripped value.
+Both halves are the fix for [#20](https://github.com/d-weber/almanack/issues/20). The URL
+parser removes tab, newline and carriage return from anywhere in a URL and control characters
+from the front of one, so a scheme read off the string as written is a scheme read off a
+different URL than the browser will follow; and returning the original after checking a
+cleaned copy would leave that second reading intact. The server refuses a link with a tab or
+a line break in it as well, but the browser is where this has to hold: it is the layer that
+sees every URL, wherever it came from.
+
 Every sheet and dialog in the app is the same function, `openOverlay()` in `js/ui.js`, and
 modal there means modal to the keyboard as well as to the eye: Tab cycles inside the panel
 rather than walking into the page behind it, whatever opened the overlay gets the focus back

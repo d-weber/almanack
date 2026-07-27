@@ -18,6 +18,7 @@ const (
 	maxNameLen  = 80
 	maxTextLen  = 2000
 	maxEmailLen = 254
+	maxLinkLen  = 500
 )
 
 // normalizeEmail lower-cases and trims an address and checks it looks like one. The
@@ -92,6 +93,31 @@ func cleanText(raw string, max int, what string) (string, error) {
 		}
 	}
 	return text, nil
+}
+
+// cleanLink is cleanText for the one free-text field that becomes an href. Tab and
+// newline are tolerated by cleanText — a note is allowed to be several lines long — and
+// in a link they are neither harmless nor visible: the browser's URL parser removes
+// ASCII tab, LF and CR from anywhere in a URL before deciding what the scheme is, so a
+// stored link holding one is not the link printed on the screen. The guardrail against
+// that is web/js/dom.js, which strips them before it decides whether a scheme may be
+// followed. This is the second lock on the same door, and it is here rather than in
+// cleanText because it is a rule about links, not about free text.
+//
+// The http(s) requirement lives here too, so that everything this app will accept as a
+// link is one function rather than a validator and a check beside its caller.
+func cleanLink(raw string) (string, error) {
+	link, err := cleanText(raw, maxLinkLen, "the link")
+	if err != nil {
+		return "", err
+	}
+	if strings.ContainsAny(link, "\t\n\r") {
+		return "", invalidf("a link cannot contain a tab or a line break")
+	}
+	if link != "" && !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
+		return "", invalidf("a link must start with http:// or https://")
+	}
+	return link, nil
 }
 
 func validateHHMM(raw, what string) (string, error) {

@@ -297,6 +297,98 @@ func TestHostileTitleIsData(t *testing.T) {
 	}
 }
 
+// An event's link is the one free-text field in this application that becomes an href,
+// and the browser's URL parser removes ASCII tab, LF and CR from anywhere in a URL
+// before it decides what the scheme is. So a link holding one is not the link that is
+// printed on the screen, and this refuses to store it on the way in. The guardrail is
+// web/js/dom.js, which strips them before deciding whether a scheme may be followed
+// (e2e/safe-href.spec.js); this is the second lock on the same door.
+func TestALinkCannotHideAControlCharacter(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	event := func(link string) map[string]any {
+		return map[string]any{
+			"calendar_id": cal.ID,
+			"title":       "Rendez-vous",
+			"starts_at":   "2026-08-04T14:30:00Z",
+			"ends_at":     "2026-08-04T15:15:00Z",
+			"label_id":    labels[0].ID,
+			"url":         link,
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		link string
+		want int
+	}{
+		{"an ordinary link", "https://example.org/rdv", http.StatusCreated},
+		{"no link at all", "", http.StatusCreated},
+		{"a tab inside the path", "https://example.org/r\tdv", http.StatusBadRequest},
+		{"a newline inside the path", "https://example.org/r\ndv", http.StatusBadRequest},
+		{"a tab hiding in the scheme", "java\tscript:alert(1)", http.StatusBadRequest},
+		{"a newline hiding in the scheme", "java\nscript:alert(1)", http.StatusBadRequest},
+		{"a carriage return hiding in the scheme", "java\rscript:alert(1)", http.StatusBadRequest},
+		{"a leading NUL", "\x00javascript:alert(1)", http.StatusBadRequest},
+		{"a leading tab", "\tjavascript:alert(1)", http.StatusBadRequest},
+		{"a scheme that is simply not http", "javascript:alert(1)", http.StatusBadRequest},
+	} {
+		// Checked rather than asserted, so that one row getting through does not hide
+		// which of the others do: what is let past is the whole diagnosis.
+		res := e.do(http.MethodPost, "/api/v1/events", event(tc.link))
+		if res.status != tc.want {
+			t.Errorf("%s (%q): status = %d, want %d (body: %s)",
+				tc.name, tc.link, res.status, tc.want, truncate(string(res.body), 200))
+		}
+	}
+
+	// The edit path takes the same body through the same validator, and an event given a
+	// hidden character on a later save must be refused for the same reason.
+	created := e.createEvent(event("https://example.org/rdv"))
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d", created.ID), event("https://example.org/r\tdv")).
+		expect(http.StatusBadRequest)
+}
+
+// The rule above applies on write and nowhere else. A calendar written by an older
+// binary may hold a link with a tab in it — 0.2.0 accepted one, since cleanText tolerated
+// tab and newline — and upgrading must not make that event unreadable. So the row goes in
+// underneath the HTTP layer, exactly as an old release left it, and is read back through
+// every path the app has for reading an event.
+func TestALinkStoredBeforeTheRuleTightenedStillReads(t *testing.T) {
+	e := newEnv(t)
+	user, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	const legacy = "https://example.org/r\tdv"
+	stored, err := e.store.CreateEvent(e.t.Context(), domain.Event{
+		CalendarID: cal.ID,
+		Title:      "Rendez-vous d'avant",
+		StartsAt:   time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC),
+		EndsAt:     time.Date(2026, 8, 4, 15, 15, 0, 0, time.UTC),
+		URL:        legacy,
+		LabelID:    labels[0].ID,
+		CreatedBy:  user.ID,
+		UpdatedBy:  user.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("write the legacy row: %v", err)
+	}
+
+	list := e.listEvents("2026-08-01", "2026-08-31")
+	if len(list.Occurrences) != 1 || list.Occurrences[0].URL != legacy {
+		t.Fatalf("listed url = %q, want %q", list.Occurrences[0].URL, legacy)
+	}
+
+	var detail eventDetail
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-08-04", stored.ID)).
+		expect(http.StatusOK).decode(&detail)
+	if detail.Occurrence.URL != legacy {
+		t.Errorf("detail url = %q, want %q", detail.Occurrence.URL, legacy)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Authorization
 // ---------------------------------------------------------------------------
