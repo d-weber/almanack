@@ -585,6 +585,29 @@ Notable changes to this project. The format follows
   than sent a second time. Reminders and digests were never affected, since those are planned
   from the calendar rather than from the log. Nothing changed in the database.
   ([#44](https://github.com/d-weber/almanack/issues/44))
+- **An edited occurrence could be announced twice, and the reminder you took off it went
+  off anyway.** Moving a single swimming lesson leaves a copy of the event behind, and the
+  app files the reminder list you were shown against that copy — while the planner went on
+  firing the series' reminders for that date as well. Two rows, two reminders as far as the
+  outbox could tell, two identical pushes half an hour before the lesson, one after the
+  other. The same disagreement ran the other way on screen: the editor lists the reminders
+  on the copy, so taking the reminder off one occurrence showed an empty list and left the
+  series' one to arrive that evening regardless. "No reminder, just for this one" was not
+  something the app could be told, and it did not say so. Underneath both was one question
+  nobody had answered — does an edited occurrence inherit its series' reminders, or take a
+  copy of them and go its own way? It takes a copy. Editing an occurrence now copies every
+  member's reminders onto it, everyone's and not only yours, since otherwise your partner
+  would lose theirs because you moved the lesson; from then on that occurrence is announced
+  by its own reminders and by nothing else. Removing one there removes it there and nowhere
+  else, and changing the series afterwards leaves the occasions somebody has already edited
+  alone — which is what a whole-series edit already did with everything else about them.
+  Calendars that already have edited occurrences are brought into line when the new version
+  first opens them: each of those occurrences is given the copy of the reminders it should
+  have had, so nobody stops being reminded about a lesson they moved months ago and nobody
+  is reminded twice. The one thing that change cannot preserve is a reminder somebody had
+  cleared on a single occurrence, because clearing it was the bug: it comes back on that
+  occurrence, and clearing it now works.
+  ([#42](https://github.com/d-weber/almanack/issues/42))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

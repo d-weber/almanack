@@ -219,7 +219,6 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		return err
 	}
 
-	recurrenceOfSeries := map[int64]*int64{}
 	var errs []error
 	for _, occ := range occs {
 		// Source references are keyed on the *series* event for a recurring
@@ -230,34 +229,22 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			sourceEvent = *occ.SeriesEventID
 		}
 
-		seen := map[int64]bool{}
+		// An edited occurrence owns its reminders. Editing one occurrence copies the
+		// series' reminders onto the standalone event the edit leaves behind (see
+		// internal/events.updateOccurrence) and that copy is what the editor lists and
+		// what a PUT of the reminder list writes to — so counting the series' as well
+		// meant two rows, with different reminder ids, for one swimming lesson: two
+		// identical pushes. It also meant the reminder somebody had just removed from
+		// this one occurrence went off anyway, from the series, while the screen said
+		// there was none. The copy is the whole answer for its date.
+		//
+		// A reminder is scoped to an event or to a recurrence and never to both — the
+		// schema's CHECK says so — so the two lists cannot overlap and nothing has to
+		// be deduplicated between them.
 		var cands []domain.Reminder
-		add := func(list []domain.Reminder) {
-			for _, r := range list {
-				if !seen[r.ID] {
-					seen[r.ID] = true
-					cands = append(cands, r)
-				}
-			}
-		}
-		add(byEvent[occ.Event.ID])
-		if sourceEvent != occ.Event.ID {
-			add(byEvent[sourceEvent])
-		}
-
-		recurrenceID := occ.RecurrenceID
-		if recurrenceID == nil && occ.SeriesEventID != nil {
-			// An override copy is a standalone event row, so its series-level
-			// reminders have to be found through the template it replaced.
-			rid, err := n.recurrenceOfSeries(ctx, *occ.SeriesEventID, recurrenceOfSeries)
-			if err != nil {
-				errs = append(errs, err)
-			} else {
-				recurrenceID = rid
-			}
-		}
-		if recurrenceID != nil {
-			add(byRecurrence[*recurrenceID])
+		cands = append(cands, byEvent[occ.Event.ID]...)
+		if !occ.IsOverride && occ.RecurrenceID != nil {
+			cands = append(cands, byRecurrence[*occ.RecurrenceID]...)
 		}
 
 		for _, r := range cands {
@@ -298,20 +285,6 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// recurrenceOfSeries resolves a series template event id to its recurrence id,
-// memoised for the pass.
-func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
-	if rid, ok := cache[eventID]; ok {
-		return rid, nil
-	}
-	e, err := n.st.EventByID(ctx, eventID)
-	if err != nil {
-		return nil, fmt.Errorf("series template %d: %w", eventID, err)
-	}
-	cache[eventID] = e.RecurrenceID
-	return e.RecurrenceID, nil
 }
 
 // lead is how far ahead of its occurrence a reminder fires, used only to size the

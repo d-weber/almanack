@@ -163,6 +163,21 @@ to reconstruct it would be one release away from getting it wrong again. Not doi
 how "delete this occurrence" deleted the exception instead of the occurrence, and brought
 it back at its original time.
 
+**An edited occurrence owns its reminders.** Creating the copy copies every member's
+series reminders onto it — everyone's, not just the editor's, or Papa would lose his
+reminder because Maman moved the lesson — and from that moment the series' reminders no
+longer apply to that date. The copy is what the editor lists, what a
+`PUT /events/{id}/reminders` writes to, and what the planner reads. The alternative,
+inheriting the series' reminders until the copy sets its own, cannot be made truthful,
+because the reader and the writer both address the copy already: a member who took the
+reminder off one lesson was shown an empty list and reminded anyway, and one who left it
+alone was reminded twice — once from the copy the editor had just written, once from the
+series. Copying once and detaching is the only answer under which "no reminder, just for
+this one" means anything. It costs the other direction, since changing the series'
+reminders afterwards does not reach an occurrence somebody has already edited, and that is
+the rule the rest of an override already follows: a whole-series edit leaves edited
+occurrences alone rather than reverting somebody's work.
+
 "This and following" **splits the series**: the original gets an end date the day before,
 a new series starts at the split, overrides at or after the split move across, and every
 member's reminders are copied. Missing any one of those steps has a specific, nasty
@@ -280,6 +295,16 @@ it will not do is start there by itself: the binary refuses to open a schema new
 knows, so a mistaken downgrade fails loudly instead of corrupting data, and a deliberate
 one is a decision somebody takes rather than a surprise. Every migration is proved against
 a database a shipped release really wrote, checked in under `internal/store/testdata/`.
+
+0004 is the first that writes rows rather than columns: it gives every occurrence somebody
+had already edited its own copy of the series' reminders, since this release stops the
+series' reminders firing for a date that has an override and those copies would otherwise
+go quiet. No table is rebuilt and nothing is dropped, so the previous binary still runs on
+the file — it would announce those occurrences twice, which is the fault being fixed here
+rather than a new one. A backfill is an exception that has to be argued for out loud, and
+`TestUpgradeFromReleasedDatabase` makes it one: the number of rows a migration is expected
+to add is named per release beside the fixture, and any other movement in the family's rows
+fails the build.
 
 Backups are `almanack backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
 **on the output**, fsync, then rename atomically. Checking the copy rather than the source

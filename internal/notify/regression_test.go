@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 // Regressions found by an adversarial review of the built system. Each of these
@@ -214,6 +215,97 @@ func TestActivityCursorSurvivesAReusedID(t *testing.T) {
 	// told: a dropped notification and a duplicated one are both failures here.
 	if byTitle["Dentiste"] != 1 {
 		t.Errorf("the change announced before the deletion is queued %d times, want 1", byTitle["Dentiste"])
+	}
+}
+
+// editOneOccurrence is the sequence the app performs when somebody moves a single
+// lesson: the occurrence is edited, which leaves a standalone copy of the event
+// behind, and the caller's reminder list is then filed against the id the edit
+// answered with — the copy's. Both tests below start from it.
+func editOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.Event,
+	userID int64, occDate domain.Date, newStart time.Time, reminders []domain.Reminder) domain.Event {
+	t.Helper()
+	copyEvent, err := e.ev.Update(e.ctx, userID, series.ID, domain.ScopeThis, occDate, events.Input{
+		CalendarID: cal.ID, Title: series.Title,
+		StartsAt: newStart.UTC(), EndsAt: newStart.Add(time.Hour).UTC(),
+		LabelID: series.LabelID, Participants: []int64{userID},
+	})
+	if err != nil {
+		t.Fatalf("move the occurrence of %s on %s: %v", series.Title, occDate, err)
+	}
+	if copyEvent.ID == series.ID {
+		t.Fatalf("editing one occurrence answered with the series template itself")
+	}
+	e.setReminders(copyEvent, userID, reminders)
+	return copyEvent
+}
+
+// An edited occurrence used to be reminded twice. The copy left behind by the edit
+// carries the reminder list the editor was showing, and the planner went on firing
+// the series' reminders for that date as well: two rows, two different reminder ids,
+// two identical pushes for one swimming lesson.
+func TestEditingOneOccurrenceDoesNotDoubleItsReminder(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	e.subscribe(alice.ID, "iphone")
+	e.noDigests()
+
+	series := e.timedEvent(cal, alice.ID, "Piscine", 2027, time.June, 1, 17, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	e.reminderMinutes(series, alice.ID, 30)
+
+	moved := date(2027, 6, 8)
+	editOneOccurrence(t, e, cal, series, alice.ID, moved,
+		time.Date(2027, 6, 8, 18, 0, 0, 0, paris),
+		[]domain.Reminder{{OffsetMinutes: ptrInt(30)}})
+
+	e.plan()
+	e.clk.Set(time.Date(2027, 6, 8, 17, 30, 0, 0, paris)) // half an hour before the moved lesson
+	e.dispatch()
+
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("moving one lesson of a weekly series produced %d pushes for it, want 1", got)
+	}
+}
+
+// The other half of the same question. The editor lists the reminders on the copy,
+// so a member who removes the reminder from one occurrence is shown an empty list —
+// and used to be reminded anyway, because the planner still fired the series'.
+func TestRemovingTheReminderFromOneOccurrenceStopsIt(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	e.subscribe(alice.ID, "iphone")
+	e.noDigests()
+
+	series := e.timedEvent(cal, alice.ID, "Piscine", 2027, time.June, 1, 17, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	e.reminderMinutes(series, alice.ID, 30)
+
+	moved := date(2027, 6, 8)
+	editOneOccurrence(t, e, cal, series, alice.ID, moved,
+		time.Date(2027, 6, 8, 18, 0, 0, 0, paris), nil)
+
+	e.plan()
+	e.clk.Set(time.Date(2027, 6, 8, 17, 30, 0, 0, paris))
+	e.dispatch()
+
+	if got := len(e.push.received()); got != 0 {
+		t.Errorf("%d pushes for an occurrence whose reminder was removed, want 0", got)
+	}
+
+	// Next week's lesson, which nobody touched, still has the series' reminder.
+	e.push.reset()
+	e.clk.Set(time.Date(2027, 6, 15, 12, 0, 0, 0, paris))
+	e.plan()
+	e.clk.Set(time.Date(2027, 6, 15, 16, 30, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes for the untouched occurrence a week later, want 1: removing a reminder"+
+			" from one lesson must not remove it from the series", got)
 	}
 }
 

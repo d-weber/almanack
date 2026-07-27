@@ -422,9 +422,16 @@ export async function renderEventEditor({ id, date, query }) {
         // at all: the API refuses to add a repeat to an existing event or remove one,
         // and this used to send `null` for both, which was accepted and then dropped.
         if (form.recurrence && scope === 'all') payload.recurrence = apiRecurrence(form);
-        await api.updateEvent(form.id, payload, scope ? { scope, date: form.occurrence_date } : {});
-        // Reminders are the caller's own and have their own endpoint.
-        await api.putReminders(form.id, form.reminders.map((r) => apiReminder(r, form.all_day)));
+        const saved = await api.updateEvent(form.id, payload, scope ? { scope, date: form.occurrence_date } : {});
+        // Reminders are the caller's own and have their own endpoint. They are filed
+        // against the event the edit answered with, not the one it was addressed to:
+        // editing a single occurrence of a series leaves a standalone copy behind, and
+        // that copy is what owns the reminders for that occurrence from then on. Sending
+        // them to form.id — the series, on the first edit of an occurrence — changed the
+        // reminder on every lesson instead of the one on screen, and left the one the
+        // family had just been shown unchanged.
+        const target = (saved && saved.event && saved.event.id) || form.id;
+        await api.putReminders(target, form.reminders.map((r) => apiReminder(r, form.all_day)));
       }
       invalidateRange();
       go(`/${state.view}?d=${form.start_date}`);

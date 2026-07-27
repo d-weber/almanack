@@ -190,6 +190,16 @@ series + overrides + reminders + queued notifications. → `204`
 Replaces **the caller's** reminders for the event or its series.
 `{ "reminders": [ { "offset_minutes": 30 } ] }` → `{ "reminders": [Reminder] }`
 
+Which of the two it is depends on the id: a series template's reminders are the series',
+and an **edited occurrence's are its own**. Creating an override copies every member's
+series reminders onto it, and from then on that copy alone decides when the occurrence is
+announced — so removing a reminder there removes it from that occurrence and nowhere else,
+and changing the series afterwards does not reach it. `my_reminders` on
+`GET /events/{id}` is the same list by the same rule, which is what makes it truthful.
+Send the reminder list to the id the `PATCH` answered with, not the one it was addressed
+to: editing one occurrence answers with the copy, and posting to the series instead
+changes every occurrence's reminder rather than the one on screen.
+
 ### `GET /api/v1/search?q=&participant=&label_id=&calendar_id=`
 Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once, as
 its template — unless one occurrence was edited to carry text the series does not, in which

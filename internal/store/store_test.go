@@ -147,6 +147,119 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 }
 
+// TestOverrideReminderBackfill covers 0004, the one migration in this project that
+// writes rows rather than columns. It gives every occurrence somebody had already
+// edited its own copy of the series' reminders, because from this release on the
+// series' reminders no longer fire for a date that has an override — so without it the
+// one lesson a family had moved would quietly stop being announced.
+//
+// The store opens at head, so the migration has already run against an empty file. The
+// rows below are then written as an older binary would have left them and the migration
+// is replayed over them, which is the situation it exists for.
+func TestOverrideReminderBackfill(t *testing.T) {
+	s, _, _ := newStore(t)
+	dad := mustUser(t, s, "dad@example.test", "Dad")
+	mum := mustUser(t, s, "mum@example.test", "Mum")
+	cal := mustCalendar(t, s, dad.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	recID := *series.RecurrenceID
+
+	moved := time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)
+	copyEv, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (plus tard)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the override: %v", err)
+	}
+	if err := s.SetOverride(ctx(), recID, domain.MustParseDate("2026-08-11"), &copyEv.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	// Dad has two reminders on the series and none on the copy. Both must arrive:
+	// a check that could see the rows the statement is itself inserting would copy
+	// the first, decide he now has one, and drop the second.
+	if err := s.ReplaceReminders(ctx(), nil, &recID, dad.ID, []domain.Reminder{
+		{OffsetMinutes: ptrTo(30)}, {OffsetMinutes: ptrTo(1440)},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(series, Dad): %v", err)
+	}
+	// Mum already has one of her own on the copy — that is the list the editor showed
+	// her — so hers must be left exactly as it stands, series reminder or no.
+	if err := s.ReplaceReminders(ctx(), nil, &recID, mum.ID, []domain.Reminder{
+		{OffsetMinutes: ptrTo(60)},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(series, Mum): %v", err)
+	}
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, mum.ID, []domain.Reminder{
+		{DaysBefore: ptrTo(1), AtTimeLocal: "09:00"},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Mum): %v", err)
+	}
+
+	backfill := migrationSQL(t, 4)
+	for pass := 1; pass <= 2; pass++ {
+		if _, err := s.DB().Exec(backfill); err != nil {
+			t.Fatalf("run migration 0004, pass %d: %v", pass, err)
+		}
+
+		dads, err := s.ListReminders(ctx(), &copyEv.ID, nil, dad.ID)
+		if err != nil {
+			t.Fatalf("ListReminders(copy, Dad): %v", err)
+		}
+		var offsets []int
+		for _, r := range dads {
+			if r.OffsetMinutes == nil {
+				t.Fatalf("copied reminder %+v lost its shape", r)
+			}
+			offsets = append(offsets, *r.OffsetMinutes)
+		}
+		slices.Sort(offsets)
+		if !slices.Equal(offsets, []int{30, 1440}) {
+			t.Errorf("after pass %d Dad's reminders on the edited occurrence are %v, want [30 1440]", pass, offsets)
+		}
+		if series, err := s.ListReminders(ctx(), nil, &recID, dad.ID); err != nil {
+			t.Fatalf("ListReminders(series, Dad): %v", err)
+		} else if len(series) != 2 {
+			t.Errorf("after pass %d the series has %d of Dad's reminders, want 2: the copy is a copy", pass, len(series))
+		}
+		mums, err := s.ListReminders(ctx(), &copyEv.ID, nil, mum.ID)
+		if err != nil {
+			t.Fatalf("ListReminders(copy, Mum): %v", err)
+		}
+		if len(mums) != 1 || mums[0].DaysBefore == nil || *mums[0].DaysBefore != 1 {
+			t.Errorf("after pass %d Mum's reminders on the edited occurrence are %+v, want only her own", pass, mums)
+		}
+	}
+}
+
+// migrationSQL returns the body of one embedded migration, so that a test can replay it
+// over rows written the way an older release left them.
+func migrationSQL(t *testing.T, version int) string {
+	t.Helper()
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	for _, m := range ms {
+		if m.version == version {
+			return m.sql
+		}
+	}
+	t.Fatalf("no migration %04d is embedded", version)
+	return ""
+}
+
 func TestMigrateRefusesNewerSchema(t *testing.T) {
 	s, _, path := newStore(t)
 
@@ -380,13 +493,29 @@ type releaseFixture struct {
 	// that has already shipped, not a number anyone should keep current. Pinning it
 	// here is what stops this test going quietly vacuous; see the guard below.
 	version int
+	// backfilled is how many rows each table is expected to *gain* during the upgrade,
+	// and it is normally empty. Migrations add columns and tables; they do not touch
+	// the family's rows, and the row counts below say so. A migration that backfills
+	// data is the exception that has to be argued for out loud, which is what an entry
+	// here is: the number, and the reason, written down beside the release it applies
+	// to rather than quietly tolerated by a loosened assertion.
+	backfilled map[string]int
 	// check reads the fixture's data back through the store API. Each fixture knows
 	// its own family, so each brings its own.
 	check func(t *testing.T, s *Store)
 }
 
 var releaseFixtures = []releaseFixture{
-	{release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2, check: checkV020Family},
+	{
+		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
+		// 0004 gives each occurrence somebody had already edited its own copy of the
+		// series' reminders, because from now on the series' no longer fire for it.
+		// This household has one such occurrence — the swimming lesson moved to the
+		// evening of 4 August — and Dad has a reminder on that series, so exactly one
+		// row is added and he goes on being reminded about the lesson he moved.
+		backfilled: map[string]int{"reminders": 1},
+		check:      checkV020Family,
+	},
 }
 
 // upgradedAt is when the upgrade is pretended to happen: after the v0.2.0 fixture was
@@ -497,19 +626,20 @@ func TestUpgradeFromReleasedDatabase(t *testing.T) {
 
 			// --- nothing was lost ------------------------------------------------
 			//
-			// schema_migrations is the one table expected to grow. Every other table
-			// must come out of the upgrade with exactly the rows it went in with:
-			// expand/contract migrations add columns and tables, they do not touch
-			// the family's rows. A migration that legitimately backfills data will
-			// fail here, which is the right moment to argue for it out loud.
+			// schema_migrations is the one table expected to grow of its own accord.
+			// Every other table must come out of the upgrade with exactly the rows it
+			// went in with, unless a migration deliberately backfills — in which case
+			// the exact number of rows it adds is named in the fixture above, so a
+			// backfill that reaches further than its author meant it to still fails
+			// here. Anything else is a migration touching the family's data.
 			after := rowCounts(t, s.DB(), tables)
 			for _, tbl := range tables {
 				if tbl == "schema_migrations" {
 					continue
 				}
-				if after[tbl] != before[tbl] {
-					t.Errorf("table %s has %d rows after the upgrade, had %d before",
-						tbl, after[tbl], before[tbl])
+				if want := before[tbl] + fx.backfilled[tbl]; after[tbl] != want {
+					t.Errorf("table %s has %d rows after the upgrade, want %d (%d before, %d backfilled)",
+						tbl, after[tbl], want, before[tbl], fx.backfilled[tbl])
 				}
 			}
 
@@ -786,8 +916,9 @@ func checkV020Family(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatalf("ListAllReminders: %v", err)
 	}
-	if len(all) != 3 {
-		t.Errorf("ListAllReminders returned %d, want 3", len(all))
+	// Three as written by 0.2.0, plus the one 0004 copied onto the moved lesson.
+	if len(all) != 4 {
+		t.Errorf("ListAllReminders returned %d, want 4", len(all))
 	}
 	timed, err := s.ListReminders(ctx(), ptrTo(int64(dentistID)), nil, mumID)
 	if err != nil {
@@ -812,6 +943,24 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if len(series) != 1 || series[0].OffsetMinutes == nil || *series[0].OffsetMinutes != 30 {
 		t.Errorf("Dad's swimming reminder = %+v; want one at 30 minutes before", series)
+	}
+	// The lesson Dad moved to the evening now carries its own copy of that reminder,
+	// put there by 0004. Without it the new rule — an edited occurrence is reminded by
+	// its own reminders and not by its series' — would have made this one lesson, and
+	// only this one, go quiet on a calendar that has been running for a year.
+	movedLesson, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, dadID)
+	if err != nil {
+		t.Fatalf("ListReminders(moved lesson): %v", err)
+	}
+	if len(movedLesson) != 1 || movedLesson[0].OffsetMinutes == nil || *movedLesson[0].OffsetMinutes != 30 {
+		t.Errorf("Dad's reminder for the moved lesson = %+v; want one at 30 minutes before", movedLesson)
+	}
+	// Mum has none on the series, so she gets none on the copy either: the backfill
+	// hands out what each member already had, not what somebody else had.
+	if mums, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, mumID); err != nil {
+		t.Fatalf("ListReminders(moved lesson, Mum): %v", err)
+	} else if len(mums) != 0 {
+		t.Errorf("Mum has %d reminders on the moved lesson, want 0", len(mums))
 	}
 
 	// --- the outbox, the log and the small tables ------------------------------

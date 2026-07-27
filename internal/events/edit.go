@@ -314,6 +314,11 @@ func (s *Service) updateOccurrence(ctx context.Context, actor int64, template do
 		if err := s.st.SetOverride(ctx, rec.ID, occDate, &created.ID); err != nil {
 			return domain.Event{}, fmt.Errorf("record override for %s: %w", occDate, err)
 		}
+		// The copy takes a copy of everyone's reminders and is from then on the only
+		// thing that says when this occurrence is announced — see copyRemindersToEvent.
+		if err := s.copyRemindersToEvent(ctx, rec.ID, created.ID); err != nil {
+			return domain.Event{}, err
+		}
 		s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
 		s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
 		return created, nil
@@ -483,6 +488,39 @@ func (s *Service) detachUnreachableOverrides(ctx context.Context, recurrenceID i
 		if ov != nil {
 			slog.Info("an edited occurrence no longer fits its series and is now a separate event",
 				"event", *ov, "date", date)
+		}
+	}
+	return nil
+}
+
+// copyRemindersToEvent gives a freshly created override copy its own copy of every
+// member's series reminders.
+//
+// This is the writing half of one rule: an edited occurrence *owns* its reminders. The
+// alternative — inheriting the series' until the copy sets its own — is what the planner
+// used to do, and it cannot be made truthful. The editor lists the copy's reminders and
+// a PUT of that list writes to the copy, so under inheritance a member who took the
+// reminder off one lesson was shown an empty list and reminded anyway, and one who left
+// it alone was reminded twice: once from the copy the editor had just written, once from
+// the series. Copying once and detaching answers both, and it is the only answer that
+// lets "no reminder, just for this one" mean anything.
+//
+// Everyone's reminders are copied and not only the editor's, because a reminder is
+// personal: Papa moving Tuesday's lesson must not take Maman's reminder off it.
+func (s *Service) copyRemindersToEvent(ctx context.Context, fromRec, toEvent int64) error {
+	all, err := s.st.ListAllReminders(ctx)
+	if err != nil {
+		return fmt.Errorf("load reminders for the edited occurrence: %w", err)
+	}
+	byUser := map[int64][]domain.Reminder{}
+	for _, r := range all {
+		if r.RecurrenceID != nil && *r.RecurrenceID == fromRec {
+			byUser[r.UserID] = append(byUser[r.UserID], r)
+		}
+	}
+	for userID, rs := range byUser {
+		if err := s.st.ReplaceReminders(ctx, &toEvent, nil, userID, rs); err != nil {
+			return fmt.Errorf("copy reminders onto the edited occurrence for user %d: %w", userID, err)
 		}
 	}
 	return nil

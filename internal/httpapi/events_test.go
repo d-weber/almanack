@@ -579,6 +579,70 @@ func TestScopedEditThisOccurrenceOnly(t *testing.T) {
 	}
 }
 
+// TestEditedOccurrenceOwnsItsReminders is the reader's half of the rule in
+// docs/architecture.md: an edited occurrence carries its own copy of the series'
+// reminders, and those are what fire for it. The list must therefore be the same
+// whichever way the occurrence is named — by the copy's id, or by the series' id and the
+// date — and taking a reminder off it must not reach the rest of the series.
+func TestEditedOccurrenceOwnsItsReminders(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+	series := e.weeklySeries(cal, labels[4].ID)
+
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", series.ID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 30}},
+	}).expect(http.StatusOK)
+
+	e.do(http.MethodPatch,
+		fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", series.ID),
+		map[string]any{
+			"title": "Piscine (déplacée)", "label_id": labels[4].ID,
+			"starts_at": "2026-08-11T16:00:00Z", "ends_at": "2026-08-11T17:00:00Z",
+		}).expect(http.StatusOK)
+
+	var copyID int64
+	for _, occ := range e.listEvents("2026-08-01", "2026-08-31").Occurrences {
+		if occ.OccurrenceDate.String() == "2026-08-11" {
+			copyID = occ.EventID
+		}
+	}
+	if copyID == 0 || copyID == series.ID {
+		t.Fatalf("the edited occurrence is addressed by %d; want the override copy's own id", copyID)
+	}
+
+	remindersFor := func(path string) []domain.Reminder {
+		t.Helper()
+		var detail eventDetail
+		e.get(path).expect(http.StatusOK).decode(&detail)
+		return detail.MyReminders
+	}
+	byCopy := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", copyID)
+	bySeries := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", series.ID)
+
+	for _, path := range []string{byCopy, bySeries} {
+		rs := remindersFor(path)
+		if len(rs) != 1 || rs[0].OffsetMinutes == nil || *rs[0].OffsetMinutes != 30 {
+			t.Errorf("%s reports my_reminders = %+v, want the copy of the series' one", path, rs)
+		}
+	}
+
+	// Take it off this one occurrence, the way the editor does.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", copyID), map[string]any{
+		"reminders": []map[string]any{},
+	}).expect(http.StatusOK)
+
+	for _, path := range []string{byCopy, bySeries} {
+		if rs := remindersFor(path); len(rs) != 0 {
+			t.Errorf("%s still reports my_reminders = %+v after the reminder was removed from that occurrence", path, rs)
+		}
+	}
+	// Every other lesson keeps it.
+	if rs := remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID)); len(rs) != 1 {
+		t.Errorf("an untouched occurrence reports my_reminders = %+v, want the series' one", rs)
+	}
+}
+
 // TestSecondEditOfTheSameOccurrence walks the route the client actually takes. An edit
 // to one occurrence answers with a standalone copy of the event, and every later
 // request about that occurrence is addressed to the copy's id — so this is the path a

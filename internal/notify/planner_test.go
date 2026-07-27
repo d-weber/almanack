@@ -480,11 +480,12 @@ func TestCancelledOccurrenceProducesNoReminder(t *testing.T) {
 	}
 }
 
-// TestSeriesReminderFollowsAnOverride is the recurrence policy table in docs/architecture.md's normative
-// inheritance rule: a series-level reminder applies to an edited occurrence, and
-// is computed from *that occurrence's* start time. Moving one swimming lesson
-// must move its reminder with it, and the queued row must still be keyed on the
-// series event, because that is the prefix internal/events prunes by.
+// TestSeriesReminderFollowsAnOverride is docs/architecture.md's normative rule for an
+// edited occurrence: the edit copies the series' reminders onto the copy it leaves
+// behind, and they are then computed from *that occurrence's* start time. Moving one
+// swimming lesson must move its reminder with it — exactly once, which is the half that
+// used to be wrong — and the queued row must still be keyed on the series event, because
+// that is the prefix internal/events prunes by.
 func TestSeriesReminderFollowsAnOverride(t *testing.T) {
 	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
 	e.noDigests()
@@ -506,25 +507,41 @@ func TestSeriesReminderFollowsAnOverride(t *testing.T) {
 	}
 	e.plan()
 
-	ref := events.ReminderSourceRef(series.ID, moved, reminderIDOf(t, e, u.ID))
-	row, ok := findRow(e.queueOfKind(domain.KindReminder), ref)
-	if !ok {
-		t.Fatalf("no reminder queued for the edited occurrence (source %q); a series reminder must survive an override", ref)
+	// The rows are found by the occurrence's prefix rather than by a reminder id,
+	// because which id is doing the reminding is exactly what this rule decides.
+	rows := rowsForOccurrence(e, series.ID, moved)
+	if len(rows) != 1 {
+		t.Fatalf("%d reminders queued for the edited occurrence, want 1: an edit copies the series'"+
+			" reminders onto the occurrence and the series must not fire for it as well", len(rows))
 	}
-	if got := wall(row.DueAt); got != "2027-06-02 18:30 CEST" {
+	if got := wall(rows[0].DueAt); got != "2027-06-02 18:30 CEST" {
 		t.Errorf("reminder for the moved occurrence is at %s, want 2027-06-02 18:30 CEST", got)
 	}
-	if p := e.payloadOf(row); p.Title != "Piscine (retardée)" {
+	if p := e.payloadOf(rows[0]); p.Title != "Piscine (retardée)" {
 		t.Errorf("payload title = %q, want the override's title", p.Title)
 	}
 
 	// The untouched occurrence keeps its original slot.
-	untouched := events.ReminderSourceRef(series.ID, date(2027, 6, 1), reminderIDOf(t, e, u.ID))
-	if row, ok := findRow(e.queueOfKind(domain.KindReminder), untouched); !ok {
-		t.Error("the unedited occurrence lost its reminder")
-	} else if got := wall(row.DueAt); got != "2027-06-01 16:30 CEST" {
+	untouched := rowsForOccurrence(e, series.ID, date(2027, 6, 1))
+	if len(untouched) != 1 {
+		t.Fatalf("%d reminders queued for the unedited occurrence, want 1", len(untouched))
+	}
+	if got := wall(untouched[0].DueAt); got != "2027-06-01 16:30 CEST" {
 		t.Errorf("unedited occurrence reminder is at %s, want 2027-06-01 16:30 CEST", got)
 	}
+}
+
+// rowsForOccurrence collects the reminders queued for one occurrence of a series,
+// whichever reminder row produced them.
+func rowsForOccurrence(e *env, seriesEventID int64, occDate domain.Date) []queueRow {
+	prefix := events.OccurrenceSourcePrefix(seriesEventID, occDate)
+	var out []queueRow
+	for _, r := range e.queueOfKind(domain.KindReminder) {
+		if strings.HasPrefix(r.SourceRef, prefix) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // TestActivityNotifications: fan-out from the log, with the actor, muted members

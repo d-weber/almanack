@@ -297,3 +297,76 @@ func TestDetachedOverrideCopyIsAnOrdinaryEventAgain(t *testing.T) {
 		t.Error("deleting a detached copy left it behind")
 	}
 }
+
+// TestEditingAnOccurrenceCopiesTheSeriesReminders is the writing half of the rule that
+// an edited occurrence owns its reminders. The copy has to arrive carrying them, for
+// everybody and not only for whoever made the edit, because the planner stops firing the
+// series' reminders for a date that has an override — so a copy that arrived empty would
+// mean the one lesson the family moved is the one nobody is reminded about, and Papa
+// would lose his reminder because Maman moved the lesson.
+func TestEditingAnOccurrenceCopiesTheSeriesReminders(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	thirty, day := 30, 1
+	if err := f.st.ReplaceReminders(ctx, nil, series.RecurrenceID, f.maman,
+		[]domain.Reminder{{OffsetMinutes: &thirty}}); err != nil {
+		t.Fatalf("reminders for Maman: %v", err)
+	}
+	if err := f.st.ReplaceReminders(ctx, nil, series.RecurrenceID, f.papa,
+		[]domain.Reminder{{DaysBefore: &day, AtTimeLocal: "09:00"}}); err != nil {
+		t.Fatalf("reminders for Papa: %v", err)
+	}
+
+	date := domain.MustParseDate("2026-04-14")
+	copyEvent, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeThis, date, Input{
+		Title: "Piscine (déplacée)", StartsAt: f.at("2026-04-14", 19, 0), EndsAt: f.at("2026-04-14", 20, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	})
+	if err != nil {
+		t.Fatalf("move one occurrence: %v", err)
+	}
+
+	mamans, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.maman)
+	if err != nil {
+		t.Fatalf("list Maman's reminders on the copy: %v", err)
+	}
+	if len(mamans) != 1 || mamans[0].OffsetMinutes == nil || *mamans[0].OffsetMinutes != 30 {
+		t.Errorf("Maman's reminders on the edited occurrence = %+v, want one at 30 minutes before", mamans)
+	}
+	papas, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.papa)
+	if err != nil {
+		t.Fatalf("list Papa's reminders on the copy: %v", err)
+	}
+	if len(papas) != 1 || papas[0].DaysBefore == nil || *papas[0].DaysBefore != 1 || papas[0].AtTimeLocal != "09:00" {
+		t.Errorf("Papa's reminders on the edited occurrence = %+v, want his own, unchanged", papas)
+	}
+
+	// The series keeps its reminders: every other Tuesday is unaffected.
+	rest, err := f.st.ListReminders(ctx, nil, series.RecurrenceID, f.maman)
+	if err != nil {
+		t.Fatalf("list Maman's reminders on the series: %v", err)
+	}
+	if len(rest) != 1 {
+		t.Errorf("the series has %d of Maman's reminders after one occurrence was edited, want 1", len(rest))
+	}
+
+	// Re-editing the same occurrence must not copy them a second time: the copy is
+	// already the authority on that date, and the series' list may have moved on.
+	if _, err := f.svc.Update(ctx, f.maman, copyEvent.ID, domain.ScopeThis, date, Input{
+		Title: "Piscine (re-déplacée)", StartsAt: f.at("2026-04-14", 20, 0), EndsAt: f.at("2026-04-14", 21, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("re-edit the occurrence: %v", err)
+	}
+	again, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.maman)
+	if err != nil {
+		t.Fatalf("list Maman's reminders after the second edit: %v", err)
+	}
+	if len(again) != 1 {
+		t.Errorf("Maman has %d reminders on the occurrence after a second edit, want 1", len(again))
+	}
+}

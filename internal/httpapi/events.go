@@ -338,7 +338,17 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reminders, err := s.listReminders(ctx, event, user.ID)
+	// The reminders reported are the ones that will actually fire for *this*
+	// occurrence, which for an edited one are its own: an override copy owns its
+	// reminders (docs/architecture.md), and the planner reads them from there. Asking
+	// by the series id and the date is the same occurrence as asking by the copy's id,
+	// so the two spellings have to answer alike — reading them off the event named in
+	// the path is what made the second spelling report the series' list instead.
+	remindersOf := event
+	if occ.IsOverride {
+		remindersOf = occ.Event
+	}
+	reminders, err := s.listReminders(ctx, remindersOf, user.ID)
 	if err != nil {
 		fail(w, r, err)
 		return
