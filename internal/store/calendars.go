@@ -100,7 +100,7 @@ func (s *Store) CreateCalendar(ctx context.Context, c domain.Calendar) (domain.C
 
 // CalendarByID returns the calendar, or domain.ErrNotFound.
 func (s *Store) CalendarByID(ctx context.Context, id int64) (domain.Calendar, error) {
-	c, err := scanCalendar(s.db.QueryRowContext(ctx, `SELECT `+calendarColsBare+` FROM calendars WHERE id = ?`, id))
+	c, err := scanCalendar(s.q.QueryRowContext(ctx, `SELECT `+calendarColsBare+` FROM calendars WHERE id = ?`, id))
 	if err != nil {
 		return domain.Calendar{}, fmt.Errorf("calendar %d: %w", id, err)
 	}
@@ -111,7 +111,7 @@ func (s *Store) CalendarByID(ctx context.Context, id int64) (domain.Calendar, er
 // TransferCreator, so a stale Calendar value round-tripped through an HTTP handler
 // cannot silently hand the calendar to somebody else.
 func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE calendars SET name = ?, color = ? WHERE id = ?`, c.Name, c.Color, c.ID))
 	if err != nil {
 		return fmt.Errorf("update calendar %d: %w", c.ID, err)
@@ -122,7 +122,7 @@ func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
 // DeleteCalendar removes a calendar and, by ON DELETE CASCADE, its members, labels,
 // invites and events — and through those, participants, overrides and reminders.
 func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
-	err := affected(s.db.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))
+	err := affected(s.q.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))
 	if err != nil {
 		return fmt.Errorf("delete calendar %d: %w", id, err)
 	}
@@ -132,7 +132,7 @@ func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 // ListCalendarsForUser returns the calendars a user is a member of, ordered by name.
 // It is the authorisation source of truth for "which calendars may this request see".
 func (s *Store) ListCalendarsForUser(ctx context.Context, userID int64) ([]domain.Calendar, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+calendarColsC+`
 		  FROM calendars c
 		  JOIN calendar_members m ON m.calendar_id = c.id
@@ -175,7 +175,7 @@ func scanMember(row rowScanner) (domain.Member, error) {
 // they belong to.
 func (s *Store) IsMember(ctx context.Context, calendarID, userID int64) (bool, error) {
 	var one int
-	err := s.db.QueryRowContext(ctx,
+	err := s.q.QueryRowContext(ctx,
 		`SELECT 1 FROM calendar_members WHERE calendar_id = ? AND user_id = ?`, calendarID, userID).Scan(&one)
 	if err != nil {
 		if isNotFound(err) {
@@ -192,7 +192,7 @@ func (s *Store) IsMember(ctx context.Context, calendarID, userID int64) (bool, e
 // click must not be an error. Callers that log a member_joined activity should check
 // IsMember first, so a re-click does not log twice.
 func (s *Store) AddMember(ctx context.Context, calendarID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO calendar_members (calendar_id, user_id, joined_at) VALUES (?, ?, ?)
 		ON CONFLICT (calendar_id, user_id) DO NOTHING`,
 		calendarID, userID, mustInstant(s.now()))
@@ -209,7 +209,7 @@ func (s *Store) AddMember(ctx context.Context, calendarID, userID int64) error {
 // DeleteCalendar when nobody is left). Only the creator is allowed to remove other
 // people — that check belongs in the handler, not here.
 func (s *Store) RemoveMember(ctx context.Context, calendarID, userID int64) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`DELETE FROM calendar_members WHERE calendar_id = ? AND user_id = ?`, calendarID, userID))
 	if err != nil {
 		return fmt.Errorf("remove user %d from calendar %d: %w", userID, calendarID, err)
@@ -220,7 +220,7 @@ func (s *Store) RemoveMember(ctx context.Context, calendarID, userID int64) erro
 // ListMembers returns a calendar's members, oldest first — the same order
 // TransferCreator promotes in.
 func (s *Store) ListMembers(ctx context.Context, calendarID int64) ([]domain.Member, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+memberCols+` FROM calendar_members WHERE calendar_id = ? ORDER BY joined_at, user_id`, calendarID)
 	if err != nil {
 		return nil, fmt.Errorf("list members of calendar %d: %w", calendarID, mapErr(err))
@@ -243,7 +243,7 @@ func (s *Store) ListMembers(ctx context.Context, calendarID int64) ([]domain.Mem
 // Membership returns one (calendar, user) pair, including its mute and
 // participating-only flags, or domain.ErrNotFound.
 func (s *Store) Membership(ctx context.Context, calendarID, userID int64) (domain.Member, error) {
-	m, err := scanMember(s.db.QueryRowContext(ctx,
+	m, err := scanMember(s.q.QueryRowContext(ctx,
 		`SELECT `+memberCols+` FROM calendar_members WHERE calendar_id = ? AND user_id = ?`, calendarID, userID))
 	if err != nil {
 		return domain.Member{}, fmt.Errorf("membership of calendar %d by user %d: %w", calendarID, userID, err)
@@ -253,7 +253,7 @@ func (s *Store) Membership(ctx context.Context, calendarID, userID int64) (domai
 
 // UpdateMembership saves the per-pair notification settings. JoinedAt is immutable.
 func (s *Store) UpdateMembership(ctx context.Context, m domain.Member) error {
-	err := affected(s.db.ExecContext(ctx, `
+	err := affected(s.q.ExecContext(ctx, `
 		UPDATE calendar_members SET muted = ?, participating_only = ?
 		 WHERE calendar_id = ? AND user_id = ?`,
 		boolArg(m.Muted), boolArg(m.ParticipatingOnly), m.CalendarID, m.UserID))
@@ -266,7 +266,7 @@ func (s *Store) UpdateMembership(ctx context.Context, m domain.Member) error {
 // CountMembers returns how many people are in a calendar.
 func (s *Store) CountMembers(ctx context.Context, calendarID int64) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM calendar_members WHERE calendar_id = ?`, calendarID).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count members of calendar %d: %w", calendarID, mapErr(err))
@@ -322,7 +322,7 @@ func scanLabel(row rowScanner) (domain.Label, error) {
 
 // ListLabels returns a calendar's ten labels in display order.
 func (s *Store) ListLabels(ctx context.Context, calendarID int64) ([]domain.Label, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+labelCols+` FROM labels WHERE calendar_id = ? ORDER BY position, id`, calendarID)
 	if err != nil {
 		return nil, fmt.Errorf("list labels of calendar %d: %w", calendarID, mapErr(err))
@@ -345,7 +345,7 @@ func (s *Store) ListLabels(ctx context.Context, calendarID int64) ([]domain.Labe
 // LabelByID returns one label, or domain.ErrNotFound. Handlers use it to check that a
 // label belongs to the calendar the event is being filed under.
 func (s *Store) LabelByID(ctx context.Context, id int64) (domain.Label, error) {
-	l, err := scanLabel(s.db.QueryRowContext(ctx, `SELECT `+labelCols+` FROM labels WHERE id = ?`, id))
+	l, err := scanLabel(s.q.QueryRowContext(ctx, `SELECT `+labelCols+` FROM labels WHERE id = ?`, id))
 	if err != nil {
 		return domain.Label{}, fmt.Errorf("label %d: %w", id, err)
 	}
@@ -355,7 +355,7 @@ func (s *Store) LabelByID(ctx context.Context, id int64) (domain.Label, error) {
 // UpdateLabel renames, recolours or reorders a label. There is deliberately no
 // CreateLabel or DeleteLabel: the ten seeded rows are the whole set, forever.
 func (s *Store) UpdateLabel(ctx context.Context, l domain.Label) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE labels SET name = ?, color = ?, position = ? WHERE id = ?`, l.Name, l.Color, l.Position, l.ID))
 	if err != nil {
 		return fmt.Errorf("update label %d: %w", l.ID, err)
@@ -387,7 +387,7 @@ func (s *Store) CreateInvite(ctx context.Context, inv domain.Invite, tokenHash s
 		inv.ExpiresAt = now.Add(domain.InviteTTL)
 	}
 	var out domain.Invite
-	err := scanInvite(s.db.QueryRowContext(ctx, `
+	err := scanInvite(s.q.QueryRowContext(ctx, `
 		INSERT INTO invites (token_hash, calendar_id, created_by, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?)
 		RETURNING `+inviteColsBare,
@@ -407,7 +407,7 @@ func (s *Store) CreateInvite(ctx context.Context, inv domain.Invite, tokenHash s
 // signup handler judges the invite against the same instant it used for everything
 // else in the request.
 func (s *Store) InviteByToken(ctx context.Context, tokenHash string, now time.Time) (domain.Invite, domain.Calendar, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		SELECT `+inviteColsI+`, `+calendarColsC+`
 		  FROM invites i
 		  JOIN calendars c ON c.id = i.calendar_id
@@ -432,7 +432,7 @@ func (s *Store) InviteByToken(ctx context.Context, tokenHash string, now time.Ti
 // (a parent sends one link to the whole household), so this is a counter for the
 // settings screen, not a limit.
 func (s *Store) IncrementInviteUse(ctx context.Context, id int64) error {
-	err := affected(s.db.ExecContext(ctx, `UPDATE invites SET used_count = used_count + 1 WHERE id = ?`, id))
+	err := affected(s.q.ExecContext(ctx, `UPDATE invites SET used_count = used_count + 1 WHERE id = ?`, id))
 	if err != nil {
 		return fmt.Errorf("increment invite %d: %w", id, err)
 	}
@@ -443,7 +443,7 @@ func (s *Store) IncrementInviteUse(ctx context.Context, id int64) error {
 // expired ones — the settings screen shows them so a link can be recognised and
 // revoked.
 func (s *Store) ListInvites(ctx context.Context, calendarID int64) ([]domain.Invite, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+inviteColsBare+` FROM invites WHERE calendar_id = ? ORDER BY created_at DESC, id DESC`, calendarID)
 	if err != nil {
 		return nil, fmt.Errorf("list invites of calendar %d: %w", calendarID, mapErr(err))
@@ -466,7 +466,7 @@ func (s *Store) ListInvites(ctx context.Context, calendarID int64) ([]domain.Inv
 // RevokeInvite kills a link. Revoking an already-revoked invite is domain.ErrNotFound,
 // which keeps the revoke button honest about whether it did anything.
 func (s *Store) RevokeInvite(ctx context.Context, id int64, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, mustInstant(now), id))
 	if err != nil {
 		return fmt.Errorf("revoke invite %d: %w", id, err)
@@ -481,7 +481,7 @@ func (s *Store) SetCalendarImage(ctx context.Context, calendarID int64, img []by
 	if img != nil {
 		arg = img
 	}
-	if err := affected(s.db.ExecContext(ctx, `UPDATE calendars SET image = ? WHERE id = ?`, arg, calendarID)); err != nil {
+	if err := affected(s.q.ExecContext(ctx, `UPDATE calendars SET image = ? WHERE id = ?`, arg, calendarID)); err != nil {
 		return fmt.Errorf("set image for calendar %d: %w", calendarID, err)
 	}
 	return nil
@@ -491,7 +491,7 @@ func (s *Store) SetCalendarImage(ctx context.Context, calendarID int64, img []by
 // calendar has none.
 func (s *Store) CalendarImage(ctx context.Context, calendarID int64) ([]byte, error) {
 	var img []byte
-	err := s.db.QueryRowContext(ctx, `SELECT image FROM calendars WHERE id = ?`, calendarID).Scan(&img)
+	err := s.q.QueryRowContext(ctx, `SELECT image FROM calendars WHERE id = ?`, calendarID).Scan(&img)
 	if err != nil {
 		return nil, fmt.Errorf("calendar %d image: %w", calendarID, mapErr(err))
 	}

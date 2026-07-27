@@ -131,6 +131,18 @@ member's reminders are copied. Missing any one of those steps has a specific, na
 symptom — a cancelled future occurrence coming back to life, or half a series silently
 losing its reminders — and each has a test named after it.
 
+**A scoped edit is one transaction.** Those steps are several writes, and every one of
+them runs on the request's context, so a phone that loses its signal part-way through
+really does stop the sequence — this is not only a crash window. Each flow therefore runs
+inside `Store.InTx`, which hands it a copy of the store whose statements all go through
+one transaction; interrupted, the edit leaves nothing behind rather than a series that
+was capped without its replacement ever being created. The activity row goes in the same
+transaction, because change notifications are planned from the log rather than from the
+edit, and a committed edit whose log row was lost is a change nobody is ever told about.
+Deciding what to write — validating the new pattern, re-anchoring it, working out which
+exceptions still have a date — happens before the transaction opens, since SQLite takes
+its write lock at `BEGIN`.
+
 ## Notifications
 
 The only materialized derivative of an event anywhere in the system is the notification
@@ -171,8 +183,13 @@ of the system that should be expected to need an occasional patch.
 SQLite in WAL mode, with instants as RFC 3339 UTC text and dates as `YYYY-MM-DD` text, so
 that a database opened in fifteen years explains itself without this document.
 
-`internal/store` is the only package containing SQL. Migrations are numbered, embedded and
-immutable, applied in a transaction at startup. They follow expand/contract — each release
+`internal/store` is the only package containing SQL, and the only one that holds a
+`*sql.Tx`: a caller that needs several writes to land together asks for `InTx` and gets a
+transaction-scoped copy of the store, rather than a bespoke store method per sequence.
+Nesting one inside another joins the transaction already open, because a four-connection
+pool holding an exclusive write lock has no second connection to give.
+
+Migrations are numbered, embedded and immutable, applied in a transaction at startup. They follow expand/contract — each release
 stays readable by the previous binary for one version — which is what makes a rollback
 "put the old binary back" rather than "restore a backup". The binary refuses to start
 against a schema newer than it knows, so a mistaken downgrade fails loudly instead of

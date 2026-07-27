@@ -44,7 +44,7 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, passwordHash stri
 	if u.TimeFormat == "" {
 		u.TimeFormat = "24h"
 	}
-	created, err := scanUser(s.db.QueryRowContext(ctx, `
+	created, err := scanUser(s.q.QueryRowContext(ctx, `
 		INSERT INTO users (email, password_hash, display_name, color, lang, week_start, time_format, is_admin, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING `+userColsBare,
@@ -59,7 +59,7 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, passwordHash stri
 
 // UserByID returns the user, or domain.ErrNotFound.
 func (s *Store) UserByID(ctx context.Context, id int64) (domain.User, error) {
-	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userColsBare+` FROM users WHERE id = ?`, id))
+	u, err := scanUser(s.q.QueryRowContext(ctx, `SELECT `+userColsBare+` FROM users WHERE id = ?`, id))
 	if err != nil {
 		return domain.User{}, fmt.Errorf("user %d: %w", id, err)
 	}
@@ -73,7 +73,7 @@ func (s *Store) UserByID(ctx context.Context, id int64) (domain.User, error) {
 // this returning a user and returning ErrNotFound reach the client: the HTTP response
 // is identical either way, or the endpoint becomes an account-enumeration oracle.
 func (s *Store) UserByEmail(ctx context.Context, email string) (domain.User, error) {
-	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userColsBare+` FROM users WHERE email = ?`, email))
+	u, err := scanUser(s.q.QueryRowContext(ctx, `SELECT `+userColsBare+` FROM users WHERE email = ?`, email))
 	if err != nil {
 		return domain.User{}, fmt.Errorf("user %q: %w", email, err)
 	}
@@ -85,7 +85,7 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (domain.User, err
 // ride along into a JSON response by accident.
 func (s *Store) UserPasswordHash(ctx context.Context, id int64) (string, error) {
 	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&hash)
+	err := s.q.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&hash)
 	if err != nil {
 		return "", fmt.Errorf("password hash for user %d: %w", id, mapErr(err))
 	}
@@ -96,7 +96,7 @@ func (s *Store) UserPasswordHash(ctx context.Context, id int64) (string, error) 
 // week start, time format and the admin flag. Password and avatar have their own
 // setters. A duplicate email is domain.ErrConflict.
 func (s *Store) UpdateUser(ctx context.Context, u domain.User) error {
-	err := affected(s.db.ExecContext(ctx, `
+	err := affected(s.q.ExecContext(ctx, `
 		UPDATE users
 		   SET email = ?, display_name = ?, color = ?, lang = ?, week_start = ?, time_format = ?, is_admin = ?
 		 WHERE id = ?`,
@@ -114,7 +114,7 @@ func (s *Store) UpdateUser(ctx context.Context, u domain.User) error {
 // Every caller must also call DeleteUserSessions: a password change exists to lock
 // somebody out, and leaving their sessions alive means it did not.
 func (s *Store) SetPassword(ctx context.Context, userID int64, passwordHash string) error {
-	err := affected(s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, userID))
+	err := affected(s.q.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, userID))
 	if err != nil {
 		return fmt.Errorf("set password for user %d: %w", userID, err)
 	}
@@ -128,7 +128,7 @@ func (s *Store) SetAvatar(ctx context.Context, userID int64, img []byte) error {
 	if img != nil {
 		arg = img
 	}
-	err := affected(s.db.ExecContext(ctx, `UPDATE users SET avatar = ? WHERE id = ?`, arg, userID))
+	err := affected(s.q.ExecContext(ctx, `UPDATE users SET avatar = ? WHERE id = ?`, arg, userID))
 	if err != nil {
 		return fmt.Errorf("set avatar for user %d: %w", userID, err)
 	}
@@ -139,7 +139,7 @@ func (s *Store) SetAvatar(ctx context.Context, userID int64, img []byte) error {
 // user does not exist and when they have no avatar, which is the same 404 either way.
 func (s *Store) Avatar(ctx context.Context, userID int64) ([]byte, error) {
 	var img []byte
-	err := s.db.QueryRowContext(ctx, `SELECT avatar FROM users WHERE id = ?`, userID).Scan(&img)
+	err := s.q.QueryRowContext(ctx, `SELECT avatar FROM users WHERE id = ?`, userID).Scan(&img)
 	if err != nil {
 		return nil, fmt.Errorf("avatar for user %d: %w", userID, mapErr(err))
 	}
@@ -151,7 +151,7 @@ func (s *Store) Avatar(ctx context.Context, userID int64) ([]byte, error) {
 
 // DeleteAvatar clears a user's avatar.
 func (s *Store) DeleteAvatar(ctx context.Context, userID int64) error {
-	err := affected(s.db.ExecContext(ctx, `UPDATE users SET avatar = NULL WHERE id = ?`, userID))
+	err := affected(s.q.ExecContext(ctx, `UPDATE users SET avatar = NULL WHERE id = ?`, userID))
 	if err != nil {
 		return fmt.Errorf("delete avatar for user %d: %w", userID, err)
 	}
@@ -161,7 +161,7 @@ func (s *Store) DeleteAvatar(ctx context.Context, userID int64) error {
 // ListUsers returns every account, ordered by display name. A family deployment has at
 // most a couple of dozen, so this is deliberately unpaginated.
 func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userColsBare+` FROM users ORDER BY display_name, id`)
+	rows, err := s.q.QueryContext(ctx, `SELECT `+userColsBare+` FROM users ORDER BY display_name, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", mapErr(err))
 	}
@@ -184,7 +184,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 // it to decide whether the next account created becomes the admin.
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count users: %w", mapErr(err))
 	}
 	return n, nil
@@ -206,7 +206,7 @@ func scanSession(row rowScanner, s *domain.Session) error {
 func (s *Store) CreateSession(ctx context.Context, userID int64, tokenHash string, expires time.Time) (domain.Session, error) {
 	now := s.now()
 	var sess domain.Session
-	err := scanSession(s.db.QueryRowContext(ctx, `
+	err := scanSession(s.q.QueryRowContext(ctx, `
 		INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at)
 		VALUES (?, ?, ?, ?, ?)
 		RETURNING id, user_id, created_at, last_seen_at, expires_at`,
@@ -224,7 +224,7 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, tokenHash strin
 // filters on its own clock rather than trusting every caller to remember the check.
 // Sliding renewal is TouchSession's job.
 func (s *Store) SessionByToken(ctx context.Context, tokenHash string) (domain.Session, domain.User, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		SELECT `+sessionCols+`, `+userColsU+`
 		  FROM sessions s
 		  JOIN users u ON u.id = s.user_id
@@ -249,7 +249,7 @@ func (s *Store) SessionByToken(ctx context.Context, tokenHash string) (domain.Se
 // TouchSession slides the session window on use, which is what makes the 90-day
 // expiry a rolling one rather than a hard logout every quarter.
 func (s *Store) TouchSession(ctx context.Context, id int64, lastSeen, expires time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?`,
 		mustInstant(lastSeen), mustInstant(expires), id))
 	if err != nil {
@@ -261,7 +261,7 @@ func (s *Store) TouchSession(ctx context.Context, id int64, lastSeen, expires ti
 // DeleteSession logs one browser out. It is idempotent: logging out of a session that
 // has already expired or been deleted is a success, not a 404.
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, tokenHash); err != nil {
+	if _, err := s.q.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, tokenHash); err != nil {
 		return fmt.Errorf("delete session: %w", mapErr(err))
 	}
 	return nil
@@ -270,7 +270,7 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 // DeleteUserSessions logs a user out everywhere. Idempotent. Every password change and
 // every completed password reset must call it.
 func (s *Store) DeleteUserSessions(ctx context.Context, userID int64) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+	if _, err := s.q.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
 		return fmt.Errorf("delete sessions for user %d: %w", userID, mapErr(err))
 	}
 	return nil
@@ -280,7 +280,7 @@ func (s *Store) DeleteUserSessions(ctx context.Context, userID int64) error {
 // went. The scheduler calls it; nothing depends on it having run, since SessionByToken
 // already ignores expired rows.
 func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, mustInstant(now))
+	res, err := s.q.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, mustInstant(now))
 	if err != nil {
 		return 0, fmt.Errorf("delete expired sessions: %w", mapErr(err))
 	}
@@ -298,7 +298,7 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int, 
 // CreatePasswordReset records a password-reset token. As with sessions, only the
 // SHA-256 is stored; the plaintext goes out in the email and nowhere else.
 func (s *Store) CreatePasswordReset(ctx context.Context, userID int64, tokenHash string, expires time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO password_resets (token_hash, user_id, created_at, expires_at)
 		VALUES (?, ?, ?, ?)`,
 		tokenHash, userID, mustInstant(s.now()), mustInstant(expires))
@@ -316,7 +316,7 @@ func (s *Store) CreatePasswordReset(ctx context.Context, userID int64, tokenHash
 // the three are indistinguishable to the caller by design.
 func (s *Store) ConsumePasswordReset(ctx context.Context, tokenHash string, now time.Time) (int64, error) {
 	var userID int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.q.QueryRowContext(ctx, `
 		UPDATE password_resets
 		   SET used_at = ?
 		 WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?

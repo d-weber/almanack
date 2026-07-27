@@ -488,7 +488,8 @@ func (n *Notifier) planSummaries(ctx context.Context, from, to time.Time, prefs 
 // Notifying from the log rather than from the edit itself is what makes the
 // pipeline crash-proof: the edit and its log row land in the same transaction, so
 // a crash between the edit and the notification loses nothing — the next pass
-// finds the row still sitting past the cursor.
+// finds the row still sitting past the cursor. That transaction is real and is
+// tested for; see Service.inTx in internal/events, which every edit goes through.
 //
 // Activity rows are exempt from the [from, to] window: their slot is when the
 // change happened, which is always in the past, and they are meant to go out on

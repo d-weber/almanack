@@ -56,7 +56,7 @@ func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID 
 	if err != nil {
 		return nil, fmt.Errorf("list reminders: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+reminderCols+` FROM reminders WHERE `+where+` ORDER BY id`, args...)
+	rows, err := s.q.QueryContext(ctx, `SELECT `+reminderCols+` FROM reminders WHERE `+where+` ORDER BY id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list reminders: %w", mapErr(err))
 	}
@@ -130,7 +130,7 @@ func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrence
 // pass to materialize the next 48 hours of the queue; at family scale that is a few
 // hundred rows.
 func (s *Store) ListAllReminders(ctx context.Context) ([]domain.Reminder, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+reminderCols+` FROM reminders ORDER BY id`)
+	rows, err := s.q.QueryContext(ctx, `SELECT `+reminderCols+` FROM reminders ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list all reminders: %w", mapErr(err))
 	}
@@ -173,7 +173,7 @@ func scanPush(row rowScanner) (domain.PushSubscription, error) {
 // a browser that has just handed over a working subscription is by definition not the
 // dead one that accumulated those failures.
 func (s *Store) UpsertPushSubscription(ctx context.Context, p domain.PushSubscription) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, ua_label, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (endpoint) DO UPDATE SET
@@ -191,7 +191,7 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, p domain.PushSubscri
 
 // ListPushSubscriptions returns one user's devices, oldest first.
 func (s *Store) ListPushSubscriptions(ctx context.Context, userID int64) ([]domain.PushSubscription, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+pushCols+` FROM push_subscriptions WHERE user_id = ? ORDER BY id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list push subscriptions for user %d: %w", userID, mapErr(err))
@@ -203,7 +203,7 @@ func (s *Store) ListPushSubscriptions(ctx context.Context, userID int64) ([]doma
 // subscriptions nothing has confirmed in a fortnight — the signature of a silently
 // revoked iOS subscription, which keeps returning success to the sender.
 func (s *Store) ListAllPushSubscriptions(ctx context.Context) ([]domain.PushSubscription, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+pushCols+` FROM push_subscriptions ORDER BY id`)
+	rows, err := s.q.QueryContext(ctx, `SELECT `+pushCols+` FROM push_subscriptions ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list all push subscriptions: %w", mapErr(err))
 	}
@@ -230,7 +230,7 @@ func collectPush(rows *sql.Rows, what string) ([]domain.PushSubscription, error)
 // usually reacting to a 404 or 410 from the push service, and a concurrent delivery
 // attempt may already have pruned the same row.
 func (s *Store) DeletePushSubscription(ctx context.Context, endpoint string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint); err != nil {
+	if _, err := s.q.ExecContext(ctx, `DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint); err != nil {
 		return fmt.Errorf("delete push subscription: %w", mapErr(err))
 	}
 	return nil
@@ -240,7 +240,7 @@ func (s *Store) DeletePushSubscription(ctx context.Context, endpoint string) err
 // really still there, clearing the failure counter with it. This is the only signal
 // that distinguishes a live subscription from a dead one on iOS.
 func (s *Store) ConfirmPushSubscription(ctx context.Context, endpoint string, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE push_subscriptions SET last_confirmed_at = ?, failures = 0 WHERE endpoint = ?`,
 		mustInstant(now), endpoint))
 	if err != nil {
@@ -251,7 +251,7 @@ func (s *Store) ConfirmPushSubscription(ctx context.Context, endpoint string, no
 
 // MarkPushOK records a delivery the push service accepted.
 func (s *Store) MarkPushOK(ctx context.Context, id int64, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE push_subscriptions SET last_ok_at = ?, failures = 0 WHERE id = ?`, mustInstant(now), id))
 	if err != nil {
 		return fmt.Errorf("mark push subscription %d ok: %w", id, err)
@@ -263,7 +263,7 @@ func (s *Store) MarkPushOK(ctx context.Context, id int64, now time.Time) error {
 // a pruning rule: a 404/410 is what removes a subscription, and a failure count alone
 // never proves a subscription is dead.
 func (s *Store) MarkPushFailure(ctx context.Context, id int64) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE push_subscriptions SET failures = failures + 1 WHERE id = ?`, id))
 	if err != nil {
 		return fmt.Errorf("mark push subscription %d failed: %w", id, err)
@@ -305,7 +305,7 @@ func scanPrefs(row rowScanner) (domain.NotificationPrefs, error) {
 // they have never saved any. It reports domain.ErrNotFound only when the user does not
 // exist.
 func (s *Store) Prefs(ctx context.Context, userID int64) (domain.NotificationPrefs, error) {
-	p, err := scanPrefs(s.db.QueryRowContext(ctx, prefsSelect+` WHERE u.id = ?`, userID))
+	p, err := scanPrefs(s.q.QueryRowContext(ctx, prefsSelect+` WHERE u.id = ?`, userID))
 	if err != nil {
 		return domain.NotificationPrefs{}, fmt.Errorf("prefs for user %d: %w", userID, err)
 	}
@@ -315,7 +315,7 @@ func (s *Store) Prefs(ctx context.Context, userID int64) (domain.NotificationPre
 // UpdatePrefs saves a user's notification settings, inserting the row if this is the
 // first time they have touched them. Idempotent.
 func (s *Store) UpdatePrefs(ctx context.Context, p domain.NotificationPrefs) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO notification_prefs
 			(user_id, digest_enabled, digest_time, digest_on_empty, daily_summary_mode,
 			 summary_time, email_reminders, email_digest, activity_push)
@@ -345,7 +345,7 @@ func (s *Store) UpdatePrefs(ctx context.Context, p domain.NotificationPrefs) err
 // opened the settings screen must still get the default-on digest rather than being
 // invisible to the planner.
 func (s *Store) ListAllPrefs(ctx context.Context) ([]domain.NotificationPrefs, error) {
-	rows, err := s.db.QueryContext(ctx, prefsSelect+` ORDER BY u.id`)
+	rows, err := s.q.QueryContext(ctx, prefsSelect+` ORDER BY u.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list all prefs: %w", mapErr(err))
 	}
@@ -392,7 +392,7 @@ func scanQueued(row rowScanner) (domain.QueuedNotification, error) {
 // SourceRef is the stable identity of the thing being announced, e.g.
 // "reminder:12:2026-08-04".
 func (s *Store) EnqueueNotification(ctx context.Context, q domain.QueuedNotification) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO notification_queue (user_id, kind, source_ref, payload, due_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		q.UserID, string(q.Kind), q.SourceRef, q.Payload, mustInstant(q.DueAt))
@@ -407,7 +407,7 @@ func (s *Store) DueNotifications(ctx context.Context, now time.Time, limit int) 
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+queueCols+`
 		  FROM notification_queue
 		 WHERE sent_at IS NULL AND skipped IS NULL AND due_at <= ?
@@ -424,7 +424,7 @@ func (s *Store) DueNotifications(ctx context.Context, now time.Time, limit int) 
 // stale-skip — a reminder for an event that has not happened yet is still worth
 // sending; one for last Tuesday is not.
 func (s *Store) ListUnsentBefore(ctx context.Context, t time.Time) ([]domain.QueuedNotification, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+queueCols+`
 		  FROM notification_queue
 		 WHERE sent_at IS NULL AND skipped IS NULL AND due_at < ?
@@ -453,7 +453,7 @@ func collectQueued(rows *sql.Rows, what string) ([]domain.QueuedNotification, er
 
 // MarkSending records that delivery has been attempted and counts the attempt.
 func (s *Store) MarkSending(ctx context.Context, id int64, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE notification_queue SET sending_started_at = ?, attempts = attempts + 1 WHERE id = ?`,
 		mustInstant(now), id))
 	if err != nil {
@@ -469,7 +469,7 @@ func (s *Store) MarkSending(ctx context.Context, id int64, now time.Time) error 
 // an annoyance where a missed one is the failure this application exists to prevent.
 // Do not "fix" duplicates by moving this call earlier.
 func (s *Store) MarkSent(ctx context.Context, id int64, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx, `UPDATE notification_queue SET sent_at = ? WHERE id = ?`,
+	err := affected(s.q.ExecContext(ctx, `UPDATE notification_queue SET sent_at = ? WHERE id = ?`,
 		mustInstant(now), id))
 	if err != nil {
 		return fmt.Errorf("mark notification %d sent: %w", id, err)
@@ -484,7 +484,7 @@ func (s *Store) MarkSent(ctx context.Context, id int64, now time.Time) error {
 // that. now is recorded as sending_started_at, so the log still shows when the
 // decision was taken.
 func (s *Store) MarkSkipped(ctx context.Context, id int64, reason string, now time.Time) error {
-	err := affected(s.db.ExecContext(ctx,
+	err := affected(s.q.ExecContext(ctx,
 		`UPDATE notification_queue SET skipped = ?, sending_started_at = ? WHERE id = ?`,
 		reason, mustInstant(now), id))
 	if err != nil {
@@ -503,7 +503,7 @@ func (s *Store) MarkSkipped(ctx context.Context, id int64, reason string, now ti
 //
 // The prefix is a literal, not a pattern: LIKE wildcards inside it are escaped.
 func (s *Store) DeleteUnsentBySourcePrefix(ctx context.Context, prefix string) (int, error) {
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.q.ExecContext(ctx, `
 		DELETE FROM notification_queue
 		 WHERE sent_at IS NULL AND skipped IS NULL AND source_ref LIKE ? ESCAPE '\'`,
 		likeEscape(prefix)+"%")
@@ -540,7 +540,7 @@ func scanActivity(row rowScanner) (domain.Activity, error) {
 // reading that way after the event is gone, and activity_log.event_id is deliberately
 // not a foreign key for the same reason.
 func (s *Store) LogActivity(ctx context.Context, a domain.Activity) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO activity_log (calendar_id, user_id, action, event_id, title, at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		a.CalendarID, a.UserID, string(a.Action), putInt64Ptr(a.EventID), a.Title, mustInstant(s.now()))
@@ -569,7 +569,7 @@ func (s *Store) ListActivity(ctx context.Context, calendarIDs []int64, limit int
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+activityCols+` FROM activity_log WHERE `+where+` ORDER BY at DESC, id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list activity: %w", mapErr(err))
@@ -601,7 +601,7 @@ func (s *Store) ListActivity(ctx context.Context, calendarIDs []int64, limit int
 // table only has to hold the differences — which is what keeps the calendar right in
 // 2040 without a data refresh, and still correctable the year the law changes.
 func (s *Store) HolidayOverrides(ctx context.Context) (map[domain.Date]*string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT date, name FROM holiday_overrides ORDER BY date`)
+	rows, err := s.q.QueryContext(ctx, `SELECT date, name FROM holiday_overrides ORDER BY date`)
 	if err != nil {
 		return nil, fmt.Errorf("list holiday overrides: %w", mapErr(err))
 	}
@@ -627,7 +627,7 @@ func (s *Store) SetHolidayOverride(ctx context.Context, date domain.Date, name *
 	if date.IsZero() {
 		return fmt.Errorf("set holiday override: date must be set: %w", domain.ErrInvalid)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO holiday_overrides (date, name) VALUES (?, ?)
 		ON CONFLICT (date) DO UPDATE SET name = excluded.name`, date, putStrPtr(name))
 	if err != nil {
@@ -642,7 +642,7 @@ func (s *Store) SetHolidayOverride(ctx context.Context, date domain.Date, name *
 // and making callers distinguish it from an error buys nothing.
 func (s *Store) GetMeta(ctx context.Context, key string) (string, error) {
 	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	err := s.q.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
 	if err != nil {
 		if isNotFound(mapErr(err)) {
 			return "", nil
@@ -654,7 +654,7 @@ func (s *Store) GetMeta(ctx context.Context, key string) (string, error) {
 
 // SetMeta writes a key. Idempotent.
 func (s *Store) SetMeta(ctx context.Context, key, value string) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO meta (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	if err != nil {
@@ -676,7 +676,7 @@ func (s *Store) ListUnsentByKind(ctx context.Context, from, to time.Time, kinds 
 		placeholders[i] = "?"
 		args = append(args, string(k))
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+queueCols+`
 		  FROM notification_queue
 		 WHERE sent_at IS NULL AND skipped IS NULL
@@ -692,7 +692,7 @@ func (s *Store) ListUnsentByKind(ctx context.Context, from, to time.Time, kinds 
 // DeleteQueued removes one undelivered notification. It refuses to touch a row that
 // has already been delivered: the outbox is also the record of what was sent.
 func (s *Store) DeleteQueued(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.q.ExecContext(ctx,
 		`DELETE FROM notification_queue WHERE id = ? AND sent_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("delete queued notification %d: %w", id, mapErr(err))
