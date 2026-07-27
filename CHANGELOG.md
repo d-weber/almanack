@@ -206,6 +206,34 @@ Notable changes to this project. The format follows
   thirty-second tick and throwing the result away, and a household of six with the digest on
   now plans a pass in about an eighth of the time. Nothing changed in the database.
   ([#8](https://github.com/d-weber/almanack/issues/8))
+- **A push that was accepted covered for an email that was not.** A reminder goes out over
+  two channels at once, and the outbox recorded only that *something* had taken it. So when
+  the mail server was briefly unavailable — a restart, a full disk, a relay refusing
+  connections for ten minutes — the push service's cheerful acceptance retired the reminder
+  and the email was dropped with a line in the log. That is the worst pairing there is,
+  because the email exists precisely to cover for push: a phone that has quietly revoked its
+  subscription still has its push service answer "delivered" to the sender, so "push
+  accepted, email failed" is a reminder nobody ever receives, filed as sent. Two smaller
+  faults sat inside the same decision. If the database read that lists somebody's devices
+  failed, the failure was logged, the list came back empty, and the reminder was marked sent
+  without one device having been asked — a missed notification that leaves no trace
+  anywhere. And a reminder was given up on after ten attempts, which at one attempt per tick
+  is five minutes: a push service having a bad afternoon permanently retired the reminder for
+  tomorrow morning's dentist, hours before anyone needed telling, and the row was filed as
+  undeliverable while both the appointment and every chance of announcing it were still
+  ahead. Each channel is now accounted for on its own. A reminder is finished when every
+  channel that person actually has took it; a failed lookup leaves it queued for the next
+  tick; and it keeps being retried for as long as the thing it announces still matters —
+  until the appointment, for four hours for a digest, for a day for a change notice — with
+  the wait between attempts doubling from thirty seconds to an hour, so a long outage does
+  not become thousands of requests at a push service. Crucially, the leg that already went is
+  not sent again: an evening of push failures does not turn into an evening of duplicate
+  emails. This is the first change to require one to the database — an existing calendar
+  gains a column recording when its email went out, and upgrades in place with nothing to
+  do. One thing worth knowing: if push never recovers before the appointment, the reminder
+  ends up filed as skipped even though the email arrived. The record of the email is kept
+  beside it, rather than inventing a third answer to "did this go out?".
+  ([#9](https://github.com/d-weber/almanack/issues/9))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

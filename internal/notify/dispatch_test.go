@@ -472,8 +472,11 @@ func TestSentAtIsWrittenOnlyAfterAcceptance(t *testing.T) {
 	}
 
 	// The service comes back; the retry succeeds and only then is sent_at written.
+	// The clock moves on because a failed row is not retried in the same breath —
+	// see TestRetriesBackOff.
 	e.push.setStatus("iphone", http.StatusCreated)
 	e.mail.fail = false
+	e.clk.Set(time.Date(2027, 6, 1, 6, 32, 0, 0, time.UTC))
 	e.dispatch()
 	rows = e.queueOfKind(domain.KindReminder)
 	if rows[0].SentAt.IsZero() {
@@ -485,8 +488,9 @@ func TestSentAtIsWrittenOnlyAfterAcceptance(t *testing.T) {
 }
 
 // TestUndeliverableRowIsRetired: a row that never succeeds must not be retried
-// every thirty seconds until 2040. It is retired as a skip with a reason, which
-// is evidence, not silence.
+// until 2040. It is retired as a skip with a reason, which is evidence, not
+// silence — and the reason is that the appointment it warned about has happened,
+// not that some attempt counter ran out while it was still hours away.
 func TestUndeliverableRowIsRetired(t *testing.T) {
 	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
 	e.noDigests()
@@ -500,19 +504,367 @@ func TestUndeliverableRowIsRetired(t *testing.T) {
 	e.reminderMinutes(ev, u.ID, 30)
 	e.plan()
 	e.clk.Set(time.Date(2027, 6, 1, 21, 0, 0, 0, time.UTC)) // 23:00 Paris, the slot
+	e.dispatch()
 
-	for i := 0; i < maxDeliveryAttempts; i++ {
-		e.dispatch()
+	// While the appointment is ahead the row is kept, however badly the last
+	// attempt went.
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminder rows, want 1", len(rows))
+	}
+	if rows[0].Skipped != "" {
+		t.Fatalf("a row for an appointment two hours away was retired: %q", rows[0].Skipped)
+	}
+
+	// The appointment happens. Now there is nothing left to warn about.
+	e.clk.Set(time.Date(2027, 6, 2, 0, 0, 0, 0, time.UTC)) // 02:00 Paris, half an hour late
+	e.dispatch()
+
+	rows = e.queueOfKind(domain.KindReminder)
+	if rows[0].Skipped == "" {
+		t.Fatalf("the row is still being retried after the appointment: %+v", rows[0])
+	}
+	if !rows[0].SentAt.IsZero() {
+		t.Error("a retired row must not be recorded as sent")
+	}
+}
+
+// TestAnAcceptedPushDoesNotCoverForAFailedEmail is the bug this whole file is
+// arranged around. Push is the channel that cannot be trusted — an iOS
+// subscription dies with the service still answering 201 — so email exists to
+// cover for it. Counting one acceptance across both channels made the untrusted
+// one vouch for the trustworthy one, and the mail was dropped with a log line.
+func TestAnAcceptedPushDoesNotCoverForAFailedEmail(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone") // answers 201
+	e.mail.fail = true          // the MTA is briefly down
+
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+	e.clk.Set(time.Date(2027, 6, 1, 6, 30, 0, 0, time.UTC))
+	e.dispatch()
+
+	if got := len(e.push.received()); got != 1 {
+		t.Fatalf("push deliveries = %d, want 1", got)
+	}
+	if got := len(e.mail.messages()); got != 0 {
+		t.Fatalf("emails = %d, want 0 — the MTA refused", got)
 	}
 	rows := e.queueOfKind(domain.KindReminder)
 	if len(rows) != 1 {
 		t.Fatalf("got %d reminder rows, want 1", len(rows))
 	}
+	if !rows[0].SentAt.IsZero() {
+		t.Fatal("the push acceptance retired the row; the email is now lost, and it was the channel that exists because push lies")
+	}
+	if rows[0].Skipped != "" {
+		t.Fatalf("the row was retired after one failure: %q", rows[0].Skipped)
+	}
+	if !rows[0].EmailSentAt.IsZero() {
+		t.Error("email_sent_at was written for an email the MTA refused")
+	}
+
+	// The MTA comes back and the outstanding leg goes out.
+	e.mail.fail = false
+	e.clk.Set(time.Date(2027, 6, 1, 6, 32, 0, 0, time.UTC))
+	e.dispatch()
+
+	msgs := e.mail.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("emails after the MTA recovered = %d, want 1", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Subject, "Dentiste") {
+		t.Errorf("email subject = %q, want it to name the event", msgs[0].Subject)
+	}
+	rows = e.queueOfKind(domain.KindReminder)
+	if rows[0].SentAt.IsZero() {
+		t.Fatalf("the row was not retired once both channels had gone: %+v", rows[0])
+	}
+	if rows[0].EmailSentAt.IsZero() {
+		t.Error("the email went but email_sent_at was not recorded")
+	}
+}
+
+// TestTheEmailLegIsNotSentAgainOnARetry is the guard that makes retrying safe.
+// Once the row is retried until its event is past rather than ten times, an email
+// leg that is re-sent on every attempt means the family is mailed the same
+// reminder every backoff interval for hours. The recorded leg is skipped instead.
+func TestTheEmailLegIsNotSentAgainOnARetry(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	e.push.setStatus("iphone", http.StatusInternalServerError) // the push service is down
+	e.setPrefs(domain.NotificationPrefs{
+		UserID: u.ID, DigestTime: "07:30", SummaryTime: "20:00", EmailReminders: true,
+	})
+
+	// The appointment is a day off, so the row stays relevant across every retry
+	// below and nothing here depends on the staleness policy.
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 2, 10, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 24*60)
+	e.plan()
+
+	slot := time.Date(2027, 6, 1, 8, 0, 0, 0, time.UTC) // 10:00 Paris, the day before
+	e.clk.Set(slot)
+	e.dispatch()
+
+	if got := len(e.mail.messages()); got != 1 {
+		t.Fatalf("emails = %d, want 1: the mail leg succeeded even though push did not", got)
+	}
+	row := e.queueOfKind(domain.KindReminder)[0]
+	if row.EmailSentAt.IsZero() {
+		t.Fatal("the email went out but email_sent_at was not recorded, so the next retry will send it again")
+	}
+	if !row.SentAt.IsZero() {
+		t.Fatal("the row was retired while the push leg had not been accepted")
+	}
+
+	// Six hours of retries, spaced well past the longest backoff.
+	for i := 1; i <= 6; i++ {
+		e.clk.Set(slot.Add(time.Duration(i) * time.Hour))
+		e.dispatch()
+	}
+	if got := len(e.mail.messages()); got != 1 {
+		t.Fatalf("emails after six hours of push failures = %d, want 1; the family has been mailed the same reminder %d times", got, got)
+	}
+	if got := len(e.push.received()); got < 6 {
+		t.Errorf("push attempts = %d, want the retries to have kept trying", got)
+	}
+
+	// The push service comes back. The row retires, and still only one email.
+	e.push.setStatus("iphone", http.StatusCreated)
+	e.clk.Set(slot.Add(7 * time.Hour))
+	e.dispatch()
+
+	row = e.queueOfKind(domain.KindReminder)[0]
+	if row.SentAt.IsZero() {
+		t.Fatalf("the row was not retired once push recovered: %+v", row)
+	}
+	if got := len(e.mail.messages()); got != 1 {
+		t.Errorf("emails = %d, want 1 for one reminder", got)
+	}
+}
+
+// TestAFailedSubscriptionLookupDoesNotRetireTheRow: the read that finds a person's
+// devices can fail like any other. Logging it and carrying on left subs nil, so
+// the push leg was silently skipped and the row was marked sent — the only
+// notification failure mode that leaves no trace anywhere.
+func TestAFailedSubscriptionLookupDoesNotRetireTheRow(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+
+	e.breakSubscriptionReads()
+	e.clk.Set(time.Date(2027, 6, 1, 6, 30, 0, 0, time.UTC))
+	e.dispatch()
+
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminder rows, want 1", len(rows))
+	}
+	if !rows[0].SentAt.IsZero() {
+		t.Fatal("a row was marked sent although the devices to send it to could not be read")
+	}
+	if rows[0].Skipped != "" {
+		t.Fatalf("the row was retired on a database error: %q", rows[0].Skipped)
+	}
+	if got := len(e.push.received()); got != 0 {
+		t.Errorf("push deliveries = %d, want 0", got)
+	}
+
+	// The database answers again and the reminder goes out.
+	e.subscriptionReadsWorkAgain()
+	e.clk.Set(time.Date(2027, 6, 1, 6, 32, 0, 0, time.UTC))
+	e.dispatch()
+
+	rows = e.queueOfKind(domain.KindReminder)
+	if rows[0].SentAt.IsZero() {
+		t.Fatalf("the retry did not deliver: %+v", rows[0])
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("push deliveries = %d, want 1", got)
+	}
+}
+
+// TestAnOutageOutlastingTheOldAttemptCapStillDelivers: retirement is a question
+// about the event, not about a counter. Ten attempts one tick apart is five
+// minutes; a push service is down for longer than that on a bad afternoon, and
+// the reminder it retired was for something the next morning.
+func TestAnOutageOutlastingTheOldAttemptCapStillDelivers(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	e.push.setStatus("iphone", http.StatusInternalServerError)
+	e.setPrefs(domain.NotificationPrefs{ // push only, so nothing else can retire the row
+		UserID: u.ID, DigestTime: "07:30", SummaryTime: "20:00", EmailReminders: false,
+	})
+
+	// A reminder a day ahead of the appointment: the row is due at 10:00 on the
+	// 2nd for a swimming lesson at 10:00 on the 3rd.
+	ev := e.timedEvent(cal, u.ID, "Piscine", 2027, 6, 3, 10, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 24*60)
+	e.plan()
+
+	slot := time.Date(2027, 6, 2, 8, 0, 0, 0, time.UTC) // 10:00 Paris, the day before
+	const outageHours = 20
+	for i := 0; i < outageHours; i++ {
+		e.clk.Set(slot.Add(time.Duration(i) * time.Hour))
+		e.dispatch()
+	}
+
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminder rows, want 1", len(rows))
+	}
+	if rows[0].Skipped != "" {
+		t.Fatalf("a %d-hour outage retired a reminder for a lesson that has not happened yet: %q",
+			outageHours, rows[0].Skipped)
+	}
+	if rows[0].Attempts <= 10 {
+		t.Fatalf("the row was attempted %d times over %d hours; delivery gave up early",
+			rows[0].Attempts, outageHours)
+	}
+
+	// The service comes back with two hours to spare, and the reminder still lands.
+	e.push.setStatus("iphone", http.StatusCreated)
+	e.clk.Set(time.Date(2027, 6, 3, 6, 0, 0, 0, time.UTC)) // 08:00 Paris
+	e.dispatch()
+
+	rows = e.queueOfKind(domain.KindReminder)
+	if rows[0].SentAt.IsZero() {
+		t.Fatalf("the reminder was not delivered once push recovered: %+v", rows[0])
+	}
+}
+
+// TestRetiredOnceTheEventIsPast is the other half: nothing became immortal when
+// the attempt cap went. A row whose event has happened is retired on the next
+// pass, whatever its attempt count.
+func TestRetiredOnceTheEventIsPast(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	e.push.setStatus("iphone", http.StatusInternalServerError)
+	e.mail.fail = true
+
+	ev := e.timedEvent(cal, u.ID, "Piscine", 2027, 6, 3, 10, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 24*60)
+	e.plan()
+	e.clk.Set(time.Date(2027, 6, 2, 8, 0, 0, 0, time.UTC))
+	e.dispatch()
+
+	// The lesson comes and goes with the outage still on.
+	e.clk.Set(time.Date(2027, 6, 3, 12, 0, 0, 0, time.UTC)) // 14:00 Paris, four hours late
+	e.dispatch()
+
+	rows := e.queueOfKind(domain.KindReminder)
 	if rows[0].Skipped == "" {
-		t.Fatalf("row was still being retried after %d attempts: %+v", maxDeliveryAttempts, rows[0])
+		t.Fatalf("the row survived its own event: %+v", rows[0])
 	}
 	if !rows[0].SentAt.IsZero() {
 		t.Error("a retired row must not be recorded as sent")
+	}
+	if got := len(e.queue()); got == 0 {
+		t.Error("the skipped row was deleted; the reason it carries is the evidence")
+	}
+}
+
+// TestRetryBackoffCurve pins the schedule. Retrying a failing row every 30 seconds
+// for as long as it stays relevant is up to ~5,700 requests per subscription
+// across a 48-hour reminder window, which push services rate-limit.
+func TestRetryBackoffCurve(t *testing.T) {
+	for _, tc := range []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, 0},
+		{1, time.Minute},
+		{2, 2 * time.Minute},
+		{3, 4 * time.Minute},
+		{4, 8 * time.Minute},
+		{5, 16 * time.Minute},
+		{6, 32 * time.Minute},
+		{7, time.Hour},
+		{8, time.Hour},
+		{100, time.Hour},
+	} {
+		if got := retryBackoff(tc.attempts); got != tc.want {
+			t.Errorf("retryBackoff(%d) = %s, want %s", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// TestRetriesBackOff: the curve, observed through the scheduler. A tick that lands
+// inside the backoff window must not touch the providers at all.
+func TestRetriesBackOff(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	e.push.setStatus("iphone", http.StatusInternalServerError)
+	e.setPrefs(domain.NotificationPrefs{
+		UserID: u.ID, DigestTime: "07:30", SummaryTime: "20:00", EmailReminders: false,
+	})
+
+	ev := e.timedEvent(cal, u.ID, "Piscine", 2027, 6, 2, 10, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 24*60)
+	e.plan()
+
+	slot := time.Date(2027, 6, 1, 8, 0, 0, 0, time.UTC)
+	// after is the offset from the slot at which a tick lands; want is how many
+	// times the push service should have been called by then. The first failure
+	// buys a minute, the second two, the third four.
+	for _, tc := range []struct {
+		after time.Duration
+		want  int
+	}{
+		{0, 1},
+		{29 * time.Second, 1},
+		{59 * time.Second, 1},
+		{time.Minute, 2},
+		{2 * time.Minute, 2},
+		{3*time.Minute + 1*time.Second, 3},
+		{5 * time.Minute, 3},
+		{7*time.Minute + 2*time.Second, 4},
+	} {
+		e.clk.Set(slot.Add(tc.after))
+		e.dispatch()
+		if got := len(e.push.received()); got != tc.want {
+			t.Errorf("%s after the slot: %d push attempts, want %d", tc.after, got, tc.want)
+		}
+	}
+}
+
+// breakSubscriptionReads makes reading a user's devices fail the way any database
+// read can. The store API has no way to say "fail this query", so this reaches
+// past it through Store.DB, which exists for exactly that (see failFanOutOf).
+func (e *env) breakSubscriptionReads() {
+	e.t.Helper()
+	if _, err := e.st.DB().ExecContext(e.ctx,
+		`ALTER TABLE push_subscriptions RENAME TO push_subscriptions_unavailable`); err != nil {
+		e.t.Fatalf("install the failure: %v", err)
+	}
+}
+
+func (e *env) subscriptionReadsWorkAgain() {
+	e.t.Helper()
+	if _, err := e.st.DB().ExecContext(e.ctx,
+		`ALTER TABLE push_subscriptions_unavailable RENAME TO push_subscriptions`); err != nil {
+		e.t.Fatalf("clear the failure: %v", err)
 	}
 }
 

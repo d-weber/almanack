@@ -650,15 +650,16 @@ func decodeHeader(value string) string {
 // queueRow is one outbox row as the dev page shows it. The instants stay strings: this
 // view exists to show exactly what is in the table.
 type queueRow struct {
-	ID        int64
-	UserID    int64
-	Kind      string
-	SourceRef string
-	Payload   string
-	DueAt     string
-	SentAt    string
-	Skipped   string
-	Attempts  int
+	ID          int64
+	UserID      int64
+	Kind        string
+	SourceRef   string
+	Payload     string
+	DueAt       string
+	SentAt      string
+	EmailSentAt string
+	Skipped     string
+	Attempts    int
 }
 
 // queueRows reads the outbox, sent rows included.
@@ -670,7 +671,7 @@ type queueRow struct {
 // for. If internal/store ever grows that method, this should call it instead.
 func (s *Server) queueRows(ctx context.Context, limit int) ([]queueRow, error) {
 	rows, err := s.store.DB().QueryContext(ctx, `
-		SELECT id, user_id, kind, source_ref, payload, due_at, sent_at, skipped, attempts
+		SELECT id, user_id, kind, source_ref, payload, due_at, sent_at, email_sent_at, skipped, attempts
 		  FROM notification_queue
 		 ORDER BY due_at DESC, id DESC
 		 LIMIT ?`, limit)
@@ -682,12 +683,12 @@ func (s *Server) queueRows(ctx context.Context, limit int) ([]queueRow, error) {
 	var out []queueRow
 	for rows.Next() {
 		var q queueRow
-		var sentAt, skipped sql.NullString
+		var sentAt, emailSentAt, skipped sql.NullString
 		if err := rows.Scan(&q.ID, &q.UserID, &q.Kind, &q.SourceRef, &q.Payload,
-			&q.DueAt, &sentAt, &skipped, &q.Attempts); err != nil {
+			&q.DueAt, &sentAt, &emailSentAt, &skipped, &q.Attempts); err != nil {
 			return nil, fmt.Errorf("read notification queue: %w", err)
 		}
-		q.SentAt, q.Skipped = sentAt.String, skipped.String
+		q.SentAt, q.EmailSentAt, q.Skipped = sentAt.String, emailSentAt.String, skipped.String
 		out = append(out, q)
 	}
 	return out, rows.Err()
@@ -729,6 +730,12 @@ func (s *Server) handleDevNotifications(w http.ResponseWriter, r *http.Request) 
 			state, pill = "sent "+q.SentAt, "sent"
 		case q.Skipped != "":
 			state, pill = "skipped: "+q.Skipped, "skipped"
+		}
+		// The email leg is shown separately because it is the one fact the row's
+		// own state can contradict: a row retired as skipped after a long push
+		// outage may well have been emailed on its first attempt.
+		if q.EmailSentAt != "" {
+			state += " · email " + q.EmailSentAt
 		}
 		who := names[q.UserID]
 		if who == "" {

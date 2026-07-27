@@ -799,6 +799,16 @@ func checkV020Family(t *testing.T, s *Store) {
 	if !slices.Equal(unsentIDs, []int64{4, 2}) {
 		t.Errorf("still-owed notifications = %v, want [4 2]", unsentIDs)
 	}
+	// A column added after these rows were written has to read back as "this has
+	// not happened", not as an error and not as a zero that means something else.
+	// email_sent_at (0003) is NULL for every row v0.2.0 wrote, and that is the
+	// truth: none of them had an email leg recorded separately.
+	for _, q := range unsent {
+		if !q.EmailSentAt.IsZero() {
+			t.Errorf("notification %d came out of the upgrade claiming its email went at %s",
+				q.ID, q.EmailSentAt)
+		}
+	}
 
 	activity, err := s.ListActivity(ctx(), []int64{familyCal, parentsCal, kidsCal}, 100, 0)
 	if err != nil {
@@ -3082,6 +3092,26 @@ func TestNotificationQueue(t *testing.T) {
 	sendAt := due.Add(time.Hour)
 	if err := s.MarkSending(ctx(), first, sendAt); err != nil {
 		t.Fatalf("MarkSending: %v", err)
+	}
+	// The email leg is recorded on its own, before the row is finished: the push
+	// leg may still be owed, and the retry that owes it must not mail again.
+	if err := s.MarkEmailSent(ctx(), first, sendAt); err != nil {
+		t.Fatalf("MarkEmailSent: %v", err)
+	}
+	stillDue, err := s.DueNotifications(ctx(), sendAt, 10)
+	if err != nil || len(stillDue) == 0 {
+		t.Fatalf("DueNotifications after the email leg = %+v, %v; the row is not finished yet", stillDue, err)
+	}
+	if !stillDue[0].EmailSentAt.Equal(sendAt) {
+		t.Errorf("EmailSentAt = %s, want %s", stillDue[0].EmailSentAt, sendAt)
+	}
+	// Calling it twice keeps the first answer: it is when the mail went, not when
+	// somebody last asked.
+	if err := s.MarkEmailSent(ctx(), first, sendAt.Add(time.Hour)); err != nil {
+		t.Fatalf("MarkEmailSent again: %v", err)
+	}
+	if again, _ := s.DueNotifications(ctx(), sendAt, 10); len(again) == 0 || !again[0].EmailSentAt.Equal(sendAt) {
+		t.Errorf("EmailSentAt was rewritten by a second call: %+v", again)
 	}
 	if err := s.MarkSent(ctx(), first, sendAt); err != nil {
 		t.Fatalf("MarkSent: %v", err)
