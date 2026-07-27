@@ -184,8 +184,14 @@ every copy shows one series once per exception it has. So a copy is returned exa
 it matches the query and its own template does not — no duplicates and no silent misses,
 in one condition. Search deliberately has no window: it is over the whole calendar, past
 and finished series included, which is also why a series result sorts under the date its
-pattern began. The occurrence-relative date beside each result (`next_occurrence`) is
-computed per result by the handler, because only expansion knows it and SQL cannot ask.
+pattern began. The occurrence-relative dates on each result are computed per result by the
+handler, because only expansion knows them and SQL cannot ask: `next_occurrence` is the
+date beside the row, and `occurrence_date` is the day the row opens on — the same date
+while the series runs, and its final occurrence once it has stopped. They are two fields
+rather than one because a finished series has no next occurrence and still has to lead
+somewhere, and the client must not work that day out for itself. A series' anchor is not
+necessarily an occurrence of its own rule, so the obvious guess is wrong, and it fails as
+a 404 on the detail screen rather than as a day drawn slightly askew.
 
 That standalone event is the id the API then publishes for the occurrence, so the *second*
 thing anyone does to an edited occurrence arrives addressed to the copy rather than to the

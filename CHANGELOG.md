@@ -678,6 +678,20 @@ Notable changes to this project. The format follows
   made late in the evening; that is corrected too. Nothing was ever stored wrongly, so no
   calendar needs repairing — the events were always there, on the day they always were.
   ([#64](https://github.com/d-weber/almanack/issues/64))
+- **Tapping a search result for a finished repeat could still say "Not found.", even for
+  an all-day one.** The same symptom as above and a different cause, so fixing the
+  timezone did nothing for it. A repeat that has run out has no next date to open on, and
+  the results screen fell back to the day the repeat *started* — which is not necessarily
+  a day it ever happened. Set something up to repeat on Tuesdays while you happen to be
+  creating it on a Monday, and Monday is the day the search result pointed at; the same
+  goes for a monthly repeat set to a day of the month other than the one you started on.
+  The screen then reported the activity as missing, which looks exactly like somebody
+  having deleted it. The results screen no longer works the day out at all: the server
+  says which day each row opens on, and for a repeat that has finished it now says the
+  **last day it ran** — which is the one you were looking for if you are searching for
+  something that is over. Everything still running is unaffected and opens on its next
+  date, as before. Nothing was stored wrongly, so nothing needs repairing.
+  ([#69](https://github.com/d-weber/almanack/issues/69))
 
 ## [0.2.0] — 2026-07-27
 

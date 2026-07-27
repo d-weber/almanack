@@ -88,6 +88,62 @@ func Next(r domain.Recurrence, after domain.Date) (domain.Date, bool) {
 	return found, got
 }
 
+// lastProbeDays is the first window Last looks back over from Until. It quadruples until
+// an occurrence turns up or the probe reaches DTStart. A month settles every daily and
+// weekly rule at any interval a family would write, and the growth is there for the
+// monthly ones that skip: "the 29th, every twelve months" happens only in leap years, so
+// its final occurrence can sit four years back from the date the series was told to stop.
+const lastProbeDays = 32
+
+// Last returns the final occurrence of a rule that has one. ok is false for a rule that
+// runs forever, for a malformed one, and for one that never occurs at all — "the 30th,
+// every twelve months" anchored in February has no date to land on in any period, so it
+// has no last occurrence any more than it has a next one.
+//
+// This is what a finished series is asked for. Next answers nothing once Until has
+// passed, and the anchor is not a usable stand-in because DTStart need not satisfy the
+// rule it anchors: a weekly series starting on a Monday with by_weekday of Tuesday has
+// its first occurrence the day after DTStart.
+//
+// Only a rule with an Until can have a last occurrence. An unbounded one either still
+// has a next occurrence or never had any, and the second case is reported the same way
+// as the first — false — because there is no date to name either way.
+//
+// Cost is set by the distance from Until back to the final occurrence, not by how long
+// the series ran: a daily series going back twenty years is answered by the first probe.
+// The worst case is a rule that never occurs, which walks its whole span once — in
+// periods, so a monthly rule costs months rather than days.
+func Last(r domain.Recurrence) (domain.Date, bool) {
+	// Validate up front rather than leaning on window: an unusable rule must leave the
+	// loop below, and "no occurrence in this probe" is not a reason to stop widening it.
+	if r.Until == nil || Validate(r) != nil {
+		return domain.Date{}, false
+	}
+	for span := lastProbeDays; ; span *= 4 {
+		lo := r.Until.AddDays(-span)
+		// The probe has reached the start of the series, so this pass sees all of it and
+		// there is no wider one to try.
+		whole := !lo.After(r.DTStart)
+		if whole {
+			lo = r.DTStart
+		}
+		// each's precondition, met without calling window: lo is at or after DTStart
+		// because it is clamped to it, and hi is Until itself, which window would keep.
+		var found domain.Date
+		got := false
+		each(r, lo, *r.Until, func(d domain.Date) bool {
+			found, got = d, true
+			return true // ascending, so the last one to arrive is the answer
+		})
+		if got {
+			return found, true
+		}
+		if whole {
+			return domain.Date{}, false
+		}
+	}
+}
+
 // Occurs reports whether d is an occurrence of r. It is defined in terms of the same
 // expansion Expand uses, so the two can never disagree.
 func Occurs(r domain.Recurrence, d domain.Date) bool {

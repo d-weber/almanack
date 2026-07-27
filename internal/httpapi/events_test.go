@@ -927,6 +927,106 @@ func TestSearchIsAccentInsensitiveAndScoped(t *testing.T) {
 	}
 }
 
+// TestSearchOffersADateAFinishedSeriesActuallyHappenedOn is the regression for #69.
+//
+// A result has to link somewhere, and for a series that has run out there is no next
+// occurrence to link to. The browser used to fall back to the event's start date, on the
+// assumption that a series begins on one of its own occurrences. It need not: DTStart is
+// only the interval anchor, and the editor is happy to build a weekly rule that excludes
+// the weekday it starts on. The date then reaches GET /events/{id} as ?date=, which
+// answers 404 for a day the rule does not land on — so tapping the result said "Not
+// found." about an event that is still there.
+//
+// This is the all-day shape deliberately. The sibling fault in #64 was a timezone one and
+// could only reach timed events; this one has no instant in it anywhere, which is what
+// makes it a different bug rather than more of the same.
+func TestSearchOffersADateAFinishedSeriesActuallyHappenedOn(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	// Anchored on Monday 5 January, happening on Tuesdays, stopped on 27 January — all
+	// of it behind the fake clock's July. The occurrences are the 6th, 13th, 20th and
+	// 27th, and the anchor is not among them.
+	series := e.createEvent(map[string]any{
+		"calendar_id": cal.ID, "title": "Atelier poterie", "label_id": labels[1].ID,
+		"all_day": true, "start_date": "2026-01-05", "end_date": "2026-01-05",
+		"recurrence": map[string]any{
+			"freq": "weekly", "interval": 1,
+			"by_weekday": []int{int(time.Tuesday)}, "until": "2026-01-27",
+		},
+	})
+
+	// The anchor is what the browser used to link to, and the API refuses it outright.
+	// Asserted rather than assumed: if this ever starts answering 200 the test below is
+	// no longer about anything.
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-01-05", series.ID)).expect(http.StatusNotFound)
+
+	var found struct {
+		Results []searchResult `json:"results"`
+	}
+	e.get("/api/v1/search?q=poterie").expect(http.StatusOK).decode(&found)
+	if len(found.Results) != 1 || found.Results[0].Event.ID != series.ID {
+		t.Fatalf("search for a finished series = %+v", found.Results)
+	}
+	got := found.Results[0]
+	if got.NextOccurrence != nil {
+		t.Errorf("next_occurrence = %v, want null: the series ended in January", got.NextOccurrence)
+	}
+	if got.OccurrenceDate == nil {
+		t.Fatal("occurrence_date is null, so the row has nowhere to link and the family sees an error")
+	}
+	if s := got.OccurrenceDate.String(); s != "2026-01-27" {
+		t.Errorf("occurrence_date = %s, want 2026-01-27, the last Tuesday the series ran", s)
+	}
+	if got.OccurrenceDate.Equal(got.Event.StartDate) {
+		t.Errorf("occurrence_date = %s is the anchor, which is not an occurrence of this rule", got.OccurrenceDate)
+	}
+
+	// The whole point: the date the search hands over opens the event.
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", series.ID, got.OccurrenceDate)).expect(http.StatusOK)
+}
+
+// TestSearchLinksToTheNextOccurrenceWhileASeriesStillRuns keeps the common case honest:
+// occurrence_date is not a "past events only" field, it is the day every row links to,
+// and while there is a next occurrence it is that one.
+func TestSearchLinksToTheNextOccurrenceWhileASeriesStillRuns(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	oneOff := e.createEvent(map[string]any{
+		"calendar_id": cal.ID, "title": "Rentrée à l'École", "label_id": labels[1].ID,
+		"all_day": true, "start_date": "2026-09-01", "end_date": "2026-09-01",
+	})
+	series := e.weeklySeries(cal, labels[4].ID)
+
+	var found struct {
+		Results []searchResult `json:"results"`
+	}
+	for _, tc := range []struct{ query, want string }{
+		{"ecole", "2026-09-01"},
+		{"piscine", "2026-08-04"},
+	} {
+		e.get("/api/v1/search?q=" + tc.query).expect(http.StatusOK).decode(&found)
+		if len(found.Results) != 1 {
+			t.Fatalf("search for %q = %+v", tc.query, found.Results)
+		}
+		got := found.Results[0]
+		if got.OccurrenceDate == nil || got.OccurrenceDate.String() != tc.want {
+			t.Errorf("search for %q: occurrence_date = %v, want %s", tc.query, got.OccurrenceDate, tc.want)
+		}
+		if got.NextOccurrence == nil || !got.NextOccurrence.Equal(*got.OccurrenceDate) {
+			t.Errorf("search for %q: next_occurrence %v and occurrence_date %v disagree while the event still runs",
+				tc.query, got.NextOccurrence, got.OccurrenceDate)
+		}
+	}
+
+	// Both dates open, which is what the two fields promise.
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-09-01", oneOff.ID)).expect(http.StatusOK)
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-08-04", series.ID)).expect(http.StatusOK)
+}
+
 // ---------------------------------------------------------------------------
 // Avatars
 // ---------------------------------------------------------------------------
