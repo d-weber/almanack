@@ -509,6 +509,17 @@ Notable changes to this project. The format follows
   suite's `ALMANACK_URL` is now `E2E_BASE_URL`, since a test-only variable squatting in the
   application's namespace would stop `make dev` in any shell that exported it.
   ([#30](https://github.com/d-weber/almanack/issues/30))
+- **Searching for a name spelled with ø, ß, ð, þ or đ found nothing unless you typed the
+  letter itself.** Search ignores accents by folding both the stored text and what you type
+  down to plain letters, so `ecole` finds `École`; the table doing the folding covered
+  French and the ligatures `æ` and `œ`, but stopped there. A birthday filed under `Søren`
+  was therefore reachable only by typing the ø — an o would not do — and the same for the
+  German ß and the Icelandic ð and þ. Those five letters and their capitals now fold the
+  way the rest do: `soren` finds `Søren`, `strasse` finds `Straße`, `thorbjorg` finds
+  `Þorbjörg`. One caveat, now written down beside the table: the folded copy of an event is
+  computed when the event is saved, so events created before this version keep the spelling
+  they were filed under until they are next edited. Opening one and saving it re-files it.
+  ([#24](https://github.com/d-weber/almanack/issues/24))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

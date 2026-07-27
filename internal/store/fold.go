@@ -26,7 +26,14 @@ func foldSearch(s string) string {
 // foldRunes maps the accented letters of French — plus the neighbouring European
 // letters a family address book tends to collect — onto their unaccented form. The
 // uppercase forms are listed too so that foldAccents is correct on its own, without
-// depending on a caller having lowercased first.
+// depending on a caller having lowercased first; they fold to the lowercase spelling,
+// because every caller lowercases in the end.
+//
+// Editing this table only changes what is written from then on. search_norm is computed
+// once per event write and the query is folded on the way in, so an event stored before
+// a rune was added still holds the old spelling and still will not match — until the
+// event is saved again, which recomputes it. There is no reindex: adding a rune fixes
+// searching for events created afterwards, and re-saving an old event fixes that one.
 var foldRunes = map[rune]string{
 	'à': "a", 'á': "a", 'â': "a", 'ã': "a", 'ä': "a", 'å': "a",
 	'ç': "c",
@@ -37,6 +44,7 @@ var foldRunes = map[rune]string{
 	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u",
 	'ý': "y", 'ÿ': "y",
 	'œ': "oe", 'æ': "ae",
+	'ø': "o", 'ß': "ss", 'ð': "d", 'þ': "th", 'đ': "d",
 
 	'À': "a", 'Á': "a", 'Â': "a", 'Ã': "a", 'Ä': "a", 'Å': "a",
 	'Ç': "c",
@@ -47,6 +55,7 @@ var foldRunes = map[rune]string{
 	'Ù': "u", 'Ú': "u", 'Û': "u", 'Ü': "u",
 	'Ý': "y", 'Ÿ': "y",
 	'Œ': "oe", 'Æ': "ae",
+	'Ø': "o", 'ẞ': "ss", 'Ð': "d", 'Þ': "th", 'Đ': "d",
 }
 
 // foldAccents replaces every rune in foldRunes with its unaccented spelling and leaves

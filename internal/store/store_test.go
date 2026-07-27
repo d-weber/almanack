@@ -2800,11 +2800,25 @@ func TestFoldAccents(t *testing.T) {
 		{"Ça où ?", "ca ou ?"},
 		{"plain ascii", "plain ascii"},
 		{"", ""},
+		// The letters the neighbours use. A family address book collects them from
+		// one Danish friend and one Icelandic pen pal, and typing the ASCII spelling
+		// is the only way most keyboards can reach them.
+		{"Søren Kjærgård", "soren kjaergard"},
+		{"Straße", "strasse"},
+		{"Þorbjörg Eiðsdóttir", "thorbjorg eidsdottir"},
+		{"Đorđe", "dorde"},
 	}
 	for _, tc := range cases {
 		if got := foldSearch(tc.in); got != tc.want {
 			t.Errorf("foldSearch(%q) = %q; want %q", tc.in, got, tc.want)
 		}
+	}
+	// foldAccents is documented as correct without a caller having lowercased first,
+	// so the uppercase half of the table is checked on its own — it folds to the
+	// lowercase spelling, like every other entry. strings.ToLower maps most of these
+	// away before foldSearch ever sees them.
+	if got := foldAccents("ØÆŒÇÐÞĐẞ"); got != "oaeoecdthdss" {
+		t.Errorf("foldAccents(uppercase) = %q; want %q", got, "oaeoecdthdss")
 	}
 	if got := searchNorm("Réunion", "École", "Gâteau"); got != "reunion ecole gateau" {
 		t.Errorf("searchNorm = %q", got)
