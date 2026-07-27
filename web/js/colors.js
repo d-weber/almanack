@@ -6,10 +6,11 @@
 //                  whatever wants them;
 //   - by person  — the participants' colours, and the label survives as a dot.
 //
-// An event is drawn in that colour rather than in a wash of it, so `--c-on` carries
-// the text colour to use over it: readableOn() measures the WCAG contrast of black
-// and white against the actual colour and returns whichever wins. `--c-rgb` is the
+// An event is drawn in that colour rather than in a wash of it. `--c-rgb` is the
 // same colour as a triplet, for the tint the phone paints behind a timed event.
+// Filled event boxes reverse their title out in white whatever the colour, so they
+// take no `--c-on`; readableOn() still serves the swatches, pills and avatars, where
+// a pastel with black on it is right rather than a broken box.
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const SHORT_HEX = /^#[0-9a-fA-F]{3}$/;
@@ -99,7 +100,6 @@ export function chipStyle(colors) {
     '--c': colors.main,
     '--c-rgb': rgbTriplet(colors.main),
     '--c-label': colors.label,
-    '--c-on': readableOn(colors.main),
   };
 }
 

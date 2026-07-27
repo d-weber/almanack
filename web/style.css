@@ -4,9 +4,9 @@
  *  - all colours and sizes come from custom properties on :root;
  *  - light and dark are both first-class: prefers-color-scheme decides, and a
  *    [data-theme] attribute on <html> overrides it in either direction;
- *  - event colours arrive from JS as --c (the colour), --c-rgb (its triplet, for
- *    tints) and --c-on (black or white, whichever colors.js measured as the more
- *    legible over it);
+ *  - event colours arrive from JS as --c (the colour) and --c-rgb (its triplet, for
+ *    tints); --c-on is the measured black-or-white for swatches and avatars, which
+ *    the filled event boxes deliberately do not use — those are always white;
  *  - mobile-first, with a two-column desktop layout at 900px;
  *  - 44px minimum tap targets — a grandparent uses this on a phone.
  */
@@ -882,9 +882,15 @@ a { color: var(--accent); }
 /* ------------------------------------------------------- events: chips */
 
 /* Two shapes (see eventui.js). An all-day event is a filled box in its own colour
-   with the title reversed out of it; a timed event is a dot, a title and an hour.
-   The reversed text is black or white, whichever colors.js measured as the more
-   legible on that particular colour — white on all but the palest labels. */
+   with the title reversed out of it in white; a timed event is a dot, a title and
+   an hour.
+
+   White always, not the colour-by-colour choice used for swatches and avatars: the
+   filled box is a shape people recognise from every paper calendar, and it stops
+   being that shape when half the boxes turn up with black text on them. The cost is
+   that a very pale label — the pastel end of the palette — makes a box its own title
+   struggles against; those colours read better as a timed event's dot than as a
+   filled box. */
 .chip,
 .bar,
 .event-row {
@@ -894,7 +900,7 @@ a { color: var(--accent); }
   width: 100%;
   border: 0;
   background: var(--c);
-  color: var(--c-on);
+  color: #fff;
   text-align: left;
   overflow: hidden;
 }
@@ -1041,9 +1047,9 @@ a { color: var(--accent); }
   min-width: 52px;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  /* No opacity here: over a filled box this text is already at the contrast
-     readableOn() measured, and fading it would spend the margin it just won.
-     Size and weight carry the hierarchy instead. */
+  /* No opacity here: white on a filled box has only the contrast the colour
+     allows, and fading it would spend what little there is. Size and weight carry
+     the hierarchy instead. */
   color: inherit;
   font-weight: 600;
 }
