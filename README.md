@@ -109,7 +109,8 @@ provides, and what your deployment must provide.
 | [docs/development.md](docs/development.md) | Running and testing locally, including notifications with no push service and no mail server |
 | [docs/architecture.md](docs/architecture.md) | How it is built and why, the data model, and the rules that keep dates correct |
 | [docs/api.md](docs/api.md) | The HTTP API, normative for both the server and the browser |
-| [docs/known-issues.md](docs/known-issues.md) | What is broken or missing, reproduced and written down — the list to help from |
+| [The issue tracker](https://github.com/d-weber/almanack/issues) | What is broken or missing, each item reproduced before it was filed — the list to help from |
+| [Milestones](https://github.com/d-weber/almanack/milestones) | The road from here to 1.0, and what 1.0 will promise |
 | [docs/deployment.md](docs/deployment.md) | What an operator must provide |
 | [docs/migrating-from-timetree.md](docs/migrating-from-timetree.md) | Getting your data out of TimeTree, which has no export |
 | [CONVENTIONS.md](CONVENTIONS.md) | Binding rules for code in this repo |
@@ -117,7 +118,10 @@ provides, and what your deployment must provide.
 
 ## Status
 
-Working and in use, but young: version 0.2, one household, no upgrade history yet. The
+Working and in use, but young: version 0.2, one household, no upgrade history yet.
+[The milestones](https://github.com/d-weber/almanack/milestones) are the plan for closing
+that gap, and [#28](https://github.com/d-weber/almanack/issues/28) is what has to be true
+before a 1.0 is claimed. The
 test suite is thorough where correctness is hard — recurrence and daylight saving, the
 notification outbox, the push encryption — and what it covers is described in
 [docs/development.md](docs/development.md).
@@ -135,8 +139,9 @@ decided what shipped.
 That is said here rather than left to be worked out, because it should change how you read
 the rest of this page. Treat the claims about correctness as claims, and check them against
 the things you can actually run: `make check`, the recurrence and daylight-saving tests, the
-Web Push vectors taken from the RFCs, and [docs/known-issues.md](docs/known-issues.md) —
-which is what an adversarial review found and reproduced, not what the author hoped was true.
+Web Push vectors taken from the RFCs, and
+[the issue tracker](https://github.com/d-weber/almanack/issues) — which is what an
+adversarial review found and reproduced, not what the author hoped was true.
 
 ## Licence
 

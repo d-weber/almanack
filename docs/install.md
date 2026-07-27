@@ -471,5 +471,5 @@ and the client reloads when it changes.
 | Everyone locked out after one wrong password | `ALMANACK_TRUSTED_PROXIES` does not list your proxy, so the whole family shares one rate-limit bucket. |
 | Times are an hour out | `ALMANACK_TZ` is the family timezone and the only one that matters; devices elsewhere still see family time. |
 
-Anything else: [docs/known-issues.md](known-issues.md) lists what is known to be broken, and
-issues are welcome.
+Anything else: [the issue tracker](https://github.com/d-weber/almanack/issues) lists what is
+known to be broken, and new issues are welcome.

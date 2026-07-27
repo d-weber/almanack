@@ -16,6 +16,21 @@ Notable changes to this project. The format follows
 - **[docs/RESTORE.md](docs/RESTORE.md)** — the restore runbook `docs/development.md` had been
   pointing at for some time without it existing.
 
+### Changed
+
+- **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one
+  GitHub issue per defect, and the road to 1.0 is milestones 0.3 to 1.0 — the data layer,
+  notifications, the browser, then operations, followed by a soak through both
+  daylight-saving changes. [#28](https://github.com/d-weber/almanack/issues/28) is the
+  1.0 release criteria. Each item was re-reviewed against the code on the way across:
+  several proposed fixes were cut down to smaller ones, two were dropped as not worth the
+  code, and one had already been fixed.
+
+### Removed
+
+- `docs/known-issues.md` and the roadmap that briefly replaced part of it. A file listing
+  what is broken goes stale between releases; an issue closes when the fix lands.
+
 ### Fixed
 
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
@@ -102,8 +117,9 @@ Then a browser pass, which found three things nothing server-side could have:
   and 1050px — invisible at 640px and at 900px, which is exactly where the desktop
   sidebar appears.
 
-Everything found but not yet fixed is written down in
-[docs/known-issues.md](docs/known-issues.md).
+Everything found but not yet fixed is in
+[the issue tracker](https://github.com/d-weber/almanack/issues) (it was
+`docs/known-issues.md` at the time of this release).
 
 ## [0.1.0] — 2026-07-27
 

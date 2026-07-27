@@ -29,6 +29,12 @@ reminder fire, and rehearsing a backup restore.
 
 ## What is likely to be accepted
 
+[The issue tracker](https://github.com/d-weber/almanack/issues) is the to-do list. Every
+item there was reproduced before it was filed, and each one says where the code is and how
+big the fix should be; [`good first issue`](https://github.com/d-weber/almanack/labels/good%20first%20issue)
+marks the small ones. The [milestones](https://github.com/d-weber/almanack/milestones) say
+what is wanted in which release.
+
 - Bug fixes, with a test that fails before the fix.
 - Translations. The catalogs are `internal/i18n/locales/*.json`; a test asserts every
   language has exactly the same key set, and it will tell you which keys are missing.
