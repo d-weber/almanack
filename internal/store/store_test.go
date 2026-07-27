@@ -3098,6 +3098,121 @@ func TestFoldAccents(t *testing.T) {
 	}
 }
 
+// TestBackfillMatchesSearchNorm holds the shortcut 0005_refold_search_norm.sql takes.
+//
+// That migration rewrites the stored index by substituting five letters, rather than
+// re-deriving it from title, location and notes — which it is only allowed to do
+// because every fold involved is exact and callers lowercase first. This asserts the
+// two agree on the awkward cases: a rune whose fold is two letters, one that follows
+// another folded rune, uppercase forms, and text with none of them in it. If someone
+// adds a rune whose fold is context-dependent, this is what should stop them.
+func TestBackfillMatchesSearchNorm(t *testing.T) {
+	// The table as it stood before ø ß ð þ đ were added — what a 0.2.0 binary used to
+	// write into search_norm.
+	previous := make(map[rune]string, len(foldRunes))
+	for r, v := range foldRunes {
+		previous[r] = v
+	}
+	for _, r := range []rune{'ø', 'ß', 'ð', 'þ', 'đ', 'Ø', 'ẞ', 'Ð', 'Þ', 'Đ'} {
+		delete(previous, r)
+	}
+	storedBy020 := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if rep, ok := previous[r]; ok {
+				b.WriteString(rep)
+				continue
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+	// The five replace() calls of the migration, in the order it applies them.
+	backfill := func(s string) string {
+		for _, pair := range [][2]string{
+			{"ø", "o"}, {"ß", "ss"}, {"ð", "d"}, {"þ", "th"}, {"đ", "d"},
+		} {
+			s = strings.ReplaceAll(s, pair[0], pair[1])
+		}
+		return s
+	}
+
+	for _, title := range []string{
+		"Søren Kjærgård", "Straße", "STRASSE", "Þorbjörg Eiðsdóttir", "Đorđe",
+		"Blåbærsyltetøj", "Ærø", "Œuf à Ålesund", "ØßðÞĐ run together",
+		"École", "plain ascii", "",
+	} {
+		want := searchNorm(title, "Ólafsvík", "café")
+		got := backfill(storedBy020(title + " " + "Ólafsvík" + " " + "café"))
+		if got != want {
+			t.Errorf("%q:\n backfilled = %q\n searchNorm = %q", title, got, want)
+		}
+	}
+}
+
+// TestAddingAFoldRuneKeepsOldEventsFindable is the reason 0005 exists.
+//
+// Adding a rune to foldRunes changes the query side at once and the stored side never,
+// so without a backfill an event written before the change stops matching *both*
+// spellings: the folded query no longer contains the letter, and the stored row still
+// does. This walks that whole path — a row holding what 0.2.0 wrote, the migrations
+// applied over it, and then the searches a family would actually type.
+func TestAddingAFoldRuneKeepsOldEventsFindable(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	find := func(q string) []domain.Event {
+		t.Helper()
+		events, err := s.SearchEvents(ctx(), []int64{cal.ID}, q, nil, nil)
+		if err != nil {
+			t.Fatalf("SearchEvents(%q): %v", q, err)
+		}
+		return events
+	}
+
+	ev, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Søren's Straße party",
+		StartsAt: baseTime, EndsAt: baseTime.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Put the row back the way 0.2.0 would have left it: folded by a table that had
+	// never heard of ø or ß.
+	const old = "søren's straße party  "
+	if _, err := s.db.ExecContext(ctx(),
+		`UPDATE events SET search_norm = ? WHERE id = ?`, old, ev.ID); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// Before the backfill, neither spelling finds it — which is the regression.
+	for _, q := range []string{"Søren", "soren"} {
+		if got := find(q); len(got) != 0 {
+			t.Fatalf("pre-backfill search %q found %d rows; the row should be stranded", q, len(got))
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx(), `UPDATE events
+	   SET search_norm = replace(replace(replace(replace(replace(
+	         search_norm, 'ø', 'o'), 'ß', 'ss'), 'ð', 'd'), 'þ', 'th'), 'đ', 'd')
+	 WHERE search_norm <> replace(replace(replace(replace(replace(
+	         search_norm, 'ø', 'o'), 'ß', 'ss'), 'ð', 'd'), 'þ', 'th'), 'đ', 'd')`); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	// Afterwards both spellings find it, which is more than 0.2.0 managed: it answered
+	// the accented spelling only.
+	for _, q := range []string{"Søren", "soren", "Straße", "strasse"} {
+		got := find(q)
+		if len(got) != 1 || got[0].ID != ev.ID {
+			t.Errorf("search %q found %d rows; want just event %d", q, len(got), ev.ID)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Reminders, prefs, queue
 // ---------------------------------------------------------------------------

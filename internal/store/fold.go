@@ -29,11 +29,18 @@ func foldSearch(s string) string {
 // depending on a caller having lowercased first; they fold to the lowercase spelling,
 // because every caller lowercases in the end.
 //
-// Editing this table only changes what is written from then on. search_norm is computed
-// once per event write and the query is folded on the way in, so an event stored before
-// a rune was added still holds the old spelling and still will not match — until the
-// event is saved again, which recomputes it. There is no reindex: adding a rune fixes
-// searching for events created afterwards, and re-saving an old event fixes that one.
+// Adding a rune here is half a change, and shipping only this half breaks searching for
+// the events that already exist. search_norm is computed once per event write while the
+// query is folded on the way in, so the two sides have to agree about every rune: teach
+// the query that "ø" means "o" and a row still reading "søren" stops matching — and it
+// does not fall back to matching "ø" either, because the query no longer contains one.
+// The event was findable before and is findable by nothing afterwards.
+//
+// So the other half is a migration that rewrites search_norm for the rows already
+// stored: 0005_refold_search_norm.sql did it for ø ß ð þ đ, and anyone adding a rune
+// below owes the same. It is a substitution over the old value rather than a
+// re-derivation because every fold here is exact and callers lowercase first;
+// TestBackfillMatchesSearchNorm pins that equivalence so the shortcut cannot rot.
 var foldRunes = map[rune]string{
 	'à': "a", 'á': "a", 'â': "a", 'ã': "a", 'ä': "a", 'å': "a",
 	'ç': "c",

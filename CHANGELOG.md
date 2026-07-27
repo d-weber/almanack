@@ -456,9 +456,12 @@ Notable changes to this project. The format follows
   was therefore reachable only by typing the ø — an o would not do — and the same for the
   German ß and the Icelandic ð and þ. Those five letters and their capitals now fold the
   way the rest do: `soren` finds `Søren`, `strasse` finds `Straße`, `thorbjorg` finds
-  `Þorbjörg`. One caveat, now written down beside the table: the folded copy of an event is
-  computed when the event is saved, so events created before this version keep the spelling
-  they were filed under until they are next edited. Opening one and saving it re-files it.
+  `Þorbjörg`. The events you already have are re-filed on upgrade, which is not a detail:
+  the folded copy of an event is written once, when the event is saved, so teaching the
+  search box that ø means o without also rewriting what is stored would have left `Søren`
+  matching neither spelling — findable before, findable by nothing after. Upgrading rewrites
+  the folded copy of every affected event in place; nothing you typed is touched, and there
+  is nothing to run by hand.
   ([#24](https://github.com/d-weber/almanack/issues/24))
 - **A failed backup could leave an empty calendar where the family's used to be.** Every
   run records its outcome where `/healthz` can read it, and that breadcrumb is written by

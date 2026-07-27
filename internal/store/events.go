@@ -822,13 +822,21 @@ const searchLimit = 200
 // can carry words its template does not — renaming a single occurrence is the ordinary
 // way that happens — and then the template is not a hit at all, so hiding the copy makes
 // the title the family actually typed unfindable. Hence the rule: a copy is returned
-// exactly when it matches the text and its own template does not. That is "no
-// duplicates" and "no silent misses" in one condition. When no text is given, a
+// exactly when it matches the text and its own template does not. On the text alone that
+// is "no duplicates" and "no silent misses" in one condition. When no text is given, a
 // participant or label filter alone still sees a series as its template once, because a
 // template not being asked about text always counts as matching.
 //
-// Two related limits, deliberately left, because both need the dates of individual
-// occurrences and those come from internal/recur, which SQL cannot call:
+// The suppression looks at the template's text and nothing else, so a copy is hidden by a
+// matching template even when a participant or label filter has excluded that template
+// from the results — rename one occurrence and re-file it under a different label, search
+// for the shared word with that label selected, and neither row comes back. Adding the
+// filters to the subquery would fix it; it is left because a filter and a rename landing
+// on the same occurrence is rare, and because the subquery is what keeps this query
+// indexed. Pre-existing: the same predicate on the no-text path has always behaved this way.
+//
+// Three related limits, deliberately left. The first two need the dates of individual
+// occurrences, which come from internal/recur and SQL cannot call:
 //
 //   - There is no date predicate. A series matches whether or not it still runs, and a
 //     one-off matches whatever year it happened in. For a search box that is the point;
@@ -839,6 +847,12 @@ const searchLimit = 200
 //     their own and sort on it. Ordering templates by their next occurrence would mean
 //     expanding every match, which internal/httpapi is already positioned to do — it
 //     computes next_occurrence per result for display.
+//   - Copies compete with everything else for the searchLimit rows, and sort on their own
+//     dates, which are usually later than a template's. So a series with more matching
+//     exceptions than that limit would fill the page and push out other events that used
+//     to be on it. That takes 200 renamed occurrences of one series to reach, which is not
+//     a household calendar, and capping copies per series costs a window function on every
+//     search to buy nothing anyone will hit.
 //
 // participant and labelID are optional filters; nil means "no filter". Results are
 // newest first and capped at searchLimit.
