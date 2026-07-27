@@ -822,6 +822,16 @@ Notable changes to this project. The format follows
   stopped repeating after its first would fail it, and the arithmetic is pinned in
   `cmd/almanack` on every date in a decade rather than on whichever one CI happens to run.
   ([#62](https://github.com/d-weber/almanack/issues/62))
+- **A browser spec added later could have been filed into the wrong project, with nothing
+  anywhere saying so.** Three of the specs are routed to a project by filename, and the
+  patterns doing it were unanchored: `/timezone\.spec\.js/` matches anywhere in a path, so
+  a later `device-timezone.spec.js` would have been dropped from the ordinary project and
+  picked up by the Lisbon one instead — a different device timezone, a different session —
+  and it would still have run, still have passed, and said nothing about the project it
+  was written for. It had cost nothing yet, and had been worked around once by naming a
+  file `unknown-tz.spec.js` so that it would not collide. The patterns are now anchored to
+  the whole basename.
+  ([#63](https://github.com/d-weber/almanack/issues/63))
 
 ## [0.2.0] — 2026-07-27
 

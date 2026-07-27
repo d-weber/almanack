@@ -11,6 +11,22 @@
 
 const STATE_PATH = '.auth/state.json';
 
+// The three files that are routed by name rather than by the default pattern, each
+// anchored to the whole of its basename.
+//
+// Playwright tests these against the absolute path (and again against it with forward
+// slashes, on Windows), so an unanchored /timezone\.spec\.js/ matches anywhere in it. A
+// later device-timezone.spec.js would therefore be dropped from `chromium` and picked
+// up by `chromium-lisbon` instead — a different device timezone, a different session —
+// and nothing would report the misfiling: the spec still runs, still passes, and says
+// nothing about the project it was meant to be in. That happened while the spec for #58
+// was being written, and was worked around by calling the file unknown-tz.spec.js. A
+// filename should not have to dodge a pattern. `(^|/)` and `$` make the basename the
+// whole of the match, so only these three files can ever be these three files.
+const TIMEZONE_SPEC = /(^|\/)timezone\.spec\.js$/;
+const LOGOUT_SPEC = /(^|\/)logout\.spec\.js$/;
+const AUTH_SETUP = /(^|\/)auth\.setup\.js$/;
+
 export default {
   testDir: '.',
   timeout: 30_000,
@@ -35,7 +51,7 @@ export default {
   projects: [
     // Signs in through the real form and saves the session for everything below. See
     // auth.setup.js for why this is not done once per test.
-    { name: 'setup', testMatch: /auth\.setup\.js/ },
+    { name: 'setup', testMatch: AUTH_SETUP },
     {
       name: 'chromium',
       use: { browserName: 'chromium', storageState: STATE_PATH },
@@ -44,7 +60,7 @@ export default {
       // project below. Running it here failed on an assertion that was never about the
       // application. logout.spec.js needs a session it is allowed to destroy, which the
       // shared one is not.
-      testIgnore: [/timezone\.spec\.js/, /logout\.spec\.js/],
+      testIgnore: [TIMEZONE_SPEC, LOGOUT_SPEC],
     },
     // A second timezone catches the bug this project cares most about: a device in
     // Lisbon must still show a Paris event at its Paris time.
@@ -56,7 +72,7 @@ export default {
         storageState: STATE_PATH,
       },
       dependencies: ['setup'],
-      testMatch: /timezone\.spec\.js/,
+      testMatch: TIMEZONE_SPEC,
     },
     // Signing out ends a session server-side, and the one above is shared by every other
     // spec. So this project starts from no stored session at all and signs in as somebody
@@ -64,7 +80,7 @@ export default {
     {
       name: 'chromium-logout',
       use: { browserName: 'chromium', storageState: { cookies: [], origins: [] } },
-      testMatch: /logout\.spec\.js/,
+      testMatch: LOGOUT_SPEC,
     },
   ],
 };
