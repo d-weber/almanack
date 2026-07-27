@@ -605,11 +605,22 @@ Notable changes to this project. The format follows
   and not until months of ordinary use had brought the log back up to where it had been.
   Nothing looked wrong either: the activity feed listed every change, in the right order, and
   the notifications about them simply never existed. The marker is now checked against the
-  log on every pass and dropped back when it is standing past the end of it — far enough back
-  to take in whatever was logged in the meantime, which means the last day of entries is
-  walked again and the ones already announced are recognised and left where they are rather
-  than sent a second time. Reminders and digests were never affected, since those are planned
-  from the calendar rather than from the log. Nothing changed in the database.
+  log on every pass, and it is checked against the entry it was set from rather than against
+  how big the numbers have got. That distinction is the whole fix: the reused numbers climb
+  back towards the stranded marker, so comparing the two only ever caught the case where
+  *fewer* changes had been made than the deleted calendar took away — which is not the
+  ordinary one. Delete the holiday calendar and add one thing to the family calendar, and
+  nobody was told. The marker now remembers which change it stands at, not only its number,
+  and a number that has come to mean a different change — or none — is dropped back far
+  enough to take in whatever was logged in the meantime. The last day of entries is walked
+  again and the ones already announced are recognised and left where they are rather than
+  sent a second time. Somebody who joined a calendar during that day is no longer handed the
+  whole of it: a change made before you joined was never your news, and that day-long
+  re-walk was the one thing that made it look like it was. Reminders and digests were never
+  affected, since those are planned from the calendar rather than from the log. Nothing
+  changed in the database schema; the marker keeps what it remembers beside itself, and the
+  first pass after the upgrade walks the last day once to make up for a marker that predates
+  it having anything to say for itself.
   ([#44](https://github.com/d-weber/almanack/issues/44))
 - **Running the browser tests twice failed the second time, for reasons that pointed
   nowhere near the cause.** Two of the smoke tests created an event and never removed it, so

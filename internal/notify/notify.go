@@ -74,6 +74,19 @@ const (
 	// notifications. Reading the log rather than notifying from the edit path is
 	// what makes a crash between the two harmless.
 	MetaActivityCursor = "notify.activity_cursor"
+
+	// MetaActivityCursorAt and MetaActivityCursorCalendar are the instant and the
+	// calendar of the row MetaActivityCursor names: the witness that says the id
+	// still means what it meant when it was written. activity_log.id is reused, so
+	// the number on its own cannot say whether the log has been rebuilt underneath
+	// it — see repairCursor. A database written before these keys existed has
+	// neither, which reads as "cannot be vouched for" and costs one repair pass.
+	//
+	// They are separate keys rather than a richer value under the first because a
+	// binary from the previous release still has to read a plain integer there,
+	// which is the expand/contract rule (CONVENTIONS §8) applied to meta.
+	MetaActivityCursorAt       = "notify.activity_cursor_at"
+	MetaActivityCursorCalendar = "notify.activity_cursor_calendar"
 )
 
 // Policy constants. Each one is a decision, not a tuning parameter; the comments

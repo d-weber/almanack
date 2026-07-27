@@ -698,7 +698,30 @@ func (s *Store) ListActivityBetween(ctx context.Context, calendarIDs []int64, fr
 	return s.listActivity(ctx, calendarIDs, where+` ORDER BY id DESC`, args, limit)
 }
 
-// listActivity runs one of the three activity reads. where carries its own ORDER BY;
+// ActivityByID returns one entry from the calendars given, or domain.ErrNotFound.
+//
+// It is how the notification planner checks its own cursor. That cursor is an
+// activity_log id kept outside the table, in meta; activity_log.id is INTEGER PRIMARY
+// KEY without AUTOINCREMENT, so SQLite hands the ids of deleted rows out again and the
+// number can end up naming a row that has gone, or a different row that has taken its
+// place. Neither shows in the number, and neither shows in comparing it against the
+// log's current maximum — reused ids climb back towards a stranded cursor and reach it.
+// Reading the row back and looking at it is what tells them apart.
+func (s *Store) ActivityByID(ctx context.Context, calendarIDs []int64, id int64) (domain.Activity, error) {
+	if len(calendarIDs) == 0 {
+		return domain.Activity{}, fmt.Errorf("activity %d: %w", id, domain.ErrNotFound)
+	}
+	a, err := scanActivity(s.q.QueryRowContext(ctx,
+		`SELECT `+activityCols+` FROM activity_log
+		  WHERE id = ? AND calendar_id IN (`+placeholders(len(calendarIDs))+`)`,
+		append([]any{any(id)}, idArgs(calendarIDs)...)...))
+	if err != nil {
+		return domain.Activity{}, fmt.Errorf("activity %d: %w", id, err)
+	}
+	return a, nil
+}
+
+// listActivity runs one of the activity reads. where carries its own ORDER BY;
 // limit defaults to 50 when not positive.
 func (s *Store) listActivity(ctx context.Context, calendarIDs []int64, where string, args []any, limit int) ([]domain.Activity, error) {
 	if len(calendarIDs) == 0 {

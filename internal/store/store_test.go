@@ -3839,6 +3839,79 @@ func TestActivityLog(t *testing.T) {
 	}
 }
 
+// TestActivityByIDSeesAReusedID: activity_log.id is INTEGER PRIMARY KEY with no
+// AUTOINCREMENT, so the ids of deleted rows are handed out again and the planner's
+// cursor — a copy of an id kept outside the table — can end up naming a row that has
+// gone or a different row that has taken its place. Magnitude cannot tell: the reused
+// ids climb back towards the cursor and reach it. Reading the row back can.
+func TestActivityByIDSeesAReusedID(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	gone := mustCalendar(t, s, u.ID, "Vacances")
+
+	log := func(calendarID int64, title string) {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: calendarID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity: %v", err)
+		}
+	}
+	newestOf := func(calendarID int64) domain.Activity {
+		t.Helper()
+		rows, err := s.ListActivity(ctx(), []int64{calendarID}, 1, 0)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("ListActivity = %+v, %v; want 1", rows, err)
+		}
+		return rows[0]
+	}
+
+	// The clock does not move, which is not a shortcut: dev mode runs on a stopped
+	// one, so every entry sharing an instant is a state the app really reaches — and
+	// the state an instant-only check of the cursor would be blind in.
+	clk.Set(baseTime)
+	log(cal.ID, "Dentiste")
+	log(gone.ID, "Ferry")
+	cursor := newestOf(gone.ID)
+
+	got, err := s.ActivityByID(ctx(), []int64{cal.ID, gone.ID}, cursor.ID)
+	if err != nil || got.CalendarID != gone.ID || got.Title != "Ferry" || !got.At.Equal(cursor.At) {
+		t.Fatalf("ActivityByID on a sound cursor = %+v, %v; want the entry it names", got, err)
+	}
+
+	// The calendar holding the newest entry goes, and the next change takes its id.
+	if err := s.DeleteCalendar(ctx(), gone.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+	if _, err := s.ActivityByID(ctx(), []int64{cal.ID}, cursor.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ActivityByID for a deleted entry = %v; want ErrNotFound", err)
+	}
+	log(cal.ID, "Piscine")
+	reused := newestOf(cal.ID)
+	if reused.ID > cursor.ID {
+		t.Skipf("the new entry took id %d, above the cursor at %d: this SQLite is not reusing the "+
+			"ids of deleted rows, so there is nothing here to find", reused.ID, cursor.ID)
+	}
+	got, err = s.ActivityByID(ctx(), []int64{cal.ID}, cursor.ID)
+	if err != nil {
+		t.Fatalf("ActivityByID over a reused id: %v", err)
+	}
+	if got.CalendarID == gone.ID || got.Title != "Piscine" {
+		t.Fatalf("ActivityByID over a reused id = %+v; want the entry that took it", got)
+	}
+	if !got.At.Equal(cursor.At) {
+		t.Fatalf("the reused entry is at %s and the one it replaced at %s: this test no longer "+
+			"covers a reuse the instant alone cannot see", got.At, cursor.At)
+	}
+
+	// Scoping is the same as every other activity read: an entry in a calendar the
+	// caller did not ask about is not there.
+	if _, err := s.ActivityByID(ctx(), nil, reused.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ActivityByID with no calendars = %v; want ErrNotFound", err)
+	}
+}
+
 // TestActivityPagesThroughASharedSecond: instants are stored to the second, and a
 // family can easily make two changes inside one — a create and the edit that follows
 // it. Paging on the instant walked over everything sharing the second the page ended
