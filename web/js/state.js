@@ -130,6 +130,23 @@ export function clearSession() {
   state.calendars = [];
   state.authed = false;
   state.range = { from: null, to: null, occurrences: [], byDate: new Map(), holidays: new Map() };
+  purgeApiCache();
+}
+
+/**
+ * Clearing the session in memory is only half of it: the service worker keeps the
+ * last-seen /api/ responses so the calendar reads offline, and those are the family's
+ * appointments sitting on the device after somebody has signed out of it. Worse, the
+ * cached /me answers 200, so an offline boot would take the app straight back into a
+ * calendar nobody is signed in to. Every path that ends a session — the sign-out
+ * button, a 401 from the server, a boot that could not load one — comes through
+ * clearSession(), which is why the request belongs here and nowhere else.
+ */
+function purgeApiCache() {
+  try {
+    const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if (worker) worker.postMessage({ type: 'purgeApi' });
+  } catch (_) { /* no worker on this device, so nothing of ours was cached */ }
 }
 
 export function weekStart() {

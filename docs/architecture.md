@@ -262,6 +262,14 @@ calendar is readable offline. Its push handler always displays a notification, i
 generic fallback when a payload cannot be parsed — iOS revokes a subscription after roughly
 three pushes that display nothing, so a silent push is a bug and never an optimisation.
 
+Those cached `/api/` responses belong to a session rather than to the device. Ending one —
+the sign-out button, a 401 from the server, a boot that could not load a session — goes
+through `clearSession()` in `js/state.js`, which asks the worker to delete every `/api/`
+entry it holds; the shell is untouched, since it is the same for everyone and the login
+screen is served from it. The entries are also capped at the most recent sixty, evicted
+oldest first, so an install that lives on a home screen for a year does not accumulate
+every range and search it was ever asked for.
+
 If you add a JavaScript module, add it to the precache list in `web/sw.js`. That list is
 explicit by design, and forgetting it breaks offline use quietly.
 

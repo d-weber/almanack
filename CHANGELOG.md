@@ -266,6 +266,22 @@ Notable changes to this project. The format follows
   asked. It now reports how many subscriptions are failing and no longer names them; which
   service is failing is in the daily heartbeat mail, which has a recipient rather than a URL.
   ([#12](https://github.com/d-weber/almanack/issues/12))
+- **Signing out left the family's calendar on the phone.** The app keeps a copy of the last
+  calendar it was shown, so that it still reads on a train with no signal. What it never did
+  was give that copy back. Sign out, hand the phone to somebody else, and everything the
+  browser had already seen was still on it — the appointments, who was going to them, the
+  searches — waiting for the next moment there was no connection. Starting a signed-out phone
+  up with no signal was worse than reading it: the saved answer to "who is signed in?" is a
+  yes, so the app took it and opened the whole calendar as though nobody had ever left. That
+  copy is now deleted the moment a session ends, however it ends — the sign-out button, a
+  session the server no longer recognises, or an app that starts and finds it has none. What
+  stays is the app itself, which is the same for everybody and is what draws the sign-in
+  screen. A device that is still signed in still reads its calendar offline exactly as
+  before, which is the point of keeping a copy at all. Separately, that copy no longer grows
+  without end: an install that had sat on a home screen for a year was holding every month
+  anyone had scrolled to and every search anyone had typed, and now keeps the sixty most
+  recent and forgets the rest.
+  ([#13](https://github.com/d-weber/almanack/issues/13))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

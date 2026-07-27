@@ -4,7 +4,10 @@
 //    shell. The Go server substitutes __APP_VERSION__ when it serves this file, and
 //    serves it with Cache-Control: no-cache.
 //  * /api/ is network-first with a cache fallback: the last-seen calendar stays
-//    readable offline, but a successful network response always wins.
+//    readable offline, but a successful network response always wins. Those entries
+//    belong to a session: signing out purges them (js/state.js asks; the message
+//    handler below does it), and they are capped so an install that stays on a home
+//    screen for a year does not keep every range and search it ever loaded.
 //  * EVERY push shows a notification, including a generic fallback when the payload
 //    is missing or unparseable. iOS revokes the subscription after roughly three
 //    silent pushes — a silent push is a bug, never an optimisation.
@@ -12,6 +15,9 @@
 const APP_VERSION = "__APP_VERSION__";
 const CACHE = `almanack-${APP_VERSION}`;
 const API_PREFIX = '/api/';
+// A month of ordinary use is a few dozen ranges, searches and avatars; past that they
+// are windows nobody will scroll back to. The oldest go first — see trimApi.
+const API_CACHE_LIMIT = 60;
 
 const SHELL = [
   '/',
@@ -80,7 +86,12 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'skipWaiting') self.skipWaiting();
+  const type = event.data && event.data.type;
+  if (type === 'skipWaiting') self.skipWaiting();
+  // Sent by clearSession() in js/state.js, on every path that ends a session. The
+  // deletion is kept alive by the event because the worker outlives the page asking
+  // for it: the tab is on its way to the login screen and may well be closed next.
+  if (type === 'purgeApi') event.waitUntil(purgeApi());
 });
 
 // ---------------------------------------------------------------------------
@@ -104,12 +115,38 @@ function offlineError() {
   });
 }
 
+function isApiRequest(request) {
+  return new URL(request.url).pathname.startsWith(API_PREFIX);
+}
+
+/** Every cached API response, gone. What is under /api/ is one household's calendar,
+ *  and it has no business outliving the session it was read with. The shell stays:
+ *  it is the same for everyone, and the login screen is served from it. */
+async function purgeApi() {
+  const cache = await caches.open(CACHE);
+  const stale = (await cache.keys()).filter(isApiRequest);
+  await Promise.all(stale.map((request) => cache.delete(request)));
+}
+
+/** Keep the newest API_CACHE_LIMIT API responses. cache.keys() answers in insertion
+ *  order, so the front of the list is the oldest and eviction is a slice — but only
+ *  once there is an excess. A negative end counts back from the far end instead, which
+ *  would empty most of a cache that is merely half full. */
+async function trimApi(cache) {
+  const cached = (await cache.keys()).filter(isApiRequest);
+  const excess = cached.length - API_CACHE_LIMIT;
+  if (excess <= 0) return;
+  for (const request of cached.slice(0, excess)) {
+    await cache.delete(request);
+  }
+}
+
 async function networkFirst(request) {
   const cache = await caches.open(CACHE);
   try {
     const response = await fetch(request);
     if (response && response.ok && request.method === 'GET') {
-      cache.put(request, response.clone()).catch(() => {});
+      cache.put(request, response.clone()).then(() => trimApi(cache)).catch(() => {});
     }
     return response;
   } catch (err) {
