@@ -31,3 +31,6 @@ __pycache__/
 /e2e/node_modules/
 /e2e/test-results/
 /e2e/playwright-report/
+# The saved session auth.setup.js writes, so the suite signs in once rather than
+# hitting the login rate limiter.
+/e2e/.auth/

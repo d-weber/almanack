@@ -1,26 +1,20 @@
-// Browser smoke tests. Development-only: `make e2e` skips silently when npx is absent.
+// Browser smoke tests. Development-only locally: `make e2e` skips silently when npx is
+// absent. They do run in CI, which seeds a family and starts a server first.
 //
 // These cover the handful of things Go tests structurally cannot — that the app
 // renders at all, that the Content-Security-Policy does not quietly break the UI, and
 // that a hostile event title stays inert in a real DOM rather than merely being
 // escaped in a JSON response.
 //
+// Every test here starts already signed in, from the session auth.setup.js saved. The
+// login form itself is exercised there, once.
+//
 // Run against a freshly seeded dev server:  make seed && make dev
 
 import { test, expect } from '@playwright/test';
 
-const CREDENTIALS = { email: 'mum@example.org', password: 'password' };
-
-async function signIn(page, who = CREDENTIALS) {
-  await page.goto('/');
-  await page.getByLabel(/Email address/i).fill(who.email);
-  await page.getByLabel(/Password/i).fill(who.password);
-  await page.getByRole('button', { name: /Sign in/i }).click();
-  await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
-}
-
 test('the seeded family calendar loads and shows its events', async ({ page }) => {
-  await signIn(page);
+  await page.goto('/');
   await expect(page.getByText("Leo's dentist")).toBeVisible();
   await expect(page.getByText('Swimming').first()).toBeVisible();
 });
@@ -32,7 +26,7 @@ test('no console errors and no CSP violations on load', async ({ page }) => {
   });
   page.on('pageerror', (err) => problems.push(String(err)));
 
-  await signIn(page);
+  await page.goto('/');
   await page.getByRole('button', { name: /Today/i }).click();
 
   // A CSP violation surfaces here as "Refused to execute…". Since the app ships
@@ -41,7 +35,7 @@ test('no console errors and no CSP violations on load', async ({ page }) => {
 });
 
 test('creating an event shows it in the month grid', async ({ page }) => {
-  await signIn(page);
+  await page.goto('/');
   await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
   await page.getByLabel(/Title/i).fill('Test meeting');
   await page.getByRole('button', { name: /Save/i }).click();
@@ -50,7 +44,7 @@ test('creating an event shows it in the month grid', async ({ page }) => {
 
 test('a hostile event title is rendered as text, never as markup', async ({ page }) => {
   const hostile = '<img src=x onerror="window.__pwned = true">';
-  await signIn(page);
+  await page.goto('/');
 
   await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
   await page.getByLabel(/Title/i).fill(hostile);
@@ -65,13 +59,20 @@ test('a hostile event title is rendered as text, never as markup', async ({ page
 });
 
 test('the service worker registers and the app is installable', async ({ page }) => {
-  await signIn(page);
-  const registered = await page.evaluate(async () => {
-    if (!('serviceWorker' in navigator)) return false;
-    const reg = await navigator.serviceWorker.getRegistration();
-    return Boolean(reg);
-  });
-  expect(registered).toBe(true);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
+
+  // Registration is asynchronous, so poll rather than reading it once on arrival.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () => {
+          if (!('serviceWorker' in navigator)) return false;
+          return Boolean(await navigator.serviceWorker.getRegistration());
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
 
   const manifest = await page.request.get('/manifest.json');
   expect(manifest.ok()).toBeTruthy();
@@ -83,8 +84,16 @@ test('the service worker registers and the app is installable', async ({ page })
 });
 
 test('the offline banner appears and cached events remain readable', async ({ page, context }) => {
-  await signIn(page);
+  await page.goto('/');
   await expect(page.getByText("Leo's dentist")).toBeVisible();
+
+  // The service worker must have taken control, or there is nothing to serve the
+  // reload from and this asserts only that Chromium has an HTTP cache.
+  await expect
+    .poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller)), {
+      timeout: 10_000,
+    })
+    .toBe(true);
 
   await context.setOffline(true);
   await page.reload();

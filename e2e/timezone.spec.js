@@ -1,22 +1,19 @@
-// The device-timezone test, run by the `chromium-lisbon` project.
+// The device-timezone tests, run by the `chromium-lisbon` project only — the config
+// keeps them out of the Paris project, where the Lisbon assertion below could never
+// hold and was failing for a reason that had nothing to do with the application.
 //
 // This is the bug the whole date layer is built to avoid: a family member travelling
 // (or a laptop set to the wrong zone) must still see the Paris dentist appointment at
 // its Paris time. Intl defaults to the *device* timezone, so any date rendered
 // without an explicit timeZone option silently shifts by an hour here — and an
 // all-day event shifts by a whole day.
+//
+// These start already signed in, from the session auth.setup.js saved.
 
 import { test, expect } from '@playwright/test';
 
-async function signIn(page) {
-  await page.goto('/');
-  await page.getByLabel(/Email address/i).fill('mum@example.org');
-  await page.getByLabel(/Password/i).fill('password');
-  await page.getByRole('button', { name: /Sign in/i }).click();
-}
-
 test('events render in the family timezone, not the device one', async ({ page }) => {
-  await signIn(page);
+  await page.goto('/');
   await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
 
   // Confirm the browser really is in Lisbon (one hour behind Paris), or this test
@@ -33,7 +30,8 @@ test('events render in the family timezone, not the device one', async ({ page }
 });
 
 test('an all-day event does not slip to the previous day', async ({ page }) => {
-  await signIn(page);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
 
   // "Seaside holiday" is seeded as a multi-day all-day event. Stored as a midnight
   // instant it would start a day early west of Paris; stored as a date it cannot.
