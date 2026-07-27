@@ -1,10 +1,15 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +17,12 @@ import (
 
 	"almanack/internal/clock"
 	"almanack/internal/domain"
+
+	// The upgrade test reads the fixture's data back the way the application does:
+	// auth to prove a password hash still verifies, recur to prove a series still
+	// expands. Both are pure and neither imports this package.
+	"almanack/internal/auth"
+	"almanack/internal/recur"
 )
 
 // baseTime is the instant every test starts from: a Wednesday morning, safely inside
@@ -153,6 +164,644 @@ func TestOpenRejectsBadArguments(t *testing.T) {
 		t.Error("Open accepted a nil clock")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Upgrading a database written by an earlier release
+// ---------------------------------------------------------------------------
+
+// The failure this section exists to catch is the one that cannot be caught by looking
+// at a diff: a migration that applies cleanly to an empty database and quietly damages
+// a full one. TestMigrationsAreIdempotent reopens a database this binary itself created
+// a moment ago, which proves only that head can open head. What a household actually
+// does is run 0.2.0 for a year and then drop a newer binary on top of the file, and
+// nothing here proved that worked until this test.
+//
+// So: replay a database a shipped release really wrote, open it with the current
+// binary, and check every row is still there and still means the same thing.
+
+// releaseFixture is one such database, dumped to SQL text under testdata/.
+type releaseFixture struct {
+	// release is the version of the binary that wrote the file.
+	release string
+	file    string
+	// version is the schema version the file was captured at — a fact about a release
+	// that has already shipped, not a number anyone should keep current. Pinning it
+	// here is what stops this test going quietly vacuous; see the guard below.
+	version int
+	// check reads the fixture's data back through the store API. Each fixture knows
+	// its own family, so each brings its own.
+	check func(t *testing.T, s *Store)
+}
+
+var releaseFixtures = []releaseFixture{
+	{release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2, check: checkV020Family},
+}
+
+// upgradedAt is when the upgrade is pretended to happen: after the v0.2.0 fixture was
+// captured (2026-07-27) and before the live invite in it expires (2026-08-03), so that
+// the rows carrying deadlines can be read back through the API that enforces them.
+var upgradedAt = time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+
+func TestUpgradeFromReleasedDatabase(t *testing.T) {
+	embedded, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	head := embedded[len(embedded)-1].version
+
+	for _, fx := range releaseFixtures {
+		t.Run(fx.release, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "almanack.db")
+
+			// Load the dump on a bare connection. SQLite leaves foreign keys off
+			// unless asked, so the file replays without any ordering ceremony; Open
+			// turns enforcement on afterwards, which is what gives the
+			// foreign_key_check below something to say.
+			text, err := os.ReadFile(fx.file)
+			if err != nil {
+				t.Fatalf("read %s: %v", fx.file, err)
+			}
+			raw := openRawDB(t, path)
+			if _, err := raw.Exec(string(text)); err != nil {
+				t.Fatalf("replay %s: %v", fx.file, err)
+			}
+			tables := userTables(t, raw)
+			before := rowCounts(t, raw, tables)
+			fixtureApplied := appliedMigrations(t, raw)
+			// Close before Open: the dump loaded in rollback-journal mode and a live
+			// connection would keep Open from switching the file to WAL.
+			if err := raw.Close(); err != nil {
+				t.Fatalf("close raw handle: %v", err)
+			}
+
+			// --- the guard that keeps this test honest ---------------------------
+			//
+			// The fixture's whole value is that it is old. Regenerate it against a
+			// newer head — the obvious thing to do when a migration breaks it — and
+			// this becomes a slower copy of TestMigrationsAreIdempotent that nobody
+			// notices has stopped testing anything. So the version is pinned in the
+			// table above and compared against the file: move the file and this
+			// fails, loudly, saying what to do instead.
+			//
+			// What is deliberately *not* asserted is that head is strictly ahead of
+			// the fixture. Both releases so far ship schema 0002, so today this
+			// exercises an empty upgrade path and proves the weaker "a v0.2.0
+			// database opens, unchanged, under the current binary". The moment 0003
+			// lands it becomes a real 0002 → 0003 upgrade, and every migration after
+			// that joins in, with nothing here to edit. Failing on equality instead
+			// would mean this test could not be written until the next migration was.
+			fixtureVersion := maxVersion(fixtureApplied)
+			if fixtureVersion != fx.version {
+				t.Fatalf("%s is at schema version %d but the table says %d.\n"+
+					"If the fixture was regenerated at head, put it back: it is meant to stay at %d, "+
+					"and a fixture at head turns this test into a no-op. A newer release wanting its "+
+					"own fixture should add a second file and a second row in releaseFixtures.",
+					fx.file, fixtureVersion, fx.version, fx.version)
+			}
+			if head < fx.version {
+				t.Fatalf("this binary knows migrations up to %d but %s was written at %d; "+
+					"an applied migration has been deleted rather than superseded (CONVENTIONS.md §8)",
+					head, fx.file, fx.version)
+			}
+			if head == fx.version {
+				t.Logf("head is still schema %d, the version %s shipped: no migration is being "+
+					"exercised yet, only that the data survives being reopened", head, fx.release)
+			}
+
+			// --- the upgrade -----------------------------------------------------
+			s, err := Open(path, testLocation(t), clock.NewFake(upgradedAt))
+			if err != nil {
+				t.Fatalf("open a %s database with this binary: %v", fx.release, err)
+			}
+			defer s.Close()
+
+			applied := appliedMigrations(t, s.DB())
+			for _, m := range embedded {
+				if _, ok := applied[m.version]; !ok {
+					t.Errorf("migration %s was not applied to the %s database", m.name, fx.release)
+				}
+			}
+			if len(applied) != len(embedded) {
+				t.Errorf("schema_migrations holds %d rows, want the %d embedded migrations",
+					len(applied), len(embedded))
+			}
+			// The rows the old binary wrote keep their original timestamps: a
+			// migration run must add rows, never rewrite the record of what came
+			// before it.
+			for v, at := range fixtureApplied {
+				if applied[v] != at {
+					t.Errorf("schema_migrations row %d says applied_at %q, was %q before the upgrade",
+						v, applied[v], at)
+				}
+			}
+
+			// --- the file is still a sound database ------------------------------
+			if got := pragmaRows(t, s.DB(), `PRAGMA integrity_check`); len(got) != 1 || got[0] != "ok" {
+				t.Errorf("integrity_check after upgrade = %v; want [ok]", got)
+			}
+			if got := pragmaRows(t, s.DB(), `PRAGMA foreign_key_check`); len(got) != 0 {
+				t.Errorf("foreign_key_check after upgrade reported %d violation(s): %v", len(got), got)
+			}
+
+			// --- nothing was lost ------------------------------------------------
+			//
+			// schema_migrations is the one table expected to grow. Every other table
+			// must come out of the upgrade with exactly the rows it went in with:
+			// expand/contract migrations add columns and tables, they do not touch
+			// the family's rows. A migration that legitimately backfills data will
+			// fail here, which is the right moment to argue for it out loud.
+			after := rowCounts(t, s.DB(), tables)
+			for _, tbl := range tables {
+				if tbl == "schema_migrations" {
+					continue
+				}
+				if after[tbl] != before[tbl] {
+					t.Errorf("table %s has %d rows after the upgrade, had %d before",
+						tbl, after[tbl], before[tbl])
+				}
+			}
+
+			// --- and it still reads correctly ------------------------------------
+			fx.check(t, s)
+
+			// --- reopening changes nothing ---------------------------------------
+			if err := s.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			s2, err := Open(path, testLocation(t), clock.NewFake(upgradedAt.Add(24*time.Hour)))
+			if err != nil {
+				t.Fatalf("reopen after upgrade: %v", err)
+			}
+			defer s2.Close()
+			if again := appliedMigrations(t, s2.DB()); !maps.Equal(again, applied) {
+				t.Errorf("schema_migrations changed on reopen: %v, was %v", again, applied)
+			}
+		})
+	}
+}
+
+// checkV020Family reads the v0.2.0 fixture's household back through the public store
+// API. Row counts prove nothing was deleted; this proves the rows still mean what they
+// meant — which is the half a migration that rebuilds a table with the columns in a new
+// order gets wrong.
+//
+// The ids are literals because the fixture is a fixed file: they are exactly as stable
+// as its text, and naming them is clearer than looking every row up by title.
+func checkV020Family(t *testing.T, s *Store) {
+	const (
+		mumID, dadID, leoID, granID    = 1, 2, 3, 4
+		familyCal, parentsCal, kidsCal = 1, 2, 3
+		dentistID, holidayID           = 1, 3
+		swimmingID, movedSwimID        = 4, 5
+		swimRecurrence                 = 1
+	)
+
+	// --- people ---------------------------------------------------------------
+	users, err := s.ListUsers(ctx())
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	wantNames := []string{"Dad", "Gran", "Leo", "Mum"}
+	if len(users) != len(wantNames) {
+		t.Fatalf("ListUsers returned %d users, want %d", len(users), len(wantNames))
+	}
+	for i, want := range wantNames {
+		if users[i].DisplayName != want {
+			t.Errorf("user %d is %q, want %q", i, users[i].DisplayName, want)
+		}
+	}
+	gran, err := s.UserByEmail(ctx(), "gran@example.org")
+	if err != nil {
+		t.Fatalf("UserByEmail: %v", err)
+	}
+	if gran.ID != granID || gran.Lang != domain.LangFR || gran.WeekStart != time.Sunday {
+		t.Errorf("Gran = %+v; want id %d, French, week starting Sunday", gran, granID)
+	}
+	leo, err := s.UserByID(ctx(), leoID)
+	if err != nil {
+		t.Fatalf("UserByID(Leo): %v", err)
+	}
+	if leo.TimeFormat != "12h" || !leo.HasAvatar {
+		t.Errorf("Leo = %+v; want the 12h clock and an avatar", leo)
+	}
+
+	// A password hash is the row most obviously ruined by a careless rewrite, and the
+	// damage is invisible until the family cannot sign in. Verifying it end to end is
+	// the only check that proves the bytes came back identical.
+	hash, err := s.UserPasswordHash(ctx(), leoID)
+	if err != nil {
+		t.Fatalf("UserPasswordHash: %v", err)
+	}
+	if ok, err := auth.VerifyPassword(hash, "password"); err != nil || !ok {
+		t.Errorf("Leo can no longer sign in after the upgrade: VerifyPassword = %v, %v", ok, err)
+	}
+
+	// BLOBs: the columns a text-only dump-and-reload would mangle.
+	avatar, err := s.Avatar(ctx(), leoID)
+	if err != nil {
+		t.Fatalf("Avatar: %v", err)
+	}
+	image, err := s.CalendarImage(ctx(), familyCal)
+	if err != nil {
+		t.Fatalf("CalendarImage: %v", err)
+	}
+	if len(avatar) != 67 || !bytes.HasPrefix(avatar, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Errorf("avatar is %d bytes starting %x; want the 67-byte PNG the fixture stored",
+			len(avatar), avatar[:min(8, len(avatar))])
+	}
+	if !bytes.Equal(avatar, image) {
+		t.Error("the calendar cover image no longer matches the avatar bytes the fixture stored")
+	}
+
+	// --- calendars, members, labels -------------------------------------------
+	cals, err := s.ListCalendarsForUser(ctx(), mumID)
+	if err != nil {
+		t.Fatalf("ListCalendarsForUser: %v", err)
+	}
+	if len(cals) != 3 {
+		t.Errorf("Mum is in %d calendars, want 3", len(cals))
+	}
+	members, err := s.ListMembers(ctx(), familyCal)
+	if err != nil {
+		t.Fatalf("ListMembers: %v", err)
+	}
+	if len(members) != 4 {
+		t.Errorf("Family has %d members, want 4", len(members))
+	}
+	granMember, err := s.Membership(ctx(), familyCal, granID)
+	if err != nil {
+		t.Fatalf("Membership: %v", err)
+	}
+	if !granMember.Muted || !granMember.ParticipatingOnly {
+		t.Errorf("Gran's Family membership = %+v; the mute she set has been reset", granMember)
+	}
+	labels, err := s.ListLabels(ctx(), familyCal)
+	if err != nil {
+		t.Fatalf("ListLabels: %v", err)
+	}
+	if len(labels) != domain.LabelsPerCalendar {
+		t.Fatalf("Family has %d labels, want %d", len(labels), domain.LabelsPerCalendar)
+	}
+	if labels[2].Name != "Holidays" || labels[2].Color != "#e67e22" {
+		t.Errorf("the renamed label came back as %+v; want Holidays/#e67e22", labels[2])
+	}
+
+	// --- events ----------------------------------------------------------------
+	dentist, err := s.EventByID(ctx(), dentistID)
+	if err != nil {
+		t.Fatalf("EventByID(dentist): %v", err)
+	}
+	// 16:30 Paris on 2026-07-27 is 14:30Z. An hour lost here is the whole point of
+	// storing instants as UTC text.
+	if want := time.Date(2026, 7, 27, 14, 30, 0, 0, time.UTC); !dentist.StartsAt.Equal(want) {
+		t.Errorf("Leo's dentist starts at %v, want %v", dentist.StartsAt, want)
+	}
+	if dentist.Title != "Leo's dentist" || dentist.Location != "Bridge Street Dental" {
+		t.Errorf("dentist = %+v", dentist)
+	}
+	parts, err := s.ListParticipants(ctx(), dentistID)
+	if err != nil {
+		t.Fatalf("ListParticipants: %v", err)
+	}
+	if !slices.Equal(parts, []int64{mumID, leoID}) {
+		t.Errorf("dentist participants = %v, want [%d %d]", parts, mumID, leoID)
+	}
+
+	holiday, err := s.EventByID(ctx(), holidayID)
+	if err != nil {
+		t.Fatalf("EventByID(holiday): %v", err)
+	}
+	// An all-day event carries dates and no instants; end_date is inclusive. A
+	// migration that "helpfully" normalised these to midnight instants would show up
+	// here as a seven-day holiday becoming six, or as a timezone appearing.
+	if !holiday.AllDay || !holiday.StartsAt.IsZero() || !holiday.EndsAt.IsZero() {
+		t.Errorf("Seaside holiday = %+v; an all-day event must carry no instants", holiday)
+	}
+	if holiday.StartDate != domain.NewDate(2026, time.August, 6) ||
+		holiday.EndDate != domain.NewDate(2026, time.August, 12) {
+		t.Errorf("Seaside holiday runs %v..%v, want 2026-08-06..2026-08-12",
+			holiday.StartDate, holiday.EndDate)
+	}
+
+	// search_norm is maintained by the store on write, so nothing re-derives it after
+	// a migration: if the column were dropped and recreated, search would go silently
+	// empty rather than fail.
+	found, err := s.SearchEvents(ctx(), []int64{familyCal, parentsCal, kidsCal}, "dentist", nil, nil)
+	if err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	}
+	if len(found) != 1 || found[0].ID != dentistID {
+		t.Errorf("searching for \"dentist\" found %d events, want just the dentist", len(found))
+	}
+
+	// --- the series, its override and its cancellation -------------------------
+	from, to := domain.NewDate(2026, time.August, 1), domain.NewDate(2026, time.August, 31)
+	res, err := s.EventsInRange(ctx(), []int64{kidsCal}, from, to)
+	if err != nil {
+		t.Fatalf("EventsInRange: %v", err)
+	}
+	var swim *SeriesRow
+	for i := range res.Series {
+		if res.Series[i].Event.ID == swimmingID {
+			swim = &res.Series[i]
+		}
+	}
+	if swim == nil {
+		t.Fatalf("the Swimming series is gone: EventsInRange returned %d series", len(res.Series))
+	}
+	for _, e := range res.Singles {
+		if e.ID == movedSwimID {
+			t.Error("the edited occurrence came back as a standalone event; it must arrive inside its series")
+		}
+	}
+	if swim.Recurrence.Freq != domain.FreqWeekly || swim.Recurrence.Interval != 1 ||
+		!slices.Equal(swim.Recurrence.ByWeekday, []time.Weekday{time.Tuesday}) {
+		t.Errorf("Swimming recurrence = %+v; want weekly on Tuesdays", swim.Recurrence)
+	}
+
+	dates := recur.Expand(swim.Recurrence, from, to)
+	wantDates := []domain.Date{
+		domain.NewDate(2026, time.August, 4),
+		domain.NewDate(2026, time.August, 11),
+		domain.NewDate(2026, time.August, 18),
+		domain.NewDate(2026, time.August, 25),
+	}
+	if !slices.Equal(dates, wantDates) {
+		t.Fatalf("Swimming expands to %v, want %v", dates, wantDates)
+	}
+	if len(swim.Overrides) != 2 {
+		t.Errorf("Swimming has %d exceptions, want 2 (one moved, one cancelled)", len(swim.Overrides))
+	}
+
+	// Walk the expansion the way a caller does, applying the exceptions: 4 August was
+	// moved to the evening, 18 August was cancelled, the rest are the series as
+	// written. Losing an event_overrides row does not lose data visibly — it silently
+	// resurrects a cancelled occurrence and un-edits a moved one — so this is checked
+	// through its effect rather than its row count.
+	type occ struct {
+		date  domain.Date
+		title string
+	}
+	var visible []occ
+	for _, d := range dates {
+		ref, excepted := swim.Overrides[d]
+		switch {
+		case excepted && ref == nil:
+			continue
+		case excepted:
+			edited, ok := swim.OverrideEvents[*ref]
+			if !ok {
+				t.Fatalf("override for %v points at event %d, which is not in the result", d, *ref)
+			}
+			if want := time.Date(2026, 8, 4, 17, 0, 0, 0, time.UTC); !edited.StartsAt.Equal(want) {
+				t.Errorf("the moved occurrence starts at %v, want %v (19:00 Paris)", edited.StartsAt, want)
+			}
+			visible = append(visible, occ{d, edited.Title})
+		default:
+			visible = append(visible, occ{d, swim.Event.Title})
+		}
+	}
+	wantVisible := []occ{
+		{domain.NewDate(2026, time.August, 4), "Swimming (later than usual)"},
+		{domain.NewDate(2026, time.August, 11), "Swimming"},
+		{domain.NewDate(2026, time.August, 25), "Swimming"},
+	}
+	if !slices.Equal(visible, wantVisible) {
+		t.Errorf("August's swimming = %v, want %v", visible, wantVisible)
+	}
+
+	// --- reminders --------------------------------------------------------------
+	all, err := s.ListAllReminders(ctx())
+	if err != nil {
+		t.Fatalf("ListAllReminders: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("ListAllReminders returned %d, want 3", len(all))
+	}
+	timed, err := s.ListReminders(ctx(), ptrTo(int64(dentistID)), nil, mumID)
+	if err != nil {
+		t.Fatalf("ListReminders(dentist): %v", err)
+	}
+	if len(timed) != 1 || timed[0].OffsetMinutes == nil || *timed[0].OffsetMinutes != 1440 {
+		t.Errorf("Mum's dentist reminder = %+v; want one at 1440 minutes before", timed)
+	}
+	// The all-day shape: days_before plus a wall-clock time, which is the pair that
+	// cannot be expressed as an offset from midnight.
+	allDay, err := s.ListReminders(ctx(), ptrTo(int64(holidayID)), nil, dadID)
+	if err != nil {
+		t.Fatalf("ListReminders(holiday): %v", err)
+	}
+	if len(allDay) != 1 || allDay[0].DaysBefore == nil || *allDay[0].DaysBefore != 2 ||
+		allDay[0].AtTimeLocal != "09:00" {
+		t.Errorf("Dad's holiday reminder = %+v; want two days before at 09:00", allDay)
+	}
+	series, err := s.ListReminders(ctx(), nil, ptrTo(int64(swimRecurrence)), dadID)
+	if err != nil {
+		t.Fatalf("ListReminders(series): %v", err)
+	}
+	if len(series) != 1 || series[0].OffsetMinutes == nil || *series[0].OffsetMinutes != 30 {
+		t.Errorf("Dad's swimming reminder = %+v; want one at 30 minutes before", series)
+	}
+
+	// --- the outbox, the log and the small tables ------------------------------
+	unsent, err := s.ListUnsentBefore(ctx(), upgradedAt.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var unsentIDs []int64
+	for _, q := range unsent {
+		unsentIDs = append(unsentIDs, q.ID)
+	}
+	// Rows 1 and 3 went out and were skipped respectively; only 4 and 2 are still
+	// owed, and they must survive an upgrade or the family misses them silently.
+	if !slices.Equal(unsentIDs, []int64{4, 2}) {
+		t.Errorf("still-owed notifications = %v, want [4 2]", unsentIDs)
+	}
+
+	activity, err := s.ListActivity(ctx(), []int64{familyCal, parentsCal, kidsCal}, 100, time.Time{})
+	if err != nil {
+		t.Fatalf("ListActivity: %v", err)
+	}
+	if len(activity) != 11 {
+		t.Errorf("activity log has %d entries, want 11", len(activity))
+	}
+	if len(activity) > 0 && (activity[0].Action != domain.ActionMemberJoined || activity[0].Title != "Gran") {
+		t.Errorf("newest activity = %+v; want Gran joining", activity[0])
+	}
+
+	sess, sessUser, err := s.SessionByToken(ctx(),
+		"0f9a2c1e5b7d4a3f8e6c0b5d2a91746c3e8f0a1b2c3d4e5f60718293a4b5c6d7")
+	if err != nil {
+		t.Fatalf("SessionByToken: %v", err)
+	}
+	if sessUser.ID != mumID || sess.UserID != mumID {
+		t.Errorf("Mum's session came back as user %d/%d", sess.UserID, sessUser.ID)
+	}
+
+	inv, invCal, err := s.InviteByToken(ctx(),
+		"3c6d5f2e1b0a9d8c7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d", upgradedAt)
+	if err != nil {
+		t.Fatalf("InviteByToken: %v", err)
+	}
+	if invCal.ID != familyCal || inv.RevokedAt != nil {
+		t.Errorf("the live invite came back as %+v for calendar %d", inv, invCal.ID)
+	}
+
+	subs, err := s.ListPushSubscriptions(ctx(), mumID)
+	if err != nil {
+		t.Fatalf("ListPushSubscriptions: %v", err)
+	}
+	if len(subs) != 2 {
+		t.Errorf("Mum has %d push subscriptions, want 2", len(subs))
+	}
+
+	prefs, err := s.Prefs(ctx(), leoID)
+	if err != nil {
+		t.Fatalf("Prefs: %v", err)
+	}
+	if prefs.DigestEnabled || !prefs.DailySummaryMode || prefs.SummaryTime != "21:15" {
+		t.Errorf("Leo's notification prefs = %+v; want the evening summary he chose", prefs)
+	}
+
+	holidays, err := s.HolidayOverrides(ctx())
+	if err != nil {
+		t.Fatalf("HolidayOverrides: %v", err)
+	}
+	added := holidays[domain.NewDate(2026, time.May, 8)]
+	suppressed, hasSuppressed := holidays[domain.NewDate(2026, time.November, 11)]
+	if added == nil || *added != "Victoire 1945 (jour de pont)" {
+		t.Errorf("the added holiday came back as %v", added)
+	}
+	// NULL means "suppress this computed holiday". A migration that turned NULL into
+	// the empty string would put 11 November back on the calendar.
+	if !hasSuppressed || suppressed != nil {
+		t.Errorf("the suppressed holiday came back as %v (present: %v)", suppressed, hasSuppressed)
+	}
+
+	if v, err := s.GetMeta(ctx(), "planner_horizon"); err != nil || v != "2026-08-26" {
+		t.Errorf("meta planner_horizon = %q, %v; want 2026-08-26", v, err)
+	}
+}
+
+// openRawDB opens the database file with no pragmas at all, which is how a fixture is
+// loaded and how the file is inspected before Open has had a chance to change it.
+func openRawDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open(driverName, "file:"+escapeURIPath(path))
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	return db
+}
+
+// userTables lists the application's tables, SQLite's own excluded.
+func userTables(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("the database has no tables")
+	}
+	return out
+}
+
+func rowCounts(t *testing.T, db *sql.DB, tables []string) map[string]int {
+	t.Helper()
+	out := make(map[string]int, len(tables))
+	for _, tbl := range tables {
+		var n int
+		// The name comes from sqlite_master, not from a caller, so quoting it is
+		// enough; there is no parameter form for an identifier.
+		if err := db.QueryRow(`SELECT COUNT(*) FROM "` + tbl + `"`).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", tbl, err)
+		}
+		out[tbl] = n
+	}
+	return out
+}
+
+// appliedMigrations returns version -> applied_at, so a test can tell "already there"
+// from "applied again just now".
+func appliedMigrations(t *testing.T, db *sql.DB) map[int]string {
+	t.Helper()
+	rows, err := db.Query(`SELECT version, applied_at FROM schema_migrations`)
+	if err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	defer rows.Close()
+	out := map[int]string{}
+	for rows.Next() {
+		var v int
+		var at string
+		if err := rows.Scan(&v, &at); err != nil {
+			t.Fatalf("scan schema_migrations: %v", err)
+		}
+		out[v] = at
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	return out
+}
+
+func maxVersion(applied map[int]string) int {
+	highest := 0
+	for v := range applied {
+		if v > highest {
+			highest = v
+		}
+	}
+	return highest
+}
+
+// pragmaRows runs a pragma that reports problems as rows and returns the first column
+// of each. integrity_check answers with a single "ok"; foreign_key_check answers with
+// nothing at all when there is nothing wrong.
+func pragmaRows(t *testing.T, db *sql.DB, pragma string) []string {
+	t.Helper()
+	rows, err := db.Query(pragma)
+	if err != nil {
+		t.Fatalf("%s: %v", pragma, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("%s: %v", pragma, err)
+	}
+	var out []string
+	for rows.Next() {
+		cells := make([]any, len(cols))
+		dst := make([]any, len(cols))
+		for i := range cells {
+			dst[i] = &cells[i]
+		}
+		if err := rows.Scan(dst...); err != nil {
+			t.Fatalf("%s: %v", pragma, err)
+		}
+		out = append(out, fmt.Sprint(cells...))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("%s: %v", pragma, err)
+	}
+	return out
+}
+
+func ptrTo[T any](v T) *T { return &v }
 
 // ---------------------------------------------------------------------------
 // Users, sessions, resets

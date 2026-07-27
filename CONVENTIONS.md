@@ -119,3 +119,9 @@ e2e/                    dev-only browser smoke tests
 - **Expand/contract**: a migration must leave the previous binary able to run for one release
   (add columns/tables first; drop them a release later). This is what makes rollback a symlink flip.
 - The binary refuses to start if the database schema is newer than it knows.
+- **A migration is not done until it has been run against a real old database.** One that each
+  released binary wrote is checked in as SQL text under `internal/store/testdata/`, and
+  `TestUpgradeFromReleasedDatabase` replays it, opens it with the current binary and reads every
+  row back through the store API. Never regenerate an old fixture against a newer schema — its
+  value is that it is old, and the test says so when you try. A release that changes the schema
+  adds a fixture of its own beside the others.

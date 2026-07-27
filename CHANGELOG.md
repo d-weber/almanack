@@ -27,6 +27,27 @@ Notable changes to this project. The format follows
   proves a snapshot is a real database with its rows still in it, and that `--prune` with
   zero retention deletes nothing — it once deleted everything, including the snapshot it
   had just reported as a success.
+- **Upgrading an existing calendar is now proved by a test rather than promised by a
+  document.** The suite had two migration tests, and neither covered the thing that actually
+  happens to a household: run 0.2.0 for a year, drop a newer binary on the same file, and find
+  out. One reopened a database this binary had created seconds earlier — head opening head —
+  and the other checked that a database from the *future* is refused. So a database the v0.2.0
+  binary really wrote is now checked into the repository as SQL text
+  ([`internal/store/testdata/v0.2.0.sql`](internal/store/testdata/v0.2.0.sql)): four people
+  with real argon2id hashes, three calendars with their members, renamed labels and a cover
+  image, timed and all-day events, a weekly series with one occurrence moved and another
+  cancelled, reminders of both shapes, a signed-in session, a live invite and a revoked one, an
+  outbox caught mid-flight, an activity log, holiday corrections. `make check` replays it into
+  an empty file, opens it with the current binary, and then insists: every embedded migration
+  applied, `integrity_check` and `foreign_key_check` clean, every table holding exactly the rows
+  it held before, and the family readable back through the store API — Leo's password still
+  verifies, the seaside holiday is still seven inclusive days and not a timezone, 4 August is
+  still moved to the evening and 18 August is still cancelled. It is text rather than a `.db`
+  file so it can be read in a diff, and in ten years, by someone with only a text editor.
+  It is also self-maintaining: the version it was captured at is pinned in the test, so when
+  0003 lands this starts exercising a genuine 0002 → 0003 upgrade with nothing to edit, and
+  anyone who "fixes" a failure by regenerating the fixture at head gets told what they have
+  just switched off.
 - **Coverage floors, enforced.** `make check` now ends with `make cover-check`, which fails
   if a package drops below the floor recorded for it in
   `.github/scripts/check_coverage.py`, or if a package appears with no entry at all.
