@@ -284,6 +284,33 @@ function plainScreen(builder) {
   return show(builder, { chrome: null, tabs: false });
 }
 
+/**
+ * Which date the calendar beside the panel should show.
+ *
+ * Opening an event must not move the calendar under the reader: a month grid includes
+ * the last days of the previous month and the first of the next, so clicking an event
+ * in one of those rows would otherwise jump to that month while you were looking at
+ * this one. If the occurrence is already somewhere in the loaded range, the view stays
+ * exactly where it was.
+ *
+ * It does move when the event is genuinely elsewhere — a link from a notification, or
+ * a search result in October while you are reading July — because a panel describing
+ * an event beside a calendar that cannot show it is worse than a jump.
+ */
+function panelDate(ctx) {
+  const target = (ctx && ctx.params && ctx.params.date)
+    || (ctx && ctx.query && ctx.query.get('date'))
+    || null;
+  if (!target) return state.cursor || todayISO();
+
+  const loaded = state.range;
+  if (state.cursor && loaded && loaded.from && loaded.to
+      && target >= loaded.from && target <= loaded.to) {
+    return state.cursor;
+  }
+  return target;
+}
+
 // panelScreen renders an event next to the calendar on a wide screen, and full
 // screen on a narrow one. The calendar underneath is re-rendered first, so the panel
 // always opens against the month or week you were actually looking at.
@@ -291,12 +318,7 @@ async function panelScreen(builder, ctx) {
   if (!DESKTOP.matches) {
     return plainScreen(builder);
   }
-  // params first: /event/:id/:date carries the occurrence being opened, which is the
-  // month the calendar beside it should be showing. A push notification deep-links in
-  // this shape, and it used to land on today's month next to an event in October.
-  const date = (ctx && ctx.params && ctx.params.date)
-    || (ctx && ctx.query && ctx.query.get('date'))
-    || state.cursor || todayISO();
+  const date = panelDate(ctx);
   const view = state.view === 'agenda' ? 'agenda' : state.view;
   await calendarScreen(view, { query: new URLSearchParams(`d=${date}`) });
 
