@@ -569,6 +569,22 @@ Notable changes to this project. The format follows
   still matches, and a series result is still sorted by the date its pattern began — the
   date shown beside it is the next occurrence, which is the useful one.
   ([#43](https://github.com/d-weber/almanack/issues/43))
+- **Deleting a calendar could silence the notifications for the ones that were left.** The
+  planner remembers how far it has got through the change log by the number of the last
+  entry it announced, and SQLite hands the numbers of deleted rows out again. A deleted
+  calendar takes its entries in the log with it, so deleting the one holding the newest
+  changes left that remembered number above every number the log would go on to issue:
+  everything anybody did afterwards was filed behind the marker, nothing is ever read from
+  behind it, and nobody was told about any of it — not on that tick, not on any later one,
+  and not until months of ordinary use had brought the log back up to where it had been.
+  Nothing looked wrong either: the activity feed listed every change, in the right order, and
+  the notifications about them simply never existed. The marker is now checked against the
+  log on every pass and dropped back when it is standing past the end of it — far enough back
+  to take in whatever was logged in the meantime, which means the last day of entries is
+  walked again and the ones already announced are recognised and left where they are rather
+  than sent a second time. Reminders and digests were never affected, since those are planned
+  from the calendar rather than from the log. Nothing changed in the database.
+  ([#44](https://github.com/d-weber/almanack/issues/44))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

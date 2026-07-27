@@ -511,6 +511,10 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 	if err != nil {
 		return fmt.Errorf("activity cursor %q is unreadable: %w", raw, err)
 	}
+	cursor, err = n.repairCursor(ctx, cals, cursor)
+	if err != nil {
+		return err
+	}
 
 	acts, err := n.st.ListActivityAfter(ctx, cals, cursor, activityCatchUpLimit)
 	if err != nil {
@@ -550,6 +554,57 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// repairCursor drops a stored cursor that has been stranded above the end of the log,
+// and returns the one to read from.
+//
+// activity_log.id is INTEGER PRIMARY KEY without AUTOINCREMENT, so SQLite hands the ids
+// of deleted rows out again, and activity rows cascade away with the calendar or the
+// user they belong to. Delete the calendar holding the newest entries and the remembered
+// cursor sits above every id the log will produce next: each new change is logged
+// *behind* the cursor, nothing ever reads it, and activity notifications stay silent
+// until the log climbs back to the old high-water mark. Nothing else the cursor is
+// compared against notices, because within the surviving rows a reused id still sorts
+// correctly — it is only the number kept outside the table that goes stale.
+//
+// Resetting to the log's highest id is the obvious repair and quietly loses the changes
+// logged between the deletion and this pass: those carry reused ids below the stranded
+// cursor and, by id alone, are indistinguishable from the rows that were announced
+// before it. So the reset goes further back, to the last row old enough that delivery
+// would refuse it anyway (maxActivityLateness). Everything after that is re-walked,
+// which costs nothing the design does not already rely on — UNIQUE(user, kind,
+// source_ref, due_at) with INSERT OR IGNORE absorbs a row that was announced already —
+// and no change anybody still wants to hear about is stepped over. The bound matters
+// too: without it a family with a year of history would re-walk all of it and file a
+// year of stale rows to be skipped one by one.
+func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor int64) (int64, error) {
+	newest, err := n.st.ListActivity(ctx, cals, 1, 0)
+	if err != nil {
+		return 0, err
+	}
+	var highest int64
+	if len(newest) > 0 {
+		highest = newest[0].ID
+	}
+	if cursor <= highest {
+		return cursor, nil
+	}
+
+	var reset int64
+	settled, err := n.st.ListActivityBetween(ctx, cals, time.Time{}, n.now().Add(-maxActivityLateness), 1)
+	if err != nil {
+		return 0, err
+	}
+	if len(settled) > 0 {
+		reset = settled[0].ID
+	}
+	slog.Warn("the activity cursor was above the end of the change log and has been reset",
+		"cursor", cursor, "newest_logged", highest, "reset_to", reset)
+	if err := n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(reset, 10)); err != nil {
+		return 0, err
+	}
+	return reset, nil
 }
 
 func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs map[int64]domain.NotificationPrefs,

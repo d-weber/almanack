@@ -2,6 +2,8 @@ package notify
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -134,6 +136,84 @@ func TestChangingDigestPreferencesClearsTheQueuedOnes(t *testing.T) {
 		if row.Kind == domain.KindDigest && row.SentAt.IsZero() && row.Skipped == "" {
 			t.Errorf("a digest is still queued for %s after the digest was switched off", row.DueAt)
 		}
+	}
+}
+
+// activity_log.id is INTEGER PRIMARY KEY without AUTOINCREMENT, so SQLite hands the
+// ids of deleted rows out again. Deleting the calendar that held the newest changes
+// therefore leaves the planner's stored cursor above every id the log will produce
+// next, and everything logged afterwards arrives *behind* it — announced to nobody
+// until the log climbs back to the old high-water mark.
+func TestActivityCursorSurvivesAReusedID(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	e.noDigests()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	trip := e.calendar("Vacances", actor.ID)
+	e.join(family.ID, watcher.ID)
+	e.join(trip.ID, watcher.ID)
+
+	e.plan() // the first pass only takes the high-water mark
+
+	// One change in the calendar that survives, then three in the one that is about
+	// to go: those take the top of the log and the cursor follows them up.
+	e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+	for i := 1; i <= 3; i++ {
+		e.timedEvent(trip, actor.ID, fmt.Sprintf("Ferry %d", i), 2027, time.June, 3, 9, 0, time.Hour, nil)
+	}
+	e.plan()
+	if n := len(e.queueOfKind(domain.KindActivity)); n != 4 {
+		t.Fatalf("four changes produced %d activity notifications, want 4", n)
+	}
+
+	if err := e.st.DeleteCalendar(ctx, trip.ID); err != nil {
+		t.Fatalf("delete the calendar holding the newest changes: %v", err)
+	}
+
+	// A change in the calendar that is still there, a minute later so that its
+	// notification cannot be mistaken for one of the deleted calendar's.
+	e.clk.Advance(time.Minute)
+	e.timedEvent(family, actor.ID, "Piscine", 2027, time.June, 4, 17, 0, time.Hour, nil)
+
+	newest, err := e.st.ListActivity(ctx, []int64{family.ID}, 1, 0)
+	if err != nil || len(newest) == 0 {
+		t.Fatalf("read the newest activity row: %v", err)
+	}
+	stored, err := e.st.GetMeta(ctx, MetaActivityCursor)
+	if err != nil {
+		t.Fatalf("read the activity cursor: %v", err)
+	}
+	cursor, err := strconv.ParseInt(stored, 10, 64)
+	if err != nil {
+		t.Fatalf("activity cursor %q: %v", stored, err)
+	}
+	if newest[0].ID > cursor {
+		t.Fatalf("the new log row took id %d, above the stored cursor %d: this SQLite is not "+
+			"reusing the ids of deleted rows, so this test no longer reproduces the fault",
+			newest[0].ID, cursor)
+	}
+
+	e.plan()
+
+	// The source reference alone would not do: it is built from the activity id, and
+	// the deleted calendar's notifications are still in the outbox under that very id.
+	// The payload is what says which change a row announces.
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindActivity) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	if byTitle["Piscine"] != 1 {
+		t.Errorf("the change made after a calendar was deleted produced %d notifications, want 1: its "+
+			"log row took the reused id %d, below the cursor stranded at %d by the deletion",
+			byTitle["Piscine"], newest[0].ID, cursor)
+	}
+	// And repairing the cursor must not re-announce what the family has already been
+	// told: a dropped notification and a duplicated one are both failures here.
+	if byTitle["Dentiste"] != 1 {
+		t.Errorf("the change announced before the deletion is queued %d times, want 1", byTitle["Dentiste"])
 	}
 }
 
