@@ -98,6 +98,24 @@ func (f *fixture) timed(t *testing.T, title, day string, hour, min int, rec *dom
 	return e
 }
 
+// allDay creates an all-day event covering [start, end] inclusive, so that a test can
+// have an occurrence that is longer than the day it starts on.
+func (f *fixture) allDay(t *testing.T, title, start, end string, rec *domain.Recurrence, participants ...int64) domain.Event {
+	t.Helper()
+	if participants == nil {
+		participants = []int64{f.maman}
+	}
+	e, err := f.svc.Create(context.Background(), f.maman, Input{
+		CalendarID: f.cal, Title: title, AllDay: true,
+		StartDate: domain.MustParseDate(start), EndDate: domain.MustParseDate(end),
+		LabelID: f.labels[0].ID, Participants: participants, Recurrence: rec,
+	})
+	if err != nil {
+		t.Fatalf("create %q: %v", title, err)
+	}
+	return e
+}
+
 func (f *fixture) occurrences(t *testing.T, from, to string) []domain.Occurrence {
 	t.Helper()
 	occ, err := f.svc.Occurrences(context.Background(), []int64{f.cal}, domain.MustParseDate(from), domain.MustParseDate(to))
@@ -239,6 +257,112 @@ func TestOverrideMovedIntoWindowFromOutside(t *testing.T) {
 	}
 	if !found {
 		t.Error("an occurrence moved into the window from outside it was not returned")
+	}
+}
+
+// TestOccurrenceMovedPastTheEndOfItsSeriesStaysVisible is the last lesson of term
+// dragged into the following month. The series ended in June, so a window covering
+// July can only reach that occurrence through a series whose own dates say it has
+// nothing left to give.
+func TestOccurrenceMovedPastTheEndOfItsSeriesStaysVisible(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	endOfTerm := domain.MustParseDate("2026-06-30")
+	series := f.timed(t, "Piscine", "2026-06-02", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		Until: &endOfTerm,
+	})
+
+	// The 30 June lesson is moved to 7 July, past the end of the series.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeThis, endOfTerm, Input{
+		Title: "Piscine (rattrapage)", StartsAt: f.at("2026-07-07", 17, 30), EndsAt: f.at("2026-07-07", 18, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("move the last occurrence: %v", err)
+	}
+
+	occ := f.occurrences(t, "2026-07-01", "2026-07-31")
+	if got := titlesOn(occ, endOfTerm); len(got) != 1 || got[0] != "Piscine (rattrapage)" {
+		t.Fatalf("July shows %v; the occurrence moved past the end of its series is missing", got)
+	}
+	if got := occ[0].StartsAt.In(f.loc).Format("2006-01-02 15:04"); got != "2026-07-07 17:30" {
+		t.Errorf("the moved occurrence lands at %s, want 2026-07-07 17:30", got)
+	}
+	// It must not also show up on its original date in the June window.
+	if got := titlesOn(f.occurrences(t, "2026-06-01", "2026-06-30"), endOfTerm); len(got) != 0 {
+		t.Errorf("30 June still shows %v; the occurrence moved away from it", got)
+	}
+}
+
+// TestOccurrenceMovedBeforeTheStartOfItsSeriesStaysVisible is the same hole at the
+// other end: the first occurrence of a series that has not begun yet, pulled back into
+// the month you are looking at.
+func TestOccurrenceMovedBeforeTheStartOfItsSeriesStaysVisible(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	series := f.timed(t, "Piscine", "2026-08-04", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+
+	// The first lesson, 4 August, is brought forward to 28 July — before dtstart.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeThis, domain.MustParseDate("2026-08-04"), Input{
+		Title: "Piscine (avancée)", StartsAt: f.at("2026-07-28", 17, 30), EndsAt: f.at("2026-07-28", 18, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("move the first occurrence: %v", err)
+	}
+
+	occ := f.occurrences(t, "2026-07-01", "2026-07-31")
+	if got := titlesOn(occ, domain.MustParseDate("2026-08-04")); len(got) != 1 || got[0] != "Piscine (avancée)" {
+		t.Fatalf("July shows %v; the occurrence moved before the start of its series is missing", got)
+	}
+}
+
+// TestMultiDayOccurrenceMovedPastTheEndOfItsSeriesStaysVisible is the multi-day version
+// of the same move: an all-day trip that no longer starts anywhere near the window it
+// now covers.
+func TestMultiDayOccurrenceMovedPastTheEndOfItsSeriesStaysVisible(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	lastTrip := domain.MustParseDate("2026-06-29")
+	series := f.allDay(t, "Papa à Lyon", "2026-06-01", "2026-06-03", &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Monday},
+		Until: &lastTrip,
+	})
+
+	// The last trip, 29 June to 1 July, is pushed a week later: 6 to 8 July.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeThis, lastTrip, Input{
+		Title: "Papa à Lyon (reporté)", AllDay: true,
+		StartDate: domain.MustParseDate("2026-07-06"), EndDate: domain.MustParseDate("2026-07-08"),
+		LabelID: f.labels[0].ID, Participants: []int64{f.papa},
+	}); err != nil {
+		t.Fatalf("move the last trip: %v", err)
+	}
+
+	occ := f.occurrences(t, "2026-07-01", "2026-07-31")
+	if got := titlesOn(occ, lastTrip); len(got) != 1 || got[0] != "Papa à Lyon (reporté)" {
+		t.Fatalf("July shows %v; the multi-day occurrence moved past the end of its series is missing", got)
+	}
+	if got := occ[0].EndDate.String(); got != "2026-07-08" {
+		t.Errorf("the moved trip ends on %s, want 2026-07-08", got)
+	}
+}
+
+// TestMultiDayOccurrenceReachingIntoTheWindowStaysVisible has no override at all. The
+// series ends on 29 June, but that last three-day trip runs into 1 July, and a window
+// starting on 1 July still has to show it — exactly as it would for a one-off event
+// with the same dates.
+func TestMultiDayOccurrenceReachingIntoTheWindowStaysVisible(t *testing.T) {
+	f := newFixture(t)
+	lastTrip := domain.MustParseDate("2026-06-29")
+	f.allDay(t, "Papa à Lyon", "2026-06-01", "2026-06-03", &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Monday},
+		Until: &lastTrip,
+	})
+
+	occ := f.occurrences(t, "2026-07-01", "2026-07-31")
+	if got := titlesOn(occ, lastTrip); len(got) != 1 || got[0] != "Papa à Lyon" {
+		t.Fatalf("July shows %v; the tail of the last trip is missing", got)
 	}
 }
 

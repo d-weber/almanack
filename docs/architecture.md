@@ -108,6 +108,14 @@ Editing one occurrence writes an *override*: a standalone event plus a row sayin
 date, use that instead", or "on this date, nothing". The series is untouched, which is what
 makes repeated single-occurrence edits safe.
 
+An override can also move an occurrence outside the span of the series it belongs to —
+past the end of term, or back before the first lesson — and the copy holding it is not
+readable as an event of its own, because it belongs to its series. So a series carrying an
+exception is read for every window regardless of its own dates, and the query that fetches
+a month is deliberately coarse in the same direction: it also reads series that ended
+shortly before the window, in case a multi-day occurrence reaches into it. Expansion
+decides what is actually visible. Too wide costs a few rows; too narrow loses events.
+
 That standalone event is the id the API then publishes for the occurrence, so the *second*
 thing anyone does to an edited occurrence arrives addressed to the copy rather than to the
 series — and a copy carries no pattern of its own. Every operation therefore resolves an id
