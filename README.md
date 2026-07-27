@@ -98,7 +98,7 @@ into whatever you already use.
 
 ## Status
 
-Working and in use, but young: version 0.1, one household, no upgrade history yet. The
+Working and in use, but young: version 0.2, one household, no upgrade history yet. The
 test suite is thorough where correctness is hard — recurrence and daylight saving, the
 notification outbox, the push encryption — and what it covers is described in
 [docs/development.md](docs/development.md).

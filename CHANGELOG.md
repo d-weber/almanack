@@ -6,6 +6,13 @@ Notable changes to this project. The format follows
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] — 2026-07-27
+
+Everything an adversarial review of 0.1.0 found and fixed, an English demo
+seed, and binaries you no longer have to build yourself.
+
 ### Added
 
 - **Released binaries.** Pushing a `v*` tag now builds and publishes linux amd64, arm64
@@ -114,5 +121,6 @@ First working version: in use by one household, not yet by anyone else.
 - Never upgraded in place: expand/contract migrations are implemented and tested, but
   no release has yet followed another on a live database.
 
-[Unreleased]: https://github.com/d-weber/almanack/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/d-weber/almanack/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/d-weber/almanack/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/d-weber/almanack/releases/tag/v0.1.0
