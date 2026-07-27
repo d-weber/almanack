@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -63,10 +64,54 @@ func (s *Service) Create(ctx context.Context, actor int64, in Input) (domain.Eve
 	return created, nil
 }
 
+// resolveOverride rewrites a request addressed to an edited occurrence so that it names
+// the occurrence rather than the copy standing in for it.
+//
+// Editing one occurrence leaves behind a standalone copy of the event, and it is that
+// copy the API publishes and the client sends back — so the *second* thing anyone does
+// to an occurrence arrives naming the copy. A copy has no recurrence of its own, so
+// without this every such request took the plain-event path: scope and date were read
+// and then ignored, deleting the occurrence removed the override row instead of the
+// occurrence (bringing it back at its original time), and the pruning that stops a
+// moved occurrence firing its old reminder cleared the wrong rows.
+//
+// The date comes from the override row rather than from the request, because that row
+// is the only authority on which occurrence the copy replaced; the copy's own start
+// date is wherever the family moved it to.
+//
+// The requested scope is kept. Once a client can see the series again it will ask
+// "this / this and following / the whole series", and all three have to reach it. Only
+// a missing or unusable scope becomes ScopeThis — a copy exists for exactly one
+// occurrence, so an unscoped request about one can only mean that occurrence, and
+// refusing it would break the clients that have been addressing copies all along.
+//
+// Events that are not override copies, including a copy a series split deliberately
+// detached, come back untouched.
+func (s *Service) resolveOverride(ctx context.Context, eventID int64, scope domain.EditScope, occDate domain.Date) (int64, domain.EditScope, domain.Date, error) {
+	ref, err := s.st.OverrideRefByEventID(ctx, eventID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return eventID, scope, occDate, nil
+		}
+		return 0, "", domain.Date{}, err
+	}
+	if !scope.Valid() {
+		scope = domain.ScopeThis
+	}
+	return ref.SeriesEventID, scope, ref.OccurrenceDate, nil
+}
+
 // Update applies an edit at the requested scope. For a recurring event, scope and
 // occDate decide whether this touches one occurrence, the rest of the series, or all
 // of it; the three do genuinely different things to the data and cannot be collapsed.
+//
+// eventID may be the copy an earlier single-occurrence edit produced, in which case it
+// addresses that occurrence — see resolveOverride.
 func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain.EditScope, occDate domain.Date, in Input) (domain.Event, error) {
+	eventID, scope, occDate, err := s.resolveOverride(ctx, eventID, scope, occDate)
+	if err != nil {
+		return domain.Event{}, err
+	}
 	existing, err := s.st.EventByID(ctx, eventID)
 	if err != nil {
 		return domain.Event{}, err
@@ -388,8 +433,14 @@ func (s *Service) copyReminders(ctx context.Context, fromRec, toRec int64) error
 	return nil
 }
 
-// Delete removes an event at the requested scope.
+// Delete removes an event at the requested scope. As with Update, eventID may be the
+// copy an earlier single-occurrence edit produced — deleting that copy on its own is
+// what used to bring the occurrence back, since the cascade took the exception with it.
 func (s *Service) Delete(ctx context.Context, actor, eventID int64, scope domain.EditScope, occDate domain.Date) error {
+	eventID, scope, occDate, err := s.resolveOverride(ctx, eventID, scope, occDate)
+	if err != nil {
+		return err
+	}
 	existing, err := s.st.EventByID(ctx, eventID)
 	if err != nil {
 		return err

@@ -450,6 +450,49 @@ func (s *Store) DeleteOverride(ctx context.Context, recurrenceID int64, date dom
 	return nil
 }
 
+// OverrideRef says which occurrence of which series an edited copy stands for.
+type OverrideRef struct {
+	RecurrenceID int64
+	// SeriesEventID is the template event of that series — the id every scoped edit
+	// is expressed in terms of.
+	SeriesEventID int64
+	// OccurrenceDate is the family-tz date of the occurrence in the original series,
+	// which is the identity the override is filed under and survives the copy being
+	// moved to another day.
+	OccurrenceDate domain.Date
+}
+
+// OverrideRefByEventID resolves an event id back to the occurrence it overrides, if it
+// overrides one.
+//
+// Editing a single occurrence stores a standalone copy of the event, and that copy's
+// own id is what the API publishes and the client sends back. Every later request about
+// that occurrence therefore names the copy rather than the series — and a copy carries
+// no recurrence_id of its own, so without this lookup it is indistinguishable from an
+// ordinary one-off event and the edit scope and date go unread.
+//
+// Returns domain.ErrNotFound when the id is an ordinary event, which includes the copy
+// a series split deliberately detached: that one is a standalone event now, and saying
+// otherwise would attach it to a series that no longer produces its date.
+func (s *Store) OverrideRefByEventID(ctx context.Context, eventID int64) (OverrideRef, error) {
+	var ref OverrideRef
+	// The join is what finds the template: a series has exactly one, and an override
+	// copy never has a recurrence_id, so it cannot match itself. ORDER BY keeps the
+	// answer stable rather than trusting the query plan for a row set the schema does
+	// not constrain to one.
+	err := s.db.QueryRowContext(ctx, `
+		SELECT o.recurrence_id, o.occurrence_date, t.id
+		  FROM event_overrides o
+		  JOIN events t ON t.recurrence_id = o.recurrence_id
+		 WHERE o.override_event_id = ?
+		 ORDER BY o.occurrence_date, t.id
+		 LIMIT 1`, eventID).Scan(&ref.RecurrenceID, &ref.OccurrenceDate, &ref.SeriesEventID)
+	if err != nil {
+		return OverrideRef{}, fmt.Errorf("series of override event %d: %w", eventID, mapErr(err))
+	}
+	return ref, nil
+}
+
 // RepointOverrides moves every override on or after fromDate from one series to
 // another. It is the second half of the "this and following occurrences" edit: the
 // original series is capped with UNTIL, a new series takes over from fromDate, and the

@@ -485,6 +485,78 @@ func TestScopedEditThisOccurrenceOnly(t *testing.T) {
 	}
 }
 
+// TestSecondEditOfTheSameOccurrence walks the route the client actually takes. An edit
+// to one occurrence answers with a standalone copy of the event, and every later
+// request about that occurrence is addressed to the copy's id — so this is the path a
+// family takes the moment they change their mind twice, and it used to lose the edit.
+func TestSecondEditOfTheSameOccurrence(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+	series := e.weeklySeries(cal, labels[4].ID)
+
+	// First edit: 11 August moves to Thursday the 13th.
+	e.do(http.MethodPatch,
+		fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", series.ID),
+		map[string]any{
+			"title": "Piscine (déplacée)", "label_id": labels[4].ID,
+			"starts_at": "2026-08-13T16:00:00Z", "ends_at": "2026-08-13T17:00:00Z",
+		}).expect(http.StatusOK)
+
+	// The id the client now holds for that occurrence is the copy's, not the series'.
+	var copyID int64
+	for _, occ := range e.listEvents("2026-08-01", "2026-08-31").Occurrences {
+		if occ.OccurrenceDate.String() == "2026-08-11" {
+			copyID = occ.EventID
+		}
+	}
+	if copyID == 0 || copyID == series.ID {
+		t.Fatalf("the edited occurrence is addressed by %d; want the override copy's own id", copyID)
+	}
+
+	// Opening it must still find the series: this is what decides whether the client
+	// asks "this / this and following / the whole series" before saving.
+	var detail eventDetail
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", copyID)).expect(http.StatusOK).decode(&detail)
+	if detail.Recurrence == nil {
+		t.Error("recurrence = null for an edited occurrence; the client will treat it as a one-off")
+	}
+	if !detail.Occurrence.IsOverride {
+		t.Error("is_override = false for an edited occurrence")
+	}
+	if got := detail.Occurrence.OccurrenceDate.String(); got != "2026-08-11" {
+		t.Errorf("occurrence_date = %s, want the date in the series", got)
+	}
+	if detail.Occurrence.SeriesEventID == nil || *detail.Occurrence.SeriesEventID != series.ID {
+		t.Errorf("series_event_id = %v, want %d", detail.Occurrence.SeriesEventID, series.ID)
+	}
+
+	// Second edit, addressed to the copy.
+	e.do(http.MethodPatch,
+		fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", copyID),
+		map[string]any{
+			"title": "Piscine (re-déplacée)", "label_id": labels[4].ID,
+			"starts_at": "2026-08-14T16:00:00Z", "ends_at": "2026-08-14T17:00:00Z",
+		}).expect(http.StatusOK)
+
+	list := e.listEvents("2026-08-01", "2026-08-31")
+	titles := titlesByDate(list.Occurrences)
+	if len(titles) != 4 {
+		t.Fatalf("occurrences after the second edit = %v", titles)
+	}
+	if titles["2026-08-11"] != "Piscine (re-déplacée)" {
+		t.Errorf("the twice-edited occurrence = %q", titles["2026-08-11"])
+	}
+
+	// And deleting it leaves it deleted, rather than restoring the series' original.
+	e.do(http.MethodDelete, fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", copyID), nil).
+		expect(http.StatusNoContent)
+	list = e.listEvents("2026-08-01", "2026-08-31")
+	if got, want := dates(list.Occurrences), []string{"2026-08-04", "2026-08-18", "2026-08-25"}; !equalStrings(got, want) {
+		t.Fatalf("after deleting the edited occurrence = %v, want %v", got, want)
+	}
+}
+
 func TestScopedEditUpcomingSplitsTheSeries(t *testing.T) {
 	e := newEnv(t)
 	_, cal := e.family()

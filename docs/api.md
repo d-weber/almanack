@@ -132,6 +132,14 @@ The main read. `from`/`to` are inclusive family-tz dates; `calendar_ids` is opti
 `occurrence_date` identifies the instance within its series and is required by every
 scoped edit. For non-recurring events it is the start date.
 
+An edited occurrence is stored as a standalone copy of the event, and `event_id` is that
+copy's id — `series_event_id` is the series it belongs to. Sending the copy's id back to
+any of the routes below addresses **that occurrence**: the server resolves it to its
+series and to the `occurrence_date` it stands for, whatever `date` the request carries,
+and `scope` defaults to `this` when none is given. So a client may hold the id it was
+given and keep editing the same occurrence, and `scope=all` from there still reaches the
+whole series.
+
 ### `POST /api/v1/events`
 ```json
 { "calendar_id":1, "title":"Swimming", "all_day":false,
@@ -145,7 +153,10 @@ reminders as `{ "days_before":1, "at_time_local":"09:00" }`. `recurrence` and `r
 optional; `reminders` apply to the caller only. → `201 { "event": Event }`
 
 ### `GET /api/v1/events/{id}?date=YYYY-MM-DD`
-Detail for one occurrence (`date` = `occurrence_date`, required for series).
+Detail for one occurrence (`date` = `occurrence_date`, required for series, ignored for
+an edited occurrence's own id). `recurrence` is the **series'**, so an edited occurrence
+reports the pattern it belongs to rather than `null`, and a client can go on offering the
+scope question.
 → `{ "occurrence": Occurrence, "my_reminders": [Reminder], "recurrence": Recurrence|null }`
 
 ### `PATCH /api/v1/events/{id}?scope=this|upcoming|all&date=YYYY-MM-DD`

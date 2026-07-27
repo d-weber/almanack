@@ -65,13 +65,23 @@ func (s *Service) Occurrences(ctx context.Context, calendarIDs []int64, from, to
 
 // Occurrence returns a single occurrence identified by its event and the date of the
 // original occurrence in its series. For a non-recurring event, date may be zero.
+//
+// The event may equally be the copy an earlier single-occurrence edit produced, which
+// is what the client holds after that edit; it resolves back to the occurrence it
+// stands for. Reporting such a copy as a plain event is how the series became
+// unreachable for a second edit — a client that is told there is no recurrence never
+// asks which occurrences the edit should touch.
 func (s *Service) Occurrence(ctx context.Context, eventID int64, date domain.Date) (domain.Occurrence, error) {
+	eventID, _, date, err := s.resolveOverride(ctx, eventID, domain.ScopeThis, date)
+	if err != nil {
+		return domain.Occurrence{}, err
+	}
 	e, err := s.st.EventByID(ctx, eventID)
 	if err != nil {
 		return domain.Occurrence{}, err
 	}
 	if e.RecurrenceID == nil {
-		// Either a plain event or an override copy; both stand alone.
+		// A plain event, or a copy a series split detached: both stand alone.
 		return s.occurrenceOf(e, s.startDateOf(e), false, nil), nil
 	}
 	if date.IsZero() {

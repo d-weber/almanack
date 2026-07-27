@@ -871,6 +871,67 @@ func TestOverridesIncludingCancellation(t *testing.T) {
 	}
 }
 
+// TestOverrideRefByEventID: the copy an occurrence edit leaves behind is what the API
+// hands out and the client sends back, so the store has to be able to say which
+// occurrence of which series that copy stands for.
+func TestOverrideRefByEventID(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	recID := *series.RecurrenceID
+
+	// The copy is moved to the Thursday, so its own start date is not the date the
+	// override is filed under. Only the override row knows that one.
+	moved := time.Date(2026, 8, 13, 16, 0, 0, 0, time.UTC)
+	copyEv, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (déplacée)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the override: %v", err)
+	}
+	occDate := domain.MustParseDate("2026-08-11")
+	if err := s.SetOverride(ctx(), recID, occDate, &copyEv.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	ref, err := s.OverrideRefByEventID(ctx(), copyEv.ID)
+	if err != nil {
+		t.Fatalf("OverrideRefByEventID: %v", err)
+	}
+	if ref.RecurrenceID != recID || ref.SeriesEventID != series.ID || !ref.OccurrenceDate.Equal(occDate) {
+		t.Errorf("ref = %+v; want recurrence %d, series event %d, %s", ref, recID, series.ID, occDate)
+	}
+
+	// The series template itself is not an override of anything, and neither is an
+	// ordinary event.
+	for _, id := range []int64{series.ID, series.ID + 1000} {
+		if _, err := s.OverrideRefByEventID(ctx(), id); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("OverrideRefByEventID(%d) = %v; want ErrNotFound", id, err)
+		}
+	}
+
+	// Detaching the override — what a series split does to a copy whose date the new
+	// pattern no longer produces — makes it an ordinary event again.
+	if err := s.DeleteOverride(ctx(), recID, occDate); err != nil {
+		t.Fatalf("DeleteOverride: %v", err)
+	}
+	if _, err := s.OverrideRefByEventID(ctx(), copyEv.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("a detached copy still resolves to a series: %v", err)
+	}
+}
+
 func TestRepointOverrides(t *testing.T) {
 	s, _, _ := newStore(t)
 	u := mustUser(t, s, "claire@example.test", "Claire")
