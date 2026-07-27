@@ -83,7 +83,9 @@ would see different occurrences of the same event.
 
 **The hour that happens twice is not a name for a moment.** When the clocks go back, a wall
 time inside the repeated hour describes two instants, and `wallToInstant()` in the browser
-answers the later one. That is the right default for a time somebody has just typed and the
+answers the later one in Europe/Paris — the earlier one in a zone whose winter offset is
+negative, which is a consequence of the conversion rather than a choice, and is why the
+policy table below states it per zone. That is the right default for a time somebody has just typed and the
 wrong one for a time merely read back off a form, so the event editor keeps the instants it
 loaded an event with for as long as the corresponding date and time fields are untouched.
 Opening an event in that hour and saving it therefore cannot move it, and an event lying
@@ -96,8 +98,9 @@ takes no dependencies, so there is no JavaScript unit runner to put it in.
 `time.Date`, which resolves a broken wall time by reading the fields as though they were UTC,
 taking the zone offset in force at that instant and correcting once — step for step the
 two-pass conversion `wallToInstant()` does. So an occurrence the server generates and a time
-the editor saves land on the same instant, and neither half of the application has a rule of
-its own. That is worth stating because it is an agreement between two implementations rather
+the editor saves land on the same instant — as long as the two sides read the same timezone
+data, which is a real caveat and is spelled out under the table — and neither half of the
+application has a rule of its own. That is worth stating because it is an agreement between two implementations rather
 than one piece of code, and it would break quietly: both sides say 02:30 whichever instant
 they pick. The two ambiguity rows below are therefore pinned twice, by
 `TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant` in `internal/events` and by
