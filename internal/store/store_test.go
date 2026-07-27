@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"maps"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2358,6 +2360,333 @@ func TestEventsInRangeIgnoresCancellationsOutsideTheWindow(t *testing.T) {
 		t.Errorf("Series = %+v; a series that ended in January with a cancellation in it has nothing to show in July", res.Series)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A range read is one snapshot
+// ---------------------------------------------------------------------------
+
+// TestReadTransactionSnapshotsWithoutTakingTheWriteLock pins the two properties the
+// range read is built on, and they pull in opposite directions.
+//
+// The first is the point of the thing: statements inside a read transaction all see the
+// database as it was when the first of them ran, so a commit that lands half-way through
+// cannot be half-observed.
+//
+// The second is what makes the first affordable. modernc.org/sqlite turns
+// sql.TxOptions{ReadOnly: true} into a plain deferred BEGIN, skipping the
+// `_txlock=immediate` the DSN asks for; a read transaction therefore takes no write lock,
+// and a writer on another connection carries on. Get that wrong and every month view
+// serialises every writer behind it for as long as the read takes — much worse than the
+// bug the transaction is here to close. So the write below happens while the read
+// transaction is open, on a second connection, and is asserted to succeed.
+func TestReadTransactionSnapshotsWithoutTakingTheWriteLock(t *testing.T) {
+	s, _, path := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	add := func(st *Store, title string, day int) {
+		t.Helper()
+		start := time.Date(2026, 8, day, 14, 30, 0, 0, time.UTC)
+		if _, err := st.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: start, EndsAt: start.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, nil); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+	}
+	add(s, "Dentiste", 4)
+
+	// A second store on the same file is a second connection with its own pool, which
+	// is what another request holding the write lock actually looks like.
+	writer, err := Open(path, testLocation(t), clock.NewFake(baseTime))
+	if err != nil {
+		t.Fatalf("open a second store on the same file: %v", err)
+	}
+	defer writer.Close()
+
+	count := func(q querier) int {
+		t.Helper()
+		var n int
+		if err := q.QueryRowContext(ctx(), `SELECT COUNT(*) FROM events`).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
+
+	var before, inside int
+	if err := s.readTx(ctx(), func(q querier) error {
+		// The first statement is what fixes the snapshot; nothing committed after it
+		// may appear to the ones that follow.
+		before = count(q)
+		add(writer, "Piscine", 5)
+		inside = count(q)
+		return nil
+	}); err != nil {
+		t.Fatalf("readTx: %v", err)
+	}
+
+	if before != 1 {
+		t.Fatalf("the read transaction opened on %d events; want 1", before)
+	}
+	if inside != before {
+		t.Errorf("a second statement in the read transaction saw %d events where the first saw %d: "+
+			"the read is not a snapshot", inside, before)
+	}
+	if after := count(s.q); after != 2 {
+		t.Errorf("outside the read transaction there are %d events; want 2 — the concurrent write "+
+			"was meant to have landed", after)
+	}
+}
+
+// TestEventsInRangeIsOneReadTransaction watches the driver rather than the results,
+// because the bug this closes is not visible in either.
+//
+// EventsInRange reads five related tables. Run against the pool they are five
+// independent statements, and an edit committing between any two of them is observed
+// half-applied: an occurrence drawn twice, once as itself and once inside its series, or
+// missing from both. The results of any single call look perfectly ordinary either way,
+// so the only honest assertion is the structural one — one BEGIN, read-only, with all
+// five statements inside it.
+func TestEventsInRangeIsOneReadTransaction(t *testing.T) {
+	s, clk, path := newStore(t)
+	loc := s.loc
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	marc := mustUser(t, s, "marc@example.test", "Marc")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	// Enough of a calendar that all five queries have something to do: the last two
+	// return early on an empty id list, and a test that never reaches them would pass
+	// with them still on the pool.
+	seriesStart := time.Date(2026, 8, 4, 16, 0, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: seriesStart, EndsAt: seriesStart.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID, Participants: []int64{u.ID, marc.ID},
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("create series: %v", err)
+	}
+	movedStart := time.Date(2026, 8, 11, 18, 0, 0, 0, time.UTC)
+	moved, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (20h)", StartsAt: movedStart, EndsAt: movedStart.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID, Participants: []int64{marc.ID},
+	}, nil)
+	if err != nil {
+		t.Fatalf("create the moved occurrence: %v", err)
+	}
+	if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate("2026-08-11"), &moved.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close the seeding store: %v", err)
+	}
+
+	traced, tr := tracedStore(t, path, loc, clk)
+	// Warm the pool first: opening a connection replays the DSN pragmas, and that is
+	// not part of what the read does.
+	if err := traced.Ping(ctx()); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+	tr.reset()
+
+	res, err := traced.EventsInRange(ctx(), []int64{cal.ID},
+		domain.MustParseDate("2026-08-01"), domain.MustParseDate("2026-08-31"))
+	if err != nil {
+		t.Fatalf("EventsInRange: %v", err)
+	}
+	if len(res.Series) != 1 || len(res.Series[0].OverrideEvents) != 1 {
+		t.Fatalf("the traced read did not return the series and its moved occurrence: %+v", res)
+	}
+
+	entries := tr.entries()
+	if len(entries) == 0 {
+		t.Fatal("the driver saw nothing at all")
+	}
+	if entries[0].op != "begin" {
+		t.Fatalf("the first thing EventsInRange did at the driver was %v, not a BEGIN: "+
+			"its statements are running against the pool, so an edit committing between "+
+			"two of them is observed half-applied", entries[0])
+	}
+	if entries[0].arg != "read-only" {
+		t.Errorf("the range read began a %q transaction; it must be read-only, or (with "+
+			"_txlock=immediate in the DSN) every month view takes SQLite's write lock and "+
+			"queues every writer behind it", entries[0].arg)
+	}
+	if last := entries[len(entries)-1]; last.op != "commit" && last.op != "rollback" {
+		t.Errorf("the read transaction was never ended; the last thing the driver saw was %v", last)
+	}
+
+	begins := 0
+	var stmts []string
+	for _, e := range entries {
+		switch e.op {
+		case "begin":
+			begins++
+		case "sql":
+			stmts = append(stmts, e.arg)
+		}
+	}
+	if begins != 1 {
+		t.Errorf("EventsInRange began %d transactions; want exactly 1", begins)
+	}
+	// In order: the singles, the series templates, their exceptions, the copies those
+	// exceptions point at, and everyone's participation.
+	want := []string{
+		"FROM events e",
+		"JOIN recurrences r",
+		"FROM event_overrides",
+		"FROM events WHERE id IN",
+		"FROM event_participants",
+	}
+	if len(stmts) != len(want) {
+		t.Fatalf("EventsInRange issued %d statements, want %d: %q", len(stmts), len(want), stmts)
+	}
+	for i, fragment := range want {
+		if !strings.Contains(stmts[i], fragment) {
+			t.Errorf("statement %d does not contain %q, so the five queries are not the ones "+
+				"expected inside the transaction:\n%s", i+1, fragment, stmts[i])
+		}
+	}
+}
+
+// traceEntry is one thing the tracing driver below saw: a transaction beginning
+// ("read-only" or "write"), a statement, or a transaction ending.
+type traceEntry struct {
+	op  string
+	arg string
+}
+
+// tracer collects those in order. It is shared by every connection of one pool, and the
+// range read uses one connection, so the order it records is the order that connection
+// saw.
+type tracer struct {
+	mu   sync.Mutex
+	seen []traceEntry
+}
+
+func (tr *tracer) record(op, arg string) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.seen = append(tr.seen, traceEntry{op: op, arg: arg})
+}
+
+func (tr *tracer) reset() {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.seen = nil
+}
+
+func (tr *tracer) entries() []traceEntry {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return slices.Clone(tr.seen)
+}
+
+// tracingDriverSeq keeps the registered driver names unique, since database/sql panics
+// on a duplicate and `go test -count=2` would otherwise hit one.
+var tracingDriverSeq atomic.Int64
+
+// tracedStore opens an already-migrated database through a driver that reports what it
+// is asked to do, and returns a Store wired to it exactly as Open wires the real one.
+//
+// It is deliberately not a variant of Open: the point is to run the production DSN,
+// `_txlock=immediate` included, through the production pool settings, so that what the
+// trace shows is what a real deployment does.
+func tracedStore(t *testing.T, path string, loc *time.Location, clk clock.Clock) (*Store, *tracer) {
+	t.Helper()
+
+	// sql.Open does not connect, so this is only a way to reach the registered driver
+	// value without importing the package that registers it.
+	probe, err := sql.Open(driverName, dsn(path))
+	if err != nil {
+		t.Fatalf("reach the sqlite driver: %v", err)
+	}
+	inner := probe.Driver()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close the probe: %v", err)
+	}
+
+	tr := &tracer{}
+	name := fmt.Sprintf("sqlite-tracing-%d", tracingDriverSeq.Add(1))
+	sql.Register(name, tracingDriver{inner: inner, tr: tr})
+
+	db, err := sql.Open(name, dsn(path))
+	if err != nil {
+		t.Fatalf("open %s through the tracing driver: %v", path, err)
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxOpenConns)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	t.Cleanup(func() { db.Close() })
+
+	return &Store{db: db, q: db, loc: loc, clk: clk}, tr
+}
+
+type tracingDriver struct {
+	inner driver.Driver
+	tr    *tracer
+}
+
+func (d tracingDriver) Open(name string) (driver.Conn, error) {
+	c, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return tracingConn{inner: c, tr: d.tr}, nil
+}
+
+// tracingConn implements the context-aware halves of driver.Conn as well as the plain
+// ones, because database/sql only falls back to Prepare when they are absent — and a
+// prepared statement would hide the SQL from the trace.
+type tracingConn struct {
+	inner driver.Conn
+	tr    *tracer
+}
+
+func (c tracingConn) Prepare(query string) (driver.Stmt, error) { return c.inner.Prepare(query) }
+func (c tracingConn) Close() error                              { return c.inner.Close() }
+
+func (c tracingConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c tracingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	tx, err := c.inner.(driver.ConnBeginTx).BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	mode := "write"
+	if opts.ReadOnly {
+		mode = "read-only"
+	}
+	c.tr.record("begin", mode)
+	return tracingTx{inner: tx, tr: c.tr}, nil
+}
+
+func (c tracingConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	return c.inner.(driver.ConnPrepareContext).PrepareContext(ctx, query)
+}
+
+func (c tracingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.tr.record("sql", query)
+	return c.inner.(driver.QueryerContext).QueryContext(ctx, query, args)
+}
+
+func (c tracingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.tr.record("sql", query)
+	return c.inner.(driver.ExecerContext).ExecContext(ctx, query, args)
+}
+
+type tracingTx struct {
+	inner driver.Tx
+	tr    *tracer
+}
+
+func (t tracingTx) Commit() error   { t.tr.record("commit", ""); return t.inner.Commit() }
+func (t tracingTx) Rollback() error { t.tr.record("rollback", ""); return t.inner.Rollback() }
 
 func TestSearchIsAccentInsensitive(t *testing.T) {
 	s, _, _ := newStore(t)

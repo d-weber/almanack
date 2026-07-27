@@ -42,6 +42,11 @@
 // them knowing. internal/events uses it for the scoped edits, which are several writes
 // each and must not be interrupted half-way; nothing in this package needs to be
 // rewritten for it, and nothing outside it has to hold a *sql.Tx.
+//
+// Reads get the same treatment only where an answer is assembled from several tables:
+// EventsInRange runs its five queries inside Store.readTx, a read-only transaction, so
+// the month it draws is the database at one instant rather than at five. Every other read
+// here is a single statement, which SQLite already runs atomically.
 package store
 
 import (
@@ -469,6 +474,44 @@ func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 		return fmt.Errorf("commit transaction: %w", mapErr(err))
 	}
 	return nil
+}
+
+// readTx runs fn against one read transaction, so that every statement fn issues sees
+// the database as it stood when the first of them ran.
+//
+// It exists for EventsInRange, which reads five related tables to draw a month. On the
+// pool those are five independent statements, and an edit committing between two of them
+// is observed half-applied — an occurrence drawn twice, once as itself and once inside
+// its series, or missing from both. One BEGIN makes the answer self-consistent by
+// construction rather than by the writers happening not to land there.
+//
+// The transaction is read-only, and that is the whole of why this is cheap:
+// modernc.org/sqlite issues a plain deferred BEGIN when opts.ReadOnly is set, skipping
+// the `_txlock=immediate` the DSN asks for (see dsn). So it takes no write lock, and in
+// WAL a reader and the writer proceed together. Beginning a write transaction here
+// instead would queue every writer behind every month view, which is a far worse thing
+// than the bug this closes; there is a test that opens a read transaction and writes
+// through a second connection while it is open.
+//
+// Like tx, it joins a transaction already in progress rather than beginning a second
+// one — asking a four-connection pool for another connection while holding one is a
+// deadlock, not a slowdown — and in that case leaves ending it to whoever opened it.
+//
+// This is not a convention for the package. Every other read here is a single statement,
+// which SQLite already runs atomically; wrapping those would buy nothing and cost a
+// round trip. Reach for it only where one answer is assembled from several tables.
+func (s *Store) readTx(ctx context.Context, fn func(querier) error) error {
+	if open, joined := s.q.(*sql.Tx); joined {
+		return fn(open)
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin read transaction: %w", mapErr(err))
+	}
+	// Rolled back rather than committed: a read transaction has nothing to commit, and
+	// the error from ending one carries no information a caller could act on.
+	defer func() { _ = tx.Rollback() }()
+	return fn(tx)
 }
 
 // SQLite extended result codes. They are stable numbers in SQLite's public interface,

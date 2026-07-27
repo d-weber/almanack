@@ -102,7 +102,8 @@ actually catches their opposites.
 
 A recurring event is a template plus a pattern. Occurrences are computed on read within
 the window being displayed, so nothing can drift out of sync with the series that produced
-it. One database round trip fetches everything a month needs.
+it. One database round trip fetches everything a month needs — five statements, never a
+query per occurrence.
 
 Editing one occurrence writes an *override*: a standalone event plus a row saying "on this
 date, use that instead", or "on this date, nothing". The series is untouched, which is what
@@ -142,6 +143,20 @@ edit, and a committed edit whose log row was lost is a change nobody is ever tol
 Deciding what to write — validating the new pattern, re-anchoring it, working out which
 exceptions still have a date — happens before the transaction opens, since SQLite takes
 its write lock at `BEGIN`.
+
+**A range read is one snapshot.** The five statements that draw a month — singles, series
+templates, their exceptions, the copies those exceptions point at, everyone's
+participation — run inside a read transaction, so the answer is the database at one
+instant rather than at five. Against the pool they are independent, and an edit committing
+between two of them is observed half-applied: an occurrence drawn twice, once as itself
+and once inside its series. Making scoped edits atomic closed every interleaving anyone
+could reproduce, and what was left was a transient that healed on the next poll — but
+"correct because the writers happen not to land there" is not a property that survives the
+next feature. The transaction is read-only, which matters more than it sounds: the driver
+turns that into a plain deferred `BEGIN` and takes no write lock, so a month view and a
+writer still proceed together. A read that took the write lock would queue every writer
+behind every render, and there is a test that writes from a second connection while a read
+transaction is open to say so.
 
 ## Notifications
 

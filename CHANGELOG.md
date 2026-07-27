@@ -139,6 +139,24 @@ Notable changes to this project. The format follows
   those exceptions go with it. Both belong in a change of their own. For now, turning a
   one-off into a series means creating it again.
   ([#5](https://github.com/d-weber/almanack/issues/5))
+- **A month view could draw the same event twice.** Drawing a month takes five queries —
+  the one-off events, the repeating series, the occurrences somebody has edited or
+  cancelled, the copies carrying those edits, everyone's participation — and each one went
+  to the database on its own. An edit committing between two of them was therefore seen
+  half-applied: the copy holding a moved occurrence could pass the first query as an
+  ordinary event and then arrive a second time inside its series, so the same swimming
+  lesson showed up twice, at two different times, on the same day. It is worth being plain
+  about how narrow this had become. Making each scoped edit a single transaction (above)
+  closed every interleaving that could actually be reproduced; what remained needed
+  somebody else in the household to save an edit inside the few milliseconds one render
+  spends between two of its queries, and it healed on the next poll with nothing stored
+  wrong. The five queries now run inside one read transaction, so what comes back is the
+  calendar at a single instant rather than at five — self-consistent by construction rather
+  than because writers happen not to land there. That transaction is read-only and takes no
+  write lock, so a month view still holds nobody up; there is a test that writes from a
+  second connection while one is open, because a read that queued every writer behind every
+  render would be a considerably worse bug than the one being fixed here.
+  ([#6](https://github.com/d-weber/almanack/issues/6))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
