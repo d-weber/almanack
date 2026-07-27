@@ -541,8 +541,20 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 	var errs []error
 	for _, a := range acts {
 		if err := n.planOneActivity(ctx, a, prefs, actors, calendars); err != nil {
+			// Stop the batch rather than skip the row. The cursor is one
+			// high-water mark, so carrying on would let the next row that succeeded
+			// set it past this one — and nothing ever reads a row the cursor has
+			// passed, so INSERT OR IGNORE gets no second chance at it and the change
+			// is announced to nobody. The error is still collected, so the pass
+			// reports failure and the rest of the batch goes out on the next tick.
+			//
+			// Stopping cannot wedge the feed, because no row can fail forever: a
+			// deleted calendar takes its activity rows with it (ON DELETE CASCADE)
+			// and drops out of cals, so what is left is store I/O; and the two reads
+			// that legitimately come up empty — the actor and the participant list —
+			// are already handled without an error.
 			errs = append(errs, err)
-			continue // do not advance past a row that failed to fan out
+			break
 		}
 		if a.ID > highest {
 			highest = a.ID

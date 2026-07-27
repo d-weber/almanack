@@ -174,6 +174,19 @@ Notable changes to this project. The format follows
   `before` still works, and still cannot page through a shared second, which is why it is no
   longer what the app sends. Nothing changed in the database.
   ([#7](https://github.com/d-weber/almanack/issues/7))
+- **A change to the calendar could go out to nobody.** The planner works through the change
+  log in order, telling the people each entry concerns, and then moves a marker past
+  everything it has done. When the database refused one of those writes for a moment — a
+  lock held a fraction too long is all it takes — the planner noted the error, carried on to
+  the next entry, and moved the marker past both. Nothing is ever read from behind that
+  marker, so the entry that failed was not retried on the following tick, or on any tick
+  after it: the appointment was on the calendar, the feed showed it had been added, and not
+  one person was notified. Nothing looked wrong afterwards, which is the part that matters —
+  there was no failed notification to find, because it had never been prepared. The planner
+  now stops at the first entry it cannot get out and leaves the marker in front of it, so
+  that entry and the ones behind it go thirty seconds later on the next tick. Nothing
+  changed in the database.
+  ([#10](https://github.com/d-weber/almanack/issues/10))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

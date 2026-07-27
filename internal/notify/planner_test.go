@@ -2,6 +2,8 @@ package notify
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -590,6 +592,72 @@ func TestActivityCatchUpAfterALongOutage(t *testing.T) {
 	}
 }
 
+// TestAFailedFanOutKeepsItsChangeInFrontOfTheCursor: one change in the middle of a
+// batch cannot be fanned out. The rule this pins is that the cursor is a promise —
+// everything behind it has been announced — so a pass may not step over the change
+// that failed, however many changes after it would have gone out fine. Nothing ever
+// reads a change the cursor has passed: INSERT OR IGNORE gets no second chance at
+// it, and the family is never told it happened.
+//
+// The failure is the store refusing one insert into the outbox, which is the shape
+// of the only failure this path has in practice: a transient SQLite error on one row
+// of a batch. It is a trigger, and dropping it again is that error clearing.
+func TestAFailedFanOutKeepsItsChangeInFrontOfTheCursor(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	cal := e.calendar("Famille", actor.ID)
+	e.join(cal.ID, watcher.ID)
+
+	e.plan() // the first pass only sets the high-water mark
+
+	// A second between them, so that the order they are announced in is the order
+	// they happened in and not the order they were queued in.
+	for _, title := range []string{"Piscine", "Dentiste", "Judo"} {
+		e.clk.Advance(time.Second)
+		if err := e.st.LogActivity(e.ctx, domain.Activity{
+			CalendarID: cal.ID, UserID: actor.ID,
+			Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("log the change %q: %v", title, err)
+		}
+	}
+	acts, err := e.st.ListActivityAfter(e.ctx, []int64{cal.ID}, 0, 10)
+	if err != nil {
+		t.Fatalf("list the changes: %v", err)
+	}
+	if len(acts) != 3 {
+		t.Fatalf("logged %d changes, want 3", len(acts))
+	}
+	first, failing, last := acts[0], acts[1], acts[2]
+
+	e.failFanOutOf(failing)
+
+	if err := e.n.Plan(e.ctx); err == nil {
+		t.Fatal("the pass reported success although a change could not be fanned out")
+	}
+	if got := e.announcedChanges(); !slices.Equal(got, []string{"Piscine"}) {
+		t.Errorf("the failing pass announced %v, want only [Piscine]", got)
+	}
+	if got := e.activityCursor(); got != first.ID {
+		t.Fatalf("the cursor stands at %d, want %d: it has stepped over %q, which is behind it for good — nothing reads it again, so nobody is ever told about it",
+			got, first.ID, failing.Title)
+	}
+
+	// The error clears. Everything still in front of the cursor goes out on the
+	// next ordinary pass, once each and in the order it happened.
+	e.fanOutWorksAgain()
+	e.plan()
+
+	if got := e.announcedChanges(); !slices.Equal(got, []string{"Piscine", "Dentiste", "Judo"}) {
+		t.Errorf("the family was told about %v, want all three changes once each", got)
+	}
+	if got := e.activityCursor(); got != last.ID {
+		t.Errorf("the cursor came to rest at %d, want %d", got, last.ID)
+	}
+}
+
 // TestPlannerRecordsItsHorizon: without this marker CatchUp cannot know how big
 // the hole an outage left is.
 func TestPlannerRecordsItsHorizon(t *testing.T) {
@@ -606,6 +674,53 @@ func TestPlannerRecordsItsHorizon(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+
+// failFanOutOf makes the store reject the outbox insert one change produces, and
+// only that one. The store API has no way to say "fail this row", and a test that
+// cannot fail one row of a batch cannot say anything about where the cursor stops —
+// so this reaches past the API through Store.DB, which exists for exactly that.
+func (e *env) failFanOutOf(a domain.Activity) {
+	e.t.Helper()
+	_, err := e.st.DB().ExecContext(e.ctx, fmt.Sprintf(`
+		CREATE TRIGGER test_fan_out_failure BEFORE INSERT ON notification_queue
+		WHEN NEW.source_ref = '%s'
+		BEGIN SELECT RAISE(ABORT, 'the database is briefly unavailable'); END`,
+		events.ActivitySourceRef(a.ID)))
+	if err != nil {
+		e.t.Fatalf("install the failure: %v", err)
+	}
+}
+
+func (e *env) fanOutWorksAgain() {
+	e.t.Helper()
+	if _, err := e.st.DB().ExecContext(e.ctx, `DROP TRIGGER test_fan_out_failure`); err != nil {
+		e.t.Fatalf("clear the failure: %v", err)
+	}
+}
+
+// activityCursor is the id of the last change the planner says it has announced.
+func (e *env) activityCursor() int64 {
+	e.t.Helper()
+	raw, err := e.st.GetMeta(e.ctx, MetaActivityCursor)
+	if err != nil {
+		e.t.Fatalf("read the activity cursor: %v", err)
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		e.t.Fatalf("activity cursor %q: %v", raw, err)
+	}
+	return id
+}
+
+// announcedChanges is the titles the family has been told about, oldest first.
+func (e *env) announcedChanges() []string {
+	e.t.Helper()
+	var out []string
+	for _, r := range e.queueOfKind(domain.KindActivity) {
+		out = append(out, e.payloadOf(r).Title)
+	}
+	return out
+}
 
 func findRow(rows []queueRow, sourceRef string) (queueRow, bool) {
 	for _, r := range rows {
