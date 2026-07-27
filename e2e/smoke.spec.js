@@ -110,3 +110,50 @@ test('the offline banner appears and cached events remain readable', async ({ pa
   await expect(page.getByText("Leo's dentist")).toBeVisible({ timeout: 10_000 });
   await context.setOffline(false);
 });
+
+test('the cached API responses are capped, oldest first', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByText("Leo's dentist")).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller)), {
+      timeout: 10_000,
+    })
+    .toBe(true);
+
+  // Seventy distinct ranges, one at a time so each is cached before the next is asked
+  // for — this is a year of somebody scrolling back through the calendar, compressed.
+  const ranges = await page.evaluate(async () => {
+    const asked = [];
+    for (let i = 0; i < 70; i++) {
+      const from = `20${30 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}-01`;
+      const url = `/api/v1/events?from=${from}&to=${from}`;
+      const response = await fetch(url);
+      if (response.ok) asked.push(url);
+    }
+    return asked;
+  });
+  expect(ranges).toHaveLength(70);
+
+  const cached = (url) => page.evaluate(async (target) => {
+    for (const name of await caches.keys()) {
+      if (await (await caches.open(name)).match(target)) return true;
+    }
+    return false;
+  }, url);
+
+  // Exactly the cap, and not a smaller number: an eviction that takes more than the
+  // excess is the failure mode this is really watching for, and it looks identical to a
+  // working cap unless the count is pinned. Seventy asks plus the app's own handful,
+  // trimmed to the sixty most recent, is sixty.
+  await expect.poll(() => page.evaluate(async () => {
+    let n = 0;
+    for (const name of await caches.keys()) {
+      const keys = await (await caches.open(name)).keys();
+      n += keys.filter((request) => new URL(request.url).pathname.startsWith('/api/')).length;
+    }
+    return n;
+  }), { timeout: 10_000 }).toBe(60);
+
+  await expect.poll(() => cached(ranges[0]), { timeout: 10_000 }).toBe(false);
+  expect(await cached(ranges[ranges.length - 1])).toBe(true);
+});

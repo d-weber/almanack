@@ -39,8 +39,9 @@ export default {
       dependencies: ['setup'],
       // timezone.spec.js asserts the device zone is Lisbon, which is only true in the
       // project below. Running it here failed on an assertion that was never about the
-      // application.
-      testIgnore: /timezone\.spec\.js/,
+      // application. logout.spec.js needs a session it is allowed to destroy, which the
+      // shared one is not.
+      testIgnore: [/timezone\.spec\.js/, /logout\.spec\.js/],
     },
     // A second timezone catches the bug this project cares most about: a device in
     // Lisbon must still show a Paris event at its Paris time.
@@ -53,6 +54,14 @@ export default {
       },
       dependencies: ['setup'],
       testMatch: /timezone\.spec\.js/,
+    },
+    // Signing out ends a session server-side, and the one above is shared by every other
+    // spec. So this project starts from no stored session at all and signs in as somebody
+    // else: what it ends belongs to it alone. See logout.spec.js.
+    {
+      name: 'chromium-logout',
+      use: { browserName: 'chromium', storageState: { cookies: [], origins: [] } },
+      testMatch: /logout\.spec\.js/,
     },
   ],
 };
