@@ -170,6 +170,13 @@ belongs to a series; `scope=this` creates an override, `upcoming` splits the ser
 `all` edits the template (existing overrides are deliberate edits and are left alone).
 → `{ "event": Event }`
 
+**A repeat cannot be added or removed here** — that is settled when the event is created.
+Sending `recurrence` for an event that does not repeat is refused, and so is a `scope=all`
+edit of a series that leaves it out: both return `400 invalid`. Changing the *pattern* of
+an existing series is fine, so a `scope=all` edit has to resend `recurrence` even when it
+is unchanged. To turn a one-off into a series, or a series back into a one-off, create the
+event again and delete the old one.
+
 ### `DELETE /api/v1/events/{id}?scope=&date=`
 `this` cancels one occurrence, `upcoming` ends the series before it, `all` deletes
 series + overrides + reminders + queued notifications. → `204`

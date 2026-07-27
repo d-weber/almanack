@@ -318,7 +318,7 @@ export async function renderEventEditor({ id, date, query }) {
     body.appendChild(whenSection(form, paint));
     body.appendChild(peopleSection(form, paint));
     body.appendChild(detailsSection(form));
-    body.appendChild(repeatSection(form, paint));
+    body.appendChild(repeatSection(form, paint, isNew));
     body.appendChild(remindersSection(form, paint));
     saveBtn = button(t('action.save'), { onclick: () => save(), disabled: saving });
     body.appendChild(h('div', { class: 'editor-actions' },
@@ -391,8 +391,10 @@ export async function renderEventEditor({ id, date, query }) {
         }
         const payload = buildBody();
         // Recurrence only travels with a whole-series edit; 'this' and 'upcoming'
-        // are about occurrences, and the server owns the split.
-        if (!scope || scope === 'all') payload.recurrence = form.recurrence ? apiRecurrence(form) : null;
+        // are about occurrences, and the server owns the split. A one-off sends none
+        // at all: the API refuses to add a repeat to an existing event or remove one,
+        // and this used to send `null` for both, which was accepted and then dropped.
+        if (form.recurrence && scope === 'all') payload.recurrence = apiRecurrence(form);
         await api.updateEvent(form.id, payload, scope ? { scope, date: form.occurrence_date } : {});
         // Reminders are the caller's own and have their own endpoint.
         await api.putReminders(form.id, form.reminders.map((r) => apiReminder(r, form.all_day)));
@@ -557,10 +559,18 @@ function detailsSection(form) {
     })));
 }
 
-function repeatSection(form, paint) {
+// repeatSection edits the repeat pattern. Whether an event repeats at all is settled when
+// it is created: the API refuses to add a repeat to an existing event or to take one away,
+// because either would have to move the family's reminders and decide the fate of the
+// occurrences somebody has already edited by hand. So for an existing event this offers
+// the pattern and nothing else, and says why.
+function repeatSection(form, paint, isNew) {
+  if (!isNew && !form.recurrence) {
+    return section(t('recur.repeat'), h('p', { class: 'field-hint' }, t('recur.lockedOneOff')));
+  }
   const freq = form.recurrence ? form.recurrence.freq : 'none';
   const freqSelect = select([
-    { value: 'none', label: t('recur.none') },
+    ...(isNew ? [{ value: 'none', label: t('recur.none') }] : []),
     { value: 'daily', label: t('recur.daily') },
     { value: 'weekly', label: t('recur.weekly') },
     { value: 'monthly', label: t('recur.monthly') },
@@ -583,7 +593,7 @@ function repeatSection(form, paint) {
     },
   });
 
-  const parts = [field(t('recur.repeat'), freqSelect)];
+  const parts = [field(t('recur.repeat'), freqSelect, isNew ? null : t('recur.lockedSeries'))];
 
   if (form.recurrence) {
     const r = form.recurrence;

@@ -98,6 +98,8 @@
   "recur.interval.weeks": "semaines",
   "recur.interval.months": "mois",
   "recur.interval.years": "ans",
+  "recur.lockedOneOff": "Cet événement ne se répète pas. La répétition se choisit à la création : pour en faire une série, supprimez-le et recréez-le.",
+  "recur.lockedSeries": "La répétition ne peut pas être retirée ici : pour arrêter la série, supprimez-la.",
   "recur.until": "Jusqu'au",
   "recur.forever": "Sans fin",
   "recur.weekdays": "Jours",

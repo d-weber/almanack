@@ -126,6 +126,19 @@ Notable changes to this project. The format follows
   that have already gone out are left alone, because the outbox is also the record of what
   was sent. Neither needed a change to the database.
   ([#4](https://github.com/d-weber/almanack/issues/4))
+- **Ticking "repeat weekly" on an event that already existed did nothing at all.** The
+  editor sent the change, the server answered 200, the screen returned to the calendar —
+  and the event was still a one-off. Unticking the repeat on a series was the same in
+  reverse: the series carried on exactly as before, and nothing said otherwise. Both are
+  now refused with a message that says so, and the editor no longer offers the choice for
+  an event that exists; the pattern of an existing series can still be changed as it always
+  could. This replaces a silent no-op with an honest refusal — it does not add the feature.
+  Doing that properly means moving the reminders people have already set onto the new
+  series, or every occurrence gets notified twice, and answering what becomes of the
+  occasions somebody had edited by hand when the repeat goes away, since the rows holding
+  those exceptions go with it. Both belong in a change of their own. For now, turning a
+  one-off into a series means creating it again.
+  ([#5](https://github.com/d-weber/almanack/issues/5))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
