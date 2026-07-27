@@ -13,9 +13,9 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Matches the floor in go.mod. Kept exact rather than "stable" so that a
           # future toolchain bump is a deliberate commit, not a silent CI change.
@@ -49,7 +49,7 @@ jobs:
     name: Frontend integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The browser code has no toolchain, so these are the checks a build step would
       # otherwise have caught: unresolved module imports, a module missing from the

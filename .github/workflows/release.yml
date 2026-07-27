@@ -19,13 +19,13 @@ jobs:
     name: Build and publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `make build-all` stamps the binary from `git describe`, which needs tags
           # and history. A shallow clone would produce a version of "dev".
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Same floor as ci.yml and go.mod. A release must not be the thing that
           # silently moves the toolchain.
@@ -43,9 +43,14 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            # A real release must have been written down under its own version.
+            echo "notes=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
+            # A rehearsal has no version to look up — what a release cut right now
+            # would say is whatever has accumulated under Unreleased.
+            echo "notes=Unreleased" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build every platform
@@ -78,7 +83,7 @@ jobs:
       # Fails when the tag has no changelog section, before anything is published.
       - name: Render the release notes
         run: |
-          python3 .github/scripts/release_notes.py '${{ steps.version.outputs.version }}' \
+          python3 .github/scripts/release_notes.py '${{ steps.version.outputs.notes }}' \
             > /tmp/notes.md
           cat /tmp/notes.md
 
@@ -112,7 +117,7 @@ jobs:
 
       - name: Keep the binaries on the run
         if: steps.version.outputs.publish != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: almanack-${{ steps.version.outputs.version }}
           path: dist/
