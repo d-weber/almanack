@@ -170,10 +170,10 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}
 
 	// A weekly series, with one occurrence moved and a later one cancelled.
-	nextTuesday := nextWeekday(today, time.Tuesday)
+	firstSwim, movedDate, cancelledDate := swimmingSeries(today)
 	swimming, err := svc.Create(ctx, ids["Dad"], events.Input{
 		CalendarID: calIDs[kids], Title: "Swimming",
-		StartsAt: at(nextTuesday, 17, 30), EndsAt: at(nextTuesday, 18, 30),
+		StartsAt: at(firstSwim, 17, 30), EndsAt: at(firstSwim, 18, 30),
 		Location: "Leisure centre", LabelID: label(kids, 3),
 		Participants: []int64{ids["Leo"], ids["Dad"]},
 		Recurrence:   &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}},
@@ -188,7 +188,6 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 			return err
 		}
 	}
-	movedDate := nextTuesday.AddDays(7)
 	if _, err := svc.Update(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, movedDate, events.Input{
 		Title:    "Swimming (later than usual)",
 		StartsAt: at(movedDate, 19, 0), EndsAt: at(movedDate, 20, 0),
@@ -197,7 +196,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}); err != nil {
 		return fmt.Errorf("seed moved occurrence: %w", err)
 	}
-	if err := svc.Delete(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, nextTuesday.AddDays(21)); err != nil {
+	if err := svc.Delete(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, cancelledDate); err != nil {
 		return fmt.Errorf("seed cancelled occurrence: %w", err)
 	}
 
@@ -257,6 +256,28 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
   a multi-day holiday, a yearly birthday and a last-day-of-month rule.
 `, cfg.DataPath, seedPassword)
 	return nil
+}
+
+// swimmingSeries returns the three dates the demo's weekly series is built from: the
+// Tuesday it starts on, the occurrence moved to the evening, and the one cancelled.
+//
+// They are counted from the first Tuesday of the seeded month rather than from the
+// seeded day, because the month view is the screen this demo opens on and all three
+// are the point of the series. Its grid runs from the start of the week holding the
+// 1st to the end of the week holding the last day, less a trailing row lying wholly
+// outside the month (monthGrid, web/js/dates.js) — so every day of the month is on it
+// and days either side of the month are on it only sometimes. Counting from the 1st
+// bounds the three at the 7th, the 14th and the 28th, which the shortest February
+// still has. Counting from the seeded day did not bound them at all: the next Tuesday
+// after today is up to seven days out, so seeding on a Tuesday put the first
+// occurrence a week ahead and off the end of a five-row grid, taking the moved one
+// and the cancelled one with it, and the demo opened on a series with nothing to show
+// for itself. The last-day-of-month rule below is anchored to the month for the same
+// reason.
+func swimmingSeries(today domain.Date) (start, moved, cancelled domain.Date) {
+	// The first of any weekday falls on the 1st to the 7th, so this always exists.
+	start, _ = domain.NthWeekdayOfMonth(today.Year, today.Month, time.Tuesday, 1)
+	return start, start.AddDays(7), start.AddDays(21)
 }
 
 // nextWeekday returns the next occurrence of wd strictly after d.

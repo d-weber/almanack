@@ -53,7 +53,26 @@ async function deleteEvent(page, id) {
 test('the seeded family calendar loads and shows its events', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText("Leo's dentist")).toBeVisible();
-  await expect(page.getByText('Swimming').first()).toBeVisible();
+
+  // The swimming series, which is what makes this more than a test that one row draws:
+  // expanding a recurrence and drawing an occurrence that was edited away from its
+  // series are things only the browser does, and the month is where they are done.
+  //
+  // Counted rather than found once. A single chip is also what a series that had
+  // stopped repeating after its first occurrence would leave, so the assertion that
+  // has to hold is that it repeats: the seed anchors the series to the first Tuesday
+  // of the month and the grid holds every Tuesday of the month, so the first and the
+  // third are always on it — the 21st at the very latest — with the second moved to
+  // the evening under its own title and the fourth cancelled. That invariant is the
+  // seed's, and it is pinned there too, on every date in a decade:
+  // TestTheDemoSeriesLandsOnTheMonthTheAppOpensOn in cmd/almanack/seed_test.go. It
+  // used to anchor the series to the next Tuesday after today instead, which on a
+  // Tuesday is seven days out and can be past the end of a five-row grid, so this test
+  // went red on whichever days the calendar fell badly and said nothing about why.
+  const swimming = page.getByText('Swimming', { exact: true });
+  await expect(swimming.first()).toBeVisible();
+  expect(await swimming.count(), 'a weekly series draws more than one occurrence in a month').toBeGreaterThan(1);
+  await expect(page.getByText('Swimming (later than usual)', { exact: true })).toBeVisible();
 });
 
 test('no console errors and no CSP violations on load', async ({ page }) => {

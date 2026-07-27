@@ -800,6 +800,29 @@ Notable changes to this project. The format follows
   unchanged and still accepts any zone its own database knows: it cannot see what the browsers
   in the house support, and the browser can.
   ([#58](https://github.com/d-weber/almanack/issues/58))
+- **The demo calendar could open on a swimming series with nothing to show for itself, and
+  the browser tests went red on the days it did.** `almanack seed` started the weekly
+  series at the next Tuesday after the day it was run, which on a Tuesday means the one
+  after that, seven days out. A month that fits in five rows is drawn in five, so a series
+  beginning a week ahead can begin after the last day on the screen: seeded on the wrong
+  day, the demo opened on a calendar with no swimming lesson in it, no occurrence moved to
+  the evening and no cancelled one either — three of the four things that series is in the
+  seed to show, and the reason the seed prints a line about it. The browser smoke test
+  asserts the series is on the month, so it went red on those days as well, in CI, which
+  seeds a fresh database on every run, and in `make e2e` locally. It read as a broken
+  application, because nothing in the test said it depended on the day it ran. The series
+  is now counted from the first Tuesday of the month rather than from today, which puts
+  its first occurrence no later than the 7th, the moved one no later than the 14th and the
+  cancelled one no later than the 28th — all of them days of the month the app opens on,
+  and every day of a month is on that month's grid. The last-day-of-month rule beside it
+  in the seed was already anchored that way. No real calendar is affected: this is the
+  demo data and the test that reads it. The test was tightened rather than merely
+  unblocked, since a fix that made it pass on every date would have been worth less than
+  the bug — it now counts the occurrences instead of finding one, so a series that had
+  stopped repeating after its first would fail it, and the arithmetic is pinned in
+  `cmd/almanack` on every date in a decade rather than on whichever one CI happens to run.
+  ([#62](https://github.com/d-weber/almanack/issues/62))
+
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo
