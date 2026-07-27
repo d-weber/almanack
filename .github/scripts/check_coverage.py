@@ -44,7 +44,7 @@ FLOORS: dict[str, float] = {
     # The strict-configuration promise from 0.2.0. The gap is Load's fallback to
     # /etc/almanack/almanack.conf, which cannot be exercised without a system file.
     "almanack/internal/config": 99.0,
-    "almanack/internal/domain": 66.0,
+    "almanack/internal/domain": 70.0,
     # Scoped edits and series splitting — the hardest logic in the app, and the subject
     # of several open issues. This floor should rise as those land; making the edits
     # atomic raised it from 77.

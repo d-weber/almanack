@@ -760,6 +760,63 @@ func TestSendStatusMapping(t *testing.T) {
 	}
 }
 
+// TestSendDoesNotFollowRedirects. A subscription endpoint is a URL supplied by
+// whoever registered the device, and a redirect is what turns it from a URL this
+// server posts to into a URL this server can be aimed at: Go's client follows ten
+// hops, does not refuse an https→http downgrade, and replays the POST body on
+// 307/308 because http.NewRequestWithContext set GetBody. A push service that
+// answers 3xx is broken, so reporting the 3xx as an error costs nothing that a
+// real service does.
+func TestSendDoesNotFollowRedirects(t *testing.T) {
+	codes := []int{
+		http.StatusMovedPermanently,  // replayed as a GET
+		http.StatusFound,             // replayed as a GET
+		http.StatusSeeOther,          // replayed as a GET
+		http.StatusTemporaryRedirect, // replays the POST, body and all
+		http.StatusPermanentRedirect, // replays the POST, body and all
+	}
+	for _, code := range codes {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			// Stands in for whatever else is listening on the loopback interface
+			// of the machine this server runs on.
+			var internal capture
+			internalSrv := newPushService(t, &internal, func() int { return http.StatusOK })
+
+			redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, internalSrv.URL+"/private", code)
+			}))
+			t.Cleanup(redirecting.Close)
+
+			s, _ := newTestSender(t, redirecting.Client())
+			rcv := newReceiver(t, redirecting.URL+"/push/abc")
+
+			err := s.Send(context.Background(), rcv.sub, []byte("hi"), Options{})
+			if internal.requests != 0 {
+				t.Fatalf("the redirect was followed: the internal service saw %d %s request(s)",
+					internal.requests, internal.method)
+			}
+			var se *StatusError
+			if !errors.As(err, &se) {
+				t.Fatalf("Send error = %v, want a *StatusError carrying the %d", err, code)
+			}
+			if se.StatusCode != code {
+				t.Errorf("StatusError.StatusCode = %d, want %d", se.StatusCode, code)
+			}
+		})
+	}
+}
+
+// TestNewSenderLeavesTheCallersClientAlone: the no-redirect rule holds for every
+// Sender, including one built on a client the caller supplied — and it is applied
+// to a copy, because a Sender has no business changing a client it was lent.
+func TestNewSenderLeavesTheCallersClientAlone(t *testing.T) {
+	hc := &http.Client{Timeout: time.Second}
+	newTestSender(t, hc)
+	if hc.CheckRedirect != nil {
+		t.Error("NewSender changed the caller's client instead of copying it")
+	}
+}
+
 // TestSendGoneCarriesBody keeps the diagnostic push services put in the body:
 // with Apple, the body is the only place that says why.
 func TestSendGoneCarriesBody(t *testing.T) {

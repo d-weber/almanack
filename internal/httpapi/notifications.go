@@ -109,7 +109,7 @@ func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	endpoint, err := validEndpoint(req.Endpoint)
+	endpoint, err := s.validPushEndpoint(req.Endpoint)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -244,6 +244,11 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 
 // validEndpoint checks that a push endpoint is an https URL. Endpoints are never logged
 // in full: one is a capability to send that device notifications.
+//
+// It is what confirming and unsubscribing use. Neither dials anything — they look a row
+// up by its endpoint — so both must keep working for a subscription whose host the
+// allowlist would now refuse, or narrowing the list would strand the devices already
+// registered with no way to tidy up after themselves.
 func validEndpoint(raw string) (string, error) {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
@@ -255,6 +260,30 @@ func validEndpoint(raw string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return "", invalidf("a push endpoint must be an https URL")
+	}
+	return endpoint, nil
+}
+
+// validPushEndpoint is validEndpoint plus the allowlist, and it is what registration
+// uses. Storing an endpoint is what makes this server post to it later, so the check
+// belongs here rather than only at delivery: a refusal at subscribe time is a 400 the
+// browser can report, where the same refusal at delivery time is a device that
+// registered cleanly and then never receives anything.
+//
+// The rejection is logged at warn with the host, because the cost of an allowlist is
+// paid on the day a browser starts minting endpoints somewhere new. That day, this line
+// is the difference between a one-word fix in ALMANACK_PUSH_HOSTS and an afternoon
+// wondering why one person's phone went quiet.
+func (s *Server) validPushEndpoint(raw string) (string, error) {
+	endpoint, err := validEndpoint(raw)
+	if err != nil {
+		return "", err
+	}
+	if !domain.PushEndpointAllowed(endpoint, s.cfg.PushHosts) {
+		host := endpointHost(endpoint)
+		slog.Warn("push endpoint refused: its host is not an allowed push service",
+			"service", host, "setting", "ALMANACK_PUSH_HOSTS")
+		return "", invalidf("%s is not a push service this server sends to; ask whoever runs it to allow that host", host)
 	}
 	return endpoint, nil
 }

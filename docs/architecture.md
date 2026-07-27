@@ -301,7 +301,7 @@ If you want any of these, forking is reasonable and the licence encourages it.
 
 | Risk | What absorbs it |
 |---|---|
-| Push services drift over the years | The sender is in-tree and small; per-service errors are surfaced in `/healthz`; email runs in parallel |
+| Push services drift over the years | The sender is in-tree and small; `/healthz` counts failing subscriptions and the daily heartbeat mail names the service; a browser issuing endpoints on a new host is refused by name in the log (`ALMANACK_PUSH_HOSTS`); email runs in parallel |
 | Mail providers keep retiring authentication methods | The binary only ever speaks SMTP to `127.0.0.1`; provider churn is an OS config edit |
 | A pure-Go SQLite driver has a rare correctness bug | Integrity-checked backups with generational retention; `ncruces/go-sqlite3` is the CGO-free escape hatch |
 | Apple changes PWA or push policy | Email is a first-class channel; worst case this is a website that emails you |

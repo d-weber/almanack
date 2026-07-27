@@ -36,6 +36,7 @@ var known = map[string]bool{
 	"ALMANACK_TRUSTED_PROXIES": true, "ALMANACK_SMTP": true, "ALMANACK_MAIL_FROM": true,
 	"ALMANACK_OWNER_EMAIL": true, "ALMANACK_MAIL_DIR": true, "ALMANACK_HEARTBEAT_TIME": true,
 	"ALMANACK_VAPID_PUBLIC": true, "ALMANACK_VAPID_PRIVATE": true, "ALMANACK_VAPID_SUBJECT": true,
+	"ALMANACK_PUSH_HOSTS":   true,
 	"ALMANACK_PLAN_HORIZON": true, "ALMANACK_TICK": true,
 	"ALMANACK_BACKUP_KEEP_HOURLY": true, "ALMANACK_BACKUP_KEEP_DAILY": true,
 	"ALMANACK_BACKUP_KEEP_WEEKLY": true, "ALMANACK_BACKUP_KEEP_MONTHLY": true,
@@ -83,6 +84,14 @@ type Config struct {
 	VAPIDPublic  string // ALMANACK_VAPID_PUBLIC
 	VAPIDPrivate string // ALMANACK_VAPID_PRIVATE
 	VAPIDSubject string // ALMANACK_VAPID_SUBJECT — mailto: contact, required by RFC 8292
+
+	// PushHosts are the hostnames a push subscription endpoint may point at. A
+	// subscription endpoint is a URL a member supplies and this server then posts
+	// to, so it is the one place a request can be aimed at the machine's own
+	// network; the allowlist is what keeps it pointed at a push service. Empty
+	// means domain.DefaultPushHosts, which covers every browser. A single "*"
+	// turns the check off, for a self-hosted push service.
+	PushHosts []string // ALMANACK_PUSH_HOSTS, CSV
 
 	AlsaceMoselle bool // ALMANACK_ALSACE_MOSELLE — the two extra public holidays
 
@@ -206,6 +215,7 @@ func Load(path string) (Config, error) {
 		VAPIDPublic:    get("ALMANACK_VAPID_PUBLIC", ""),
 		VAPIDPrivate:   get("ALMANACK_VAPID_PRIVATE", ""),
 		VAPIDSubject:   get("ALMANACK_VAPID_SUBJECT", ""),
+		PushHosts:      splitCSV(get("ALMANACK_PUSH_HOSTS", "")),
 		AlsaceMoselle:  getBool("ALMANACK_ALSACE_MOSELLE", false),
 		HolidayColor:   get("ALMANACK_HOLIDAY_COLOR", DefaultHolidayColor),
 		SourceURL:      get("ALMANACK_SOURCE_URL", DefaultSourceURL),
@@ -395,6 +405,7 @@ func (c Config) Redacted() []string {
 		"vapid_public=" + mask(c.VAPIDPublic),
 		"vapid_private=" + mask(c.VAPIDPrivate),
 		"vapid_subject=" + orNone(c.VAPIDSubject),
+		"push_hosts=" + orDefault(strings.Join(c.PushHosts, ",")),
 		"alsace_moselle=" + strconv.FormatBool(c.AlsaceMoselle),
 		"source_url=" + orNone(c.SourceURL),
 		"plan_horizon=" + c.PlanHorizon.String(),
@@ -407,6 +418,15 @@ func (c Config) Redacted() []string {
 func orNone(s string) string {
 	if s == "" {
 		return "(unset)"
+	}
+	return s
+}
+
+// orDefault is orNone for a setting whose empty value means a built-in list
+// rather than nothing at all: "(unset)" would read as "push is not restricted".
+func orDefault(s string) string {
+	if s == "" {
+		return "(built-in list)"
 	}
 	return s
 }

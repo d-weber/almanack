@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"almanack/internal/config"
 	"almanack/internal/domain"
 )
 
@@ -844,7 +845,10 @@ func readCloser(r *bytes.Reader) nopCloser { return nopCloser{r} }
 // ---------------------------------------------------------------------------
 
 func TestPrefsAndPushHealth(t *testing.T) {
-	e := newEnv(t)
+	// This test is about preferences and the repair banner, not about which hosts a
+	// subscription may point at, so it names its fake push service in the allowlist
+	// rather than borrowing a real vendor's hostname.
+	e := newEnv(t, func(c *config.Config) { c.PushHosts = []string{"push.example.org"} })
 	user, _ := e.family()
 
 	var prefs prefsView
@@ -908,6 +912,88 @@ func TestPrefsAndPushHealth(t *testing.T) {
 	e.post("/api/v1/push/subscription", map[string]string{
 		"endpoint": "javascript:alert(1)", "p256dh": "k", "auth": "a",
 	}).expect(http.StatusBadRequest)
+}
+
+// A subscription endpoint is the only URL in this application that a member
+// supplies and the server later dereferences, which is what makes it worth
+// checking against a list of push services rather than merely parsing. Refusing at
+// registration is deliberate: the alternative is a subscription that stores
+// cleanly and then silently never delivers anything.
+func TestPushSubscriptionHostMustBeAKnownPushService(t *testing.T) {
+	e := newEnv(t) // no ALMANACK_PUSH_HOSTS, so the built-in list applies
+	user, _ := e.family()
+
+	const firefox = "https://updates.push.services.mozilla.com/wpush/v2/gAAAAA"
+	e.post("/api/v1/push/subscription", map[string]string{
+		"endpoint": firefox, "p256dh": "BEl-key", "auth": "auth-secret", "ua_label": "Firefox",
+	}).expect(http.StatusNoContent)
+
+	refused := []struct {
+		name     string
+		endpoint string
+	}{
+		{"a service on this machine", "https://127.0.0.1:9200/_search"},
+		{"a machine on this network", "https://10.0.0.5/push"},
+		{"the cloud metadata service", "https://169.254.169.254/latest/meta-data/"},
+		{"somewhere else entirely", "https://attacker.example.org/push/abc"},
+		// url.Parse reads everything before the @ as userinfo: this is a request to
+		// 127.0.0.1 wearing a push service's name.
+		{"userinfo wearing a push service's name", "https://fcm.googleapis.com@127.0.0.1/push"},
+	}
+	for _, tc := range refused {
+		res := e.post("/api/v1/push/subscription", map[string]string{
+			"endpoint": tc.endpoint, "p256dh": "BEl-key", "auth": "auth-secret",
+		})
+		if res.status != http.StatusBadRequest {
+			t.Errorf("%s (%s): status = %d, want 400", tc.name, tc.endpoint, res.status)
+			continue
+		}
+		if code := res.errorCode(); code != codeInvalid {
+			t.Errorf("%s: error code = %q, want %q", tc.name, code, codeInvalid)
+		}
+	}
+
+	subs, err := e.store.ListPushSubscriptions(t.Context(), user.ID)
+	if err != nil {
+		t.Fatalf("list subscriptions: %v", err)
+	}
+	if len(subs) != 1 || subs[0].Endpoint != firefox {
+		t.Fatalf("stored subscriptions = %+v, want only the push service", subs)
+	}
+
+	// The way out, for a self-hosted push service or a browser that has started
+	// handing out endpoints somewhere new. It is the operator's decision to make,
+	// which is why it is a setting and not a special case in the code.
+	open := newEnv(t, func(c *config.Config) { c.PushHosts = []string{"*"} })
+	open.family()
+	open.post("/api/v1/push/subscription", map[string]string{
+		"endpoint": "https://push.example.org/subscription/abc", "p256dh": "BEl-key", "auth": "auth-secret",
+	}).expect(http.StatusNoContent)
+}
+
+// Narrowing the allowlist must not strand a device that is already registered:
+// confirming and unsubscribing are how the browser tidies up after itself, and
+// neither one causes this server to dial anything.
+func TestPushSubscriptionOutsideTheAllowlistCanStillBeRemoved(t *testing.T) {
+	e := newEnv(t)
+	user, _ := e.family()
+
+	// Registered before the allowlist existed, which is what an upgrade looks like.
+	const endpoint = "https://push.example.org/subscription/abc123"
+	if err := e.store.UpsertPushSubscription(t.Context(), domain.PushSubscription{
+		UserID: user.ID, Endpoint: endpoint, P256DH: "BEl-key", Auth: "auth-secret", UALabel: "iPhone",
+	}); err != nil {
+		t.Fatalf("upsert subscription: %v", err)
+	}
+
+	e.post("/api/v1/push/confirm", map[string]string{"endpoint": endpoint}).expect(http.StatusNoContent)
+	e.do(http.MethodDelete, "/api/v1/push/subscription", map[string]string{"endpoint": endpoint}).
+		expect(http.StatusNoContent)
+
+	subs, err := e.store.ListPushSubscriptions(t.Context(), user.ID)
+	if err != nil || len(subs) != 0 {
+		t.Fatalf("subscriptions after unsubscribing = %+v (%v)", subs, err)
+	}
 }
 
 func TestActivityFeed(t *testing.T) {

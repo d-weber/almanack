@@ -225,30 +225,32 @@ func (s *Server) diskCheck(degraded *bool) map[string]any {
 	}
 }
 
-// pushCheck counts devices, how many have gone quiet, and the failures per push
-// service — the signal that says one of them has changed its behaviour and the sender
-// needs a patch. It never reports an endpoint: one is a capability to notify somebody's
-// phone.
+// pushCheck counts devices, how many have gone quiet, and how many are failing — the
+// signal that says a push service has changed its behaviour and the sender needs a
+// patch. It never reports an endpoint: one is a capability to notify somebody's phone.
+//
+// It does not report the service either, though it used to. This endpoint needs no
+// session, and the host is the part of an endpoint a member chooses, so a per-host
+// failure count answered "did the delivery to the host I registered succeed?" to
+// anybody who asked. Aggregating keeps the question monitoring asks — is push working?
+// — and drops the one an attacker asks. Which service is failing is a real diagnostic,
+// and it still goes out every day in the operator's heartbeat mail (internal/notify),
+// which has a recipient rather than a URL.
 func (s *Server) pushCheck(ctx context.Context, now time.Time) map[string]any {
 	subs, err := s.store.ListAllPushSubscriptions(ctx)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	stale := 0
-	failures := map[string]int{}
+	stale, failing := 0, 0
 	for _, sub := range subs {
 		if sub.LastConfirmedAt.IsZero() || now.Sub(sub.LastConfirmedAt) > pushStaleAfter {
 			stale++
 		}
 		if sub.Failures > 0 {
-			failures[endpointHost(sub.Endpoint)] += sub.Failures
+			failing++
 		}
-	}
-	check := map[string]any{"ok": true, "devices": len(subs), "stale": stale}
-	if len(failures) > 0 {
-		check["failures_by_service"] = failures
 	}
 	// Stale subscriptions are a client-side repair prompt, not a server fault: email is
 	// forced on for those users, so nothing is missed.
-	return check
+	return map[string]any{"ok": true, "devices": len(subs), "stale": stale, "failing": failing}
 }

@@ -263,6 +263,16 @@ func (n *Notifier) send(ctx context.Context, q domain.QueuedNotification, p payl
 		}
 		opts := pushOptions(q.Kind, p, now)
 		for _, sub := range subs {
+			if !domain.PushEndpointAllowed(sub.Endpoint, n.pushHosts) {
+				// Registered before the endpoint was checked at all, or its host
+				// has since been narrowed out of ALMANACK_PUSH_HOSTS. Either way
+				// this server does not dial it. It is not counted as an attempt:
+				// a device that is never tried must not hold the row open.
+				slog.Warn("not sending: this subscription's endpoint is not an allowed push service",
+					"subscription", sub.ID, "user", to.user.ID,
+					"service", serviceOf(sub.Endpoint), "setting", "ALMANACK_PUSH_HOSTS")
+				continue
+			}
 			err := n.push.Send(ctx, sub, body, opts)
 			switch {
 			case err == nil:

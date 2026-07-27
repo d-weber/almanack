@@ -597,6 +597,46 @@ func TestHealthzNeedsNoSession(t *testing.T) {
 	e.request(e.newClient(), http.MethodGet, "/healthz", nil).expect(http.StatusOK)
 }
 
+// Because it needs no session, /healthz must not answer questions about a
+// particular subscription. It used to report failures keyed by push service host,
+// which is a member-supplied value, and so told anyone who asked whether a delivery
+// to a host of their choosing had succeeded. The count that monitoring actually
+// wants — is push working? — carries no such key, and the per-service breakdown an
+// operator wants goes out in the daily heartbeat mail instead.
+func TestHealthzDoesNotNamePushServices(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.PushHosts = []string{"push.example.org"} })
+	user, _ := e.family()
+
+	const endpoint = "https://push.example.org/subscription/abc123"
+	if err := e.store.UpsertPushSubscription(t.Context(), domain.PushSubscription{
+		UserID: user.ID, Endpoint: endpoint, P256DH: "BEl-key", Auth: "auth-secret", UALabel: "iPhone",
+	}); err != nil {
+		t.Fatalf("upsert subscription: %v", err)
+	}
+	subs, err := e.store.ListPushSubscriptions(t.Context(), user.ID)
+	if err != nil || len(subs) != 1 {
+		t.Fatalf("list subscriptions: %+v (%v)", subs, err)
+	}
+	if err := e.store.MarkPushFailure(t.Context(), subs[0].ID); err != nil {
+		t.Fatalf("mark push failure: %v", err)
+	}
+
+	res := e.request(e.newClient(), http.MethodGet, "/healthz", nil).expect(http.StatusOK)
+	if strings.Contains(string(res.body), "push.example.org") {
+		t.Errorf("/healthz names a push service host to an anonymous caller:\n%s", res.body)
+	}
+
+	var health healthResponse
+	res.decode(&health)
+	push, ok := health.Checks["push"].(map[string]any)
+	if !ok {
+		t.Fatalf("push check = %#v", health.Checks["push"])
+	}
+	if got, want := push["failing"], 1.0; got != want {
+		t.Errorf("push.failing = %v, want %v: monitoring still has to be able to see that push is broken", got, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Client address handling
 // ---------------------------------------------------------------------------
