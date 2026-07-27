@@ -103,6 +103,15 @@ type Event struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedBy    int64     `json:"updated_by"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// EventUID names this event and no other, for as long as the row exists. ID does
+	// not: SQLite reissues the ids of deleted rows, and the notification outbox —
+	// which recognises a reminder it has already queued by the reference it filed it
+	// under — then cannot tell an appointment that took a reused id from the one it
+	// replaced. The store assigns it; an event created before the column existed
+	// carries none. It answers a question the outbox asks and nobody else does, so it
+	// is not part of the API the browser sees.
+	EventUID string `json:"-"`
 }
 
 // Freq is the recurrence frequency.

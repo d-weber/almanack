@@ -13,7 +13,7 @@ import (
 //
 // The layout is hierarchical, narrowest last:
 //
-//	reminder:{eventID}:{occurrenceDate}:{reminderID}
+//	reminder:{eventID}:{occurrenceDate}:{reminderID}:{eventUID}
 //
 // which makes the two prunes the application actually needs into prefix deletes:
 //
@@ -23,9 +23,39 @@ import (
 // internal/events prunes; internal/notify enqueues. Both use these helpers, so the
 // format lives in one place and a change cannot desynchronise them.
 
-// ReminderSourceRef identifies one user's reminder for one occurrence.
-func ReminderSourceRef(eventID int64, occDate domain.Date, reminderID int64) string {
-	return fmt.Sprintf("reminder:%d:%s:%d", eventID, occDate, reminderID)
+// ReminderSourceRef identifies one user's reminder for one occurrence: the appointment
+// it warns about rather than the row numbers that appointment happens to occupy.
+//
+// The three ids are all reusable — events.id, reminders.id and the occurrence date of a
+// series whose template can itself be deleted and remade — and none of them is
+// AUTOINCREMENT, so SQLite hands them out again as soon as the rows holding them are
+// gone. Since the outbox keys on the reference and the instant, and keeps a delivered
+// row for good as the record that the family was told, a replacement appointment landing
+// on the same occurrence date with the same reminder instant was read as the reminder
+// already sent and dropped (migration 0007).
+//
+// eventUID is the name of the event row this occurrence's fields came from, which is the
+// part a reused id cannot imitate. For a plain event and for an ordinary occurrence of a
+// series that is the event or its template; for an occurrence somebody has edited it is
+// the copy standing in for that date, which is right rather than a compromise — the copy
+// is what the notification says, and it is the copy being remade that makes the
+// notification a different one.
+//
+// It goes last because the layout above is a prune hierarchy before it is an identity:
+// only the tail is free, and a name anywhere earlier would put the two prefixes out of
+// reach of the references they are meant to match. So it qualifies the first component
+// rather than the one beside it. TestSourceRefPrefixesNest holds the arrangement.
+//
+// An event created before events had names keeps the old spelling. That is not a
+// concession: its reminders are already in the outbox under it, the row itself is what
+// is re-read on every planning pass, and nothing created since can produce that spelling
+// — so the old events go on being recognised and the new ones cannot be mistaken for
+// them.
+func ReminderSourceRef(eventID int64, occDate domain.Date, reminderID int64, eventUID string) string {
+	if eventUID == "" {
+		return fmt.Sprintf("reminder:%d:%s:%d", eventID, occDate, reminderID)
+	}
+	return fmt.Sprintf("reminder:%d:%s:%d:%s", eventID, occDate, reminderID, eventUID)
 }
 
 // OccurrenceSourcePrefix matches everything queued for a single occurrence.

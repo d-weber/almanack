@@ -640,8 +640,8 @@ var releaseFixtures = []releaseFixture{
 		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
 		// Nothing: no migration between 0002 and head writes a row of this
 		// household's data. 0004 creates a table, 0005 rewrites a derived search
-		// column in place and 0006 adds a column with a default, none of which
-		// changes a count. The swimming
+		// column in place, and 0006 and 0007 each add a column with a default, none
+		// of which changes a count. The swimming
 		// lesson this family moved to the evening of 4 August keeps being announced
 		// because the occurrence goes on inheriting the series' reminder, not
 		// because anything was copied onto it — see checkV020Family.
@@ -912,6 +912,15 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if dentist.Title != "Leo's dentist" || dentist.Location != "Bridge Street Dental" {
 		t.Errorf("dentist = %+v", dentist)
+	}
+	// 0007 gives each event a name and leaves the ones already created without one,
+	// which is not an oversight: their reminders are queued under a reference built
+	// from the ids alone, and naming them here would change that reference, re-plan
+	// every reminder in the house and send the recently delivered ones a second time.
+	// The absence is load-bearing, so it is asserted rather than assumed.
+	if dentist.EventUID != "" {
+		t.Errorf("the dentist came out of the upgrade named %q; events created before 0007 keep no name",
+			dentist.EventUID)
 	}
 	parts, err := s.ListParticipants(ctx(), dentistID)
 	if err != nil {
@@ -3970,6 +3979,79 @@ func TestEveryLoggedChangeIsNamedForItself(t *testing.T) {
 			t.Fatalf("two changes are both named %q", a.ChangeUID)
 		}
 		seen[a.ChangeUID] = true
+	}
+}
+
+// TestEveryEventIsNamedForItself: the same job as the names above, for the other half of
+// the outbox. An event's name has one purpose — to be unlike every other, including the
+// events that held its id before it — so the test is the obvious one, and it is run on a
+// stopped clock because a name derived from the clock would pass a single-row test and
+// then hand two appointments the same one on the machine this matters most on.
+func TestEveryEventIsNamedForItself(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	clk.Set(baseTime)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	seen := map[string]bool{}
+	for i := range 50 {
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: fmt.Sprintf("Sortie %d", i),
+			StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+			// Whatever a caller puts here is ignored: the store names the event.
+			EventUID: "chosen-by-the-caller",
+		}, nil)
+		if err != nil {
+			t.Fatalf("CreateEvent %d: %v", i, err)
+		}
+		if e.EventUID == "" || e.EventUID == "chosen-by-the-caller" {
+			t.Fatalf("%q is named %q; want a name the store minted", e.Title, e.EventUID)
+		}
+		if seen[e.EventUID] {
+			t.Fatalf("two events are both named %q", e.EventUID)
+		}
+		seen[e.EventUID] = true
+
+		// And the name has to come back on the read paths too, or the planner
+		// rebuilds a different reference from the one it queued under.
+		got, err := s.EventByID(ctx(), e.ID)
+		if err != nil {
+			t.Fatalf("EventByID: %v", err)
+		}
+		if got.EventUID != e.EventUID {
+			t.Fatalf("EventByID(%d) is named %q, want %q", e.ID, got.EventUID, e.EventUID)
+		}
+	}
+
+	// The one that matters: an event created after the highest row has gone takes its
+	// id and must not take its name with it.
+	last, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	if err := s.DeleteEvent(ctx(), last.ID); err != nil {
+		t.Fatalf("DeleteEvent: %v", err)
+	}
+	reused, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Orthodontiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	if reused.ID != last.ID {
+		t.Fatalf("the replacement took id %d and the event it replaced had %d: this SQLite is not "+
+			"reusing the ids of deleted rows, so this test no longer says anything", reused.ID, last.ID)
+	}
+	if reused.EventUID == last.EventUID {
+		t.Errorf("the event that took the reused id %d is named %q, the same as the one it replaced: "+
+			"the outbox has nothing left to tell their reminders apart by", reused.ID, reused.EventUID)
 	}
 }
 

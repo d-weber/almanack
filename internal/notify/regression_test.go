@@ -3,7 +3,10 @@ package notify
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -844,5 +847,260 @@ func TestARepairDoesNotBackfillAMemberWhoJustJoined(t *testing.T) {
 	}
 	if byTitle["Piscine"] != 1 {
 		t.Errorf("the change made after the deletion is queued %d times, want 1", byTitle["Piscine"])
+	}
+}
+
+// The same fault as the two above, on the reference the other half of the outbox is
+// keyed by — and this one loses a reminder rather than an announcement.
+//
+// A reminder was identified by (user, event id, occurrence date, reminder id, instant),
+// and every one of those ids is handed out again once the row holding it has gone. The
+// outbox prunes a deleted event's undelivered rows and deliberately keeps its delivered
+// ones — they are the record that the family was told, which is what stops a catch-up
+// pass sending them a second time — and nothing prunes the outbox by age, so a delivered
+// row holds its slot in that UNIQUE index for good. Delete the appointment that held the
+// highest ids, make it again on the same date with the same reminder, and INSERT OR
+// IGNORE reads the new reminder as the one already sent and drops it. Nobody is warned
+// about the appointment the family actually has, and nothing looks wrong: the event is
+// in the calendar and the outbox holds one row that did its job.
+//
+// "Delete the thing I just made and make it again properly" is the shape that produces
+// it, which is why the replacement here is made the same evening rather than contrived.
+func TestAnAppointmentTakingAReusedEventIDIsStillReminded(t *testing.T) {
+	e := newEnv(t, time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)) // 08:00 in Paris
+	ctx := context.Background()
+
+	claire := e.user("claire")
+	cal := e.calendar("Famille", claire.ID)
+	e.subscribe(claire.ID, "iphone")
+	e.noDigests()
+
+	dentiste := e.timedEvent(cal, claire.ID, "Dentiste", 2026, time.June, 2, 16, 30, time.Hour, nil)
+	e.reminderAt(dentiste, claire.ID, 1, "09:00") // the day before, at 09:00
+
+	e.plan()
+	e.clk.Set(time.Date(2026, 6, 1, 9, 0, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Fatalf("the reminder for the original appointment produced %d pushes, want 1", got)
+	}
+
+	// That evening it turns out to be the orthodontist, so the entry is deleted and
+	// made again. Deleting it prunes the outbox of everything still waiting for it;
+	// the row already delivered stays, which is the whole of the setup.
+	e.clk.Set(time.Date(2026, 6, 1, 20, 0, 0, 0, paris))
+	if err := e.ev.Delete(ctx, claire.ID, dentiste.ID, domain.ScopeAll, domain.Date{}); err != nil {
+		t.Fatalf("delete the appointment: %v", err)
+	}
+	ortho := e.timedEvent(cal, claire.ID, "Orthodontiste", 2026, time.June, 2, 16, 30, time.Hour, nil)
+	e.reminderAt(ortho, claire.ID, 1, "09:00")
+
+	if ortho.ID != dentiste.ID {
+		t.Fatalf("the replacement took event id %d and the one it replaced had %d: this SQLite is not "+
+			"reusing the ids of deleted rows, so this test no longer reproduces the fault",
+			ortho.ID, dentiste.ID)
+	}
+	if ids := reminderIDs(t, e); len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("the replacement's reminders are %v, want the reused id [1]: this test no longer "+
+			"reproduces the fault", ids)
+	}
+
+	e.plan()
+	e.dispatch()
+
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	if byTitle["Orthodontiste"] != 1 {
+		t.Errorf("the appointment that took the reused ids is queued %d times, want 1: its reminder "+
+			"falls on the instant the deleted appointment's did, and that row is still in the outbox",
+			byTitle["Orthodontiste"])
+	}
+	if got := len(e.push.received()); got != 2 {
+		t.Errorf("%d pushes went out in all, want 2: the family has an appointment tomorrow and has "+
+			"been warned about it once", got)
+	}
+	// The delivered row is left exactly where it is: it is the record that the first
+	// warning went out, and deleting it is what would let a catch-up pass send it again.
+	if byTitle["Dentiste"] != 1 {
+		t.Errorf("the warning already sent is in the outbox %d times, want 1", byTitle["Dentiste"])
+	}
+}
+
+// The other side of naming the events: a reminder's row in the outbox has to stay put
+// across passes. The planner recomputes the whole window on every tick and relies on
+// INSERT OR IGNORE doing nothing for a row it has already queued, and on reconcile
+// deleting the rows this pass would no longer produce — reminders are reconcilable,
+// unlike activity. A name that changed between two passes over one unchanged reminder
+// would therefore file a second row on every tick and push it, which is a worse fault
+// than the one being fixed: instead of one appointment going unannounced, every
+// appointment in the house is announced over and over.
+//
+// The three shapes are here because the name is read off a different row in each: a
+// plain event's own, a series occurrence's template (the expansion carries the
+// template's fields), and, for an occurrence somebody has edited, the copy standing in
+// for that date.
+func TestReplanningAnUnchangedReminderQueuesItOnce(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+
+	dentiste := e.timedEvent(cal, u.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+	e.reminderMinutes(dentiste, u.ID, 30)
+	piscine := e.timedEvent(cal, u.ID, "Piscine", 2027, time.June, 1, 17, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqDaily, Interval: 1,
+	})
+	e.reminderMinutes(piscine, u.ID, 30)
+
+	moved := date(2027, 6, 2)
+	newStart := time.Date(2027, 6, 2, 19, 0, 0, 0, paris)
+	if _, err := e.ev.Update(e.ctx, u.ID, piscine.ID, domain.ScopeThis, moved, events.Input{
+		CalendarID: cal.ID, Title: "Piscine (retardée)",
+		StartsAt: newStart.UTC(), EndsAt: newStart.Add(time.Hour).UTC(),
+		LabelID: piscine.LabelID, Participants: []int64{u.ID},
+	}); err != nil {
+		t.Fatalf("move one occurrence: %v", err)
+	}
+
+	// Four passes, spaced as the scheduler's ticks are. Nothing changes in between,
+	// so every pass after the first must be a no-op.
+	var first []string
+	for pass := range 4 {
+		e.plan()
+		var refs []string
+		for _, row := range e.queueOfKind(domain.KindReminder) {
+			refs = append(refs, row.SourceRef)
+		}
+		sort.Strings(refs)
+		switch pass {
+		case 0:
+			first = refs
+			if len(refs) == 0 {
+				t.Fatal("the first pass queued no reminders at all")
+			}
+		default:
+			if !slices.Equal(refs, first) {
+				t.Fatalf("pass %d left the outbox holding\n\t%v\nand the first pass left\n\t%v\n"+
+					"a reference that moves between two passes over one unchanged reminder is a "+
+					"second push on every tick", pass+1, refs, first)
+			}
+		}
+		e.clk.Advance(30 * time.Second)
+	}
+
+	// And the family is warned once per occurrence rather than once per pass.
+	e.clk.Set(time.Date(2027, 6, 3, 12, 0, 0, 0, paris))
+	e.dispatch()
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	for title, want := range map[string]int{"Dentiste": 1, "Piscine (retardée)": 1} {
+		if byTitle[title] != want {
+			t.Errorf("%q is queued %d times, want %d", title, byTitle[title], want)
+		}
+	}
+}
+
+// reminderIDs is every reminder row in the database, in the order the planner walks
+// them. A test that means to reproduce a reused id has to say which ids it got.
+func reminderIDs(t *testing.T, e *env) []int64 {
+	t.Helper()
+	all, err := e.st.ListAllReminders(e.ctx)
+	if err != nil {
+		t.Fatalf("list reminders: %v", err)
+	}
+	ids := make([]int64, 0, len(all))
+	for _, r := range all {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// The constraint the name had to be fitted around. A reference is a prune key before it
+// is an identity: internal/events deletes "everything queued for this occurrence" when
+// one moves and "everything queued for this event" when a series changes shape or goes,
+// both by prefix, and a reference the prefixes no longer reach is a reminder that goes
+// on firing for an appointment nobody has any more.
+//
+// TestSourceRefPrefixesNest holds the arrangement on the strings. This holds it on the
+// rows the planner actually writes, where the names are the ones the store minted rather
+// than any a test chose.
+func TestBothPrunesStillReachAReferenceCarryingAName(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+
+	series := e.timedEvent(cal, u.ID, "Piscine", 2027, 6, 1, 17, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqDaily, Interval: 1,
+	})
+	e.reminderMinutes(series, u.ID, 30)
+	e.plan()
+
+	pending := func() []string {
+		t.Helper()
+		rows, err := e.st.ListUnsentBefore(e.ctx, e.clk.Now().Add(e.n.Horizon()))
+		if err != nil {
+			t.Fatalf("list unsent: %v", err)
+		}
+		var refs []string
+		for _, r := range rows {
+			if r.Kind == domain.KindReminder {
+				refs = append(refs, r.SourceRef)
+			}
+		}
+		sort.Strings(refs)
+		return refs
+	}
+	before := pending()
+	if len(before) < 2 {
+		t.Fatalf("the series queued %v, want at least two occurrences to tell the two prunes apart", before)
+	}
+	named := 0
+	for _, ref := range before {
+		if strings.Count(ref, ":") == 4 {
+			named++
+		}
+	}
+	if named != len(before) {
+		t.Fatalf("%d of %d queued references carry a name (%v); this test proves nothing about the "+
+			"prunes reaching the named spelling if the planner is not writing it", named, len(before), before)
+	}
+
+	// The occurrence prune: moving one lesson takes that date's rows and leaves the rest.
+	moved := date(2027, 6, 2)
+	newStart := time.Date(2027, 6, 2, 19, 0, 0, 0, paris)
+	if _, err := e.ev.Update(e.ctx, u.ID, series.ID, domain.ScopeThis, moved, events.Input{
+		CalendarID: cal.ID, Title: "Piscine (retardée)",
+		StartsAt: newStart.UTC(), EndsAt: newStart.Add(time.Hour).UTC(),
+		LabelID: series.LabelID, Participants: []int64{u.ID},
+	}); err != nil {
+		t.Fatalf("move one occurrence: %v", err)
+	}
+	prefix := events.OccurrenceSourcePrefix(series.ID, moved)
+	after := pending()
+	for _, ref := range after {
+		if strings.HasPrefix(ref, prefix) {
+			t.Errorf("%q survived the move of %s: the occurrence prune no longer reaches a reference "+
+				"carrying a name, so the lesson is still announced at the time it left", ref, moved)
+		}
+	}
+	if len(after) != len(before)-1 {
+		t.Errorf("the occurrence prune left %v and the queue held %v: it took more than the one "+
+			"occurrence that moved", after, before)
+	}
+
+	// The event prune: the whole series goes, and so does everything queued for it.
+	if err := e.ev.Delete(e.ctx, u.ID, series.ID, domain.ScopeAll, domain.Date{}); err != nil {
+		t.Fatalf("delete the series: %v", err)
+	}
+	if refs := pending(); len(refs) != 0 {
+		t.Errorf("%v survived the deletion of the series: the event prune no longer reaches a "+
+			"reference carrying a name, so a deleted series goes on reminding the family", refs)
 	}
 }

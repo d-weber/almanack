@@ -1055,7 +1055,7 @@ func TestEditingPrunesQueuedNotifications(t *testing.T) {
 	queued := domain.QueuedNotification{
 		UserID:    f.maman,
 		Kind:      domain.KindReminder,
-		SourceRef: ReminderSourceRef(ev.ID, domain.MustParseDate("2026-04-10"), 1),
+		SourceRef: ReminderSourceRef(ev.ID, domain.MustParseDate("2026-04-10"), 1, ev.EventUID),
 		Payload:   `{}`,
 		DueAt:     f.at("2026-04-10", 15, 30),
 	}
@@ -1094,7 +1094,7 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 
 	queued := domain.QueuedNotification{
 		UserID: f.maman, Kind: domain.KindReminder,
-		SourceRef: ReminderSourceRef(ev.ID, day, 1),
+		SourceRef: ReminderSourceRef(ev.ID, day, 1, ev.EventUID),
 		Payload:   `{}`, DueAt: f.at("2026-04-10", 15, 30),
 	}
 	if err := f.st.EnqueueNotification(ctx, queued); err != nil {
@@ -1103,7 +1103,7 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 	// A reference for an event in another calendar, to prove the prune is scoped by
 	// event id rather than merely emptying the outbox.
 	elsewhere := queued
-	elsewhere.SourceRef = ReminderSourceRef(ev.ID+1000, day, 1)
+	elsewhere.SourceRef = ReminderSourceRef(ev.ID+1000, day, 1, ev.EventUID)
 	if err := f.st.EnqueueNotification(ctx, elsewhere); err != nil {
 		t.Fatalf("enqueue elsewhere: %v", err)
 	}
@@ -1120,18 +1120,62 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 	}
 }
 
+// TestSourceRefPrefixesNest: the reference is a prune key before it is an identity.
+// internal/events deletes by "everything for this event" and "everything for this
+// occurrence" whenever a series changes shape, an occurrence moves or an event is
+// cancelled, and a reference that has stopped being covered by its own prefixes is a
+// reminder that goes on firing for an appointment nobody has any more.
+//
+// The named spelling is checked beside the old one for that reason: the name went on
+// the end because that is the only place it can go without putting one of the two
+// prefixes out of reach of the references it is meant to match.
 func TestSourceRefPrefixesNest(t *testing.T) {
 	d := domain.MustParseDate("2026-08-04")
-	ref := ReminderSourceRef(12, d, 7)
-	if got := OccurrenceSourcePrefix(12, d); len(ref) <= len(got) || ref[:len(got)] != got {
-		t.Errorf("%q is not prefixed by the occurrence prefix %q", ref, got)
+	for _, ref := range []string{
+		ReminderSourceRef(12, d, 7, ""),                           // an event from before 0007
+		ReminderSourceRef(12, d, 7, "MZXW6YTBOI2A4TVOJUXA5DQR7Y"), // and one named since
+	} {
+		if got := OccurrenceSourcePrefix(12, d); len(ref) <= len(got) || ref[:len(got)] != got {
+			t.Errorf("%q is not prefixed by the occurrence prefix %q", ref, got)
+		}
+		if got := EventSourcePrefix(12); ref[:len(got)] != got {
+			t.Errorf("%q is not prefixed by the event prefix %q", ref, got)
+		}
+		// Event 1's prefix must not match event 12's references.
+		if other := EventSourcePrefix(1); len(ref) >= len(other) && ref[:len(other)] == other {
+			t.Errorf("prefix %q wrongly matches a reference for event 12", other)
+		}
+		// Nor may one occurrence's prefix reach another's.
+		if other := OccurrenceSourcePrefix(12, d.AddDays(7)); len(ref) >= len(other) && ref[:len(other)] == other {
+			t.Errorf("prefix %q wrongly matches a reference for %s", other, d)
+		}
 	}
-	if got := EventSourcePrefix(12); ref[:len(got)] != got {
-		t.Errorf("%q is not prefixed by the event prefix %q", ref, got)
+}
+
+// TestReminderSourceRefNamesTheEventNotTheID: events.id, reminders.id and the occurrence
+// date are all reusable, so two different appointments reach the outbox under one
+// reference — and since the outbox keeps a delivered row for good, the second of them is
+// read as the reminder already sent and dropped. What tells them apart is the name the
+// store gave the event.
+func TestReminderSourceRefNamesTheEventNotTheID(t *testing.T) {
+	d := domain.MustParseDate("2026-06-02")
+	gone := ReminderSourceRef(1, d, 1, "MZXW6YTBOI2A4TVOJUXA5DQR7Y")
+	took := ReminderSourceRef(1, d, 1, "PB2XG3DPMFZGK5DFNZSGKZLHOR")
+	if gone == took {
+		t.Errorf("the appointment that took the reused ids is queued under %q, the same reference as "+
+			"the one it replaced: the outbox will read it as a reminder it has already sent", took)
 	}
-	// Event 1's prefix must not match event 12's references.
-	if other := EventSourcePrefix(1); len(ref) >= len(other) && ref[:len(other)] == other {
-		t.Errorf("prefix %q wrongly matches a reference for event 12", other)
+
+	// An event created before events had names keeps the spelling its reminders are
+	// already queued under, so the next pass recognises them rather than filing the
+	// same warning a second time beside itself.
+	old := ReminderSourceRef(1, d, 1, "")
+	if want := "reminder:1:2026-06-02:1"; old != want {
+		t.Errorf("an event with no name of its own is queued under %q, want %q: every reminder in "+
+			"the house would be re-planned, and the recently sent ones sent again", old, want)
+	}
+	if len(took) <= len(old) || took[:len(old)+1] != old+":" {
+		t.Errorf("%q does not extend the old spelling %q: the layout is meant to nest", took, old)
 	}
 }
 

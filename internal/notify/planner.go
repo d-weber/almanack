@@ -314,7 +314,12 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if due.Before(from) && !p.eventStillAhead(from, n.loc) {
 				continue
 			}
-			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID)
+			// The id and the name answer different questions, which is why they
+			// are not read off the same row for an edited occurrence: the id is
+			// the handle internal/events prunes by, so it is the series', while
+			// the name says which appointment this notification is about, so it
+			// is that of the row the payload above was built from.
+			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID, occ.Event.EventUID)
 			if err := n.enqueue(ctx, userID, domain.KindReminder, ref, p, due); err != nil {
 				errs = append(errs, err)
 			}

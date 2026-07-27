@@ -105,7 +105,7 @@ func TestTimedReminderDueTime(t *testing.T) {
 			e.clk.Set(tc.occDate.AddDays(-1).At(12, 0, paris))
 			e.plan()
 
-			ref := events.ReminderSourceRef(ev.ID, tc.occDate, reminderIDOf(t, e, u.ID))
+			ref := events.ReminderSourceRef(ev.ID, tc.occDate, reminderIDOf(t, e, u.ID), ev.EventUID)
 			row, ok := findRow(e.queue(), ref)
 			if !ok {
 				t.Fatalf("no queued reminder for %s (source %q)", tc.occDate, ref)

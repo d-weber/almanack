@@ -201,7 +201,7 @@ func TestEditingAnEditedOccurrencePrunesItsQueuedReminder(t *testing.T) {
 		q := domain.QueuedNotification{
 			UserID:    e.f.maman,
 			Kind:      domain.KindReminder,
-			SourceRef: ReminderSourceRef(e.series.ID, e.date, 1),
+			SourceRef: ReminderSourceRef(e.series.ID, e.date, 1, e.series.EventUID),
 			Payload:   `{}`,
 			DueAt:     e.f.at("2026-04-16", 18, 0),
 		}

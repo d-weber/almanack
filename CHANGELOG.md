@@ -719,6 +719,33 @@ Notable changes to this project. The format follows
   name they never had, on purpose, so that the first pass after the upgrade recognises what
   it has already announced instead of announcing it a second time.
   ([#59](https://github.com/d-weber/almanack/issues/59))
+- **Deleting an appointment and putting it back could leave nobody warned about the new
+  one.** A reminder waiting to go out is filed under what it is for, and for a reminder that
+  was three numbers: the appointment, the day it falls on, and the reminder itself. SQLite
+  hands every one of those out again as soon as the rows holding them have been deleted. So
+  delete the dentist you had just put in, enter it again as the orthodontist on the same day
+  with the same reminder, and the new reminder is filed under exactly what the old one was.
+  The outbox still held the reminder it had already sent for the appointment that is gone —
+  it keeps what it has delivered, because that record is what stops a notification going out
+  a second time — so it read the new reminder as that one arriving again and dropped it.
+  Nobody was warned about the appointment the family actually has, and there was nothing to
+  find: the entry sits in the calendar looking right, and the outbox looks like it did its
+  job. A missed reminder is the failure this application exists to prevent, so this is the
+  worse half of the same fault as [#59](https://github.com/d-weber/almanack/issues/59),
+  which was the same collision on the notifications that announce a change. Every event is
+  now given a name of its own when it is created and its reminders are filed under that
+  name, so numbers handed out twice no longer file two appointments as one. In a household
+  it needed the deleted appointment to have held the highest number and the replacement to
+  fall on the same day with the same reminder — narrow, but "delete the thing I have just
+  made and do it again properly" is exactly that shape. On a development server it was not
+  narrow at all: dev mode runs a clock that moves only when it is told to, so the same
+  reminder instant comes free. This one does change the database: an existing calendar gains
+  a column holding that name and upgrades in place with nothing to do. The events already in
+  it keep the name they never had, on purpose, so that nothing already queued is re-filed
+  and no reminder that has just gone out goes out again; everything created from the upgrade
+  onwards has a name, so an appointment made today can never be mistaken for one that has
+  been deleted.
+  ([#60](https://github.com/d-weber/almanack/issues/60))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

@@ -1,0 +1,36 @@
+-- A name for each event that a later event cannot take.
+--
+-- A queued notification is identified by (user, kind, source_ref, due_at), and the
+-- reference for a reminder was "reminder:{eventID}:{occurrenceDate}:{reminderID}" —
+-- three ids, none of them AUTOINCREMENT, so SQLite hands every one of them out again
+-- once the row holding it is gone. Delete the event that held the highest id and make
+-- it again with the same occurrence date and the same reminder instant, and the new
+-- reminder's row is the old one's row: same reference, same due_at. The outbox prunes
+-- undelivered rows when an event goes, but a delivered one is kept — it is the record
+-- that the family was told — and nothing prunes the outbox by age, so it holds its slot
+-- in that UNIQUE index for good. INSERT OR IGNORE reads the new reminder as the reminder
+-- already sent and drops it, and no push goes out for the appointment the family
+-- actually has. Nothing looks wrong: the event is in the calendar, the outbox holds one
+-- row that did its job, and its payload names the appointment that was cancelled.
+--
+-- The event is what is named here rather than the reminder row, because the rest of the
+-- key already pins everything else. due_at is the reminder's own contribution — its lead
+-- is the difference between the occurrence and the instant — and the occurrence date is
+-- in the reference. What a reused id can still change underneath the key is which
+-- appointment all of that is about, and that is the event.
+--
+-- Adding a column with a constant default is expand-only: every statement the previous
+-- binary issues against events names its columns, so it keeps running against this
+-- schema unchanged, and the default reads back as "this event has no name of its own" —
+-- the truth for every row written before this migration.
+--
+-- Those rows are deliberately not backfilled. Their reminders are already queued under
+-- the old spelling, and leaving the column empty is what keeps that spelling theirs, so
+-- the next planning pass recognises what it has already queued instead of filing it
+-- again beside itself. Filing it again would be the worse fault of the two: a reminder
+-- whose slot has passed is re-planned while its event is still ahead, and delivery sends
+-- it, so a rewrite here would push every recently-sent reminder in the house a second
+-- time. The unnamed rows lose nothing by waiting: an id is only reused after its row is
+-- deleted, and whatever is created next has a name, so an old event can be the victim of
+-- a reused id but never the impostor.
+ALTER TABLE events ADD COLUMN event_uid TEXT NOT NULL DEFAULT '';
