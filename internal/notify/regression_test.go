@@ -1014,6 +1014,140 @@ func TestReplanningAnUnchangedReminderQueuesItOnce(t *testing.T) {
 	}
 }
 
+// The reproduction from #65, driven through a real store and the real planner. A
+// reminder is filed in the outbox under its own id among other things, and
+// ReplaceReminders used to delete every row in the list and insert it again — so the id
+// moved on every save unless the deleted rows happened to be the highest in the table.
+// The already-delivered row then no longer absorbed the re-plan, and the second copy was
+// not merely queued but sent: a reminder whose slot has passed is planned while its
+// event is still ahead, and staleness lets a late warning through on purpose.
+//
+// The action that triggers it is opening the reminder editor and pressing save without
+// changing anything, which is why "low-moderate" is as low as it goes: a household that
+// does it twice gets three copies.
+func TestReSavingAnUnchangedReminderListDoesNotSendItAgain(t *testing.T) {
+	e := newEnv(t, time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)) // 08:00 in Paris
+
+	claire := e.user("claire")
+	cal := e.calendar("Famille", claire.ID)
+	e.subscribe(claire.ID, "iphone")
+	e.noDigests()
+
+	dentiste := e.timedEvent(cal, claire.ID, "Dentiste", 2026, time.June, 2, 16, 30, time.Hour, nil)
+	e.reminderAt(dentiste, claire.ID, 1, "09:00") // the day before, at 09:00
+
+	// A reminder set afterwards, on something far enough off that no pass in this test
+	// plans it. It is here only to hold a row number above the one under test, which is
+	// what stops the re-insert landing back on the id it just freed.
+	piscine := e.timedEvent(cal, claire.ID, "Piscine", 2026, time.June, 20, 17, 0, time.Hour, nil)
+	e.reminderMinutes(piscine, claire.ID, 30)
+
+	own := func() domain.Reminder {
+		t.Helper()
+		id := dentiste.ID
+		rs, err := e.st.ListReminders(e.ctx, &id, nil, claire.ID)
+		if err != nil || len(rs) != 1 {
+			t.Fatalf("Claire's reminders for the appointment = %+v, %v; want exactly one", rs, err)
+		}
+		return rs[0]
+	}
+	before := own()
+	if all := reminderIDs(t, e); before.ID >= slices.Max(all) {
+		t.Fatalf("the appointment's reminder is row %d of %v, the highest there is: deleting it "+
+			"would hand the id straight back, so this test no longer reproduces the fault",
+			before.ID, all)
+	}
+
+	// 09:00, and the family is warned about tomorrow's appointment.
+	e.plan()
+	e.clk.Set(time.Date(2026, 6, 1, 9, 0, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Fatalf("the reminder produced %d pushes, want 1", got)
+	}
+
+	// An hour later somebody opens the reminder editor and presses save. The list is
+	// the one that is already there.
+	e.clk.Set(time.Date(2026, 6, 1, 10, 0, 0, 0, paris))
+	e.reminderAt(dentiste, claire.ID, 1, "09:00")
+
+	if after := own(); after.ID != before.ID {
+		t.Errorf("the reminder was row %d before the save and is row %d after (all of them: %v): "+
+			"the outbox files it under that number, so it is now a reminder the family has not "+
+			"been told about", before.ID, after.ID, reminderIDs(t, e))
+	}
+
+	e.plan()
+	e.dispatch()
+
+	queued := 0
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		if e.payloadOf(row).Title == "Dentiste" {
+			queued++
+		}
+	}
+	if queued != 1 {
+		t.Errorf("the appointment is in the outbox %d times, want 1: saving the same list again "+
+			"is not a second reminder", queued)
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes went out in all, want 1: the warning went out at 09:00 and nothing "+
+			"has changed since", got)
+	}
+}
+
+// The other half of the same fix, and the case it must not buy the first with. Moving a
+// reminder is a different warning at a different instant, so the row already queued for
+// the old one has to go — a save that stopped the duplicate but left the reminder firing
+// at the time it used to would be worse than the fault it closed.
+//
+// Nothing prunes on this path: PUT /events/{id}/reminders writes the rows and does not
+// touch the outbox. What removes the old row is the planner recomputing the window and
+// dropping the undelivered rows it would no longer produce, which is where every edit
+// that invalidates the outbox is answered at once.
+func TestMovingAReminderMovesTheRowQueuedForIt(t *testing.T) {
+	e := newEnv(t, time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)) // 08:00 in Paris
+
+	claire := e.user("claire")
+	cal := e.calendar("Famille", claire.ID)
+	e.subscribe(claire.ID, "iphone")
+	e.noDigests()
+
+	dentiste := e.timedEvent(cal, claire.ID, "Dentiste", 2026, time.June, 1, 18, 0, time.Hour, nil)
+	e.reminderMinutes(dentiste, claire.ID, 60)
+	e.plan()
+
+	// An hour beforehand turns out to be too soon to be useful; half an hour it is.
+	e.clk.Set(time.Date(2026, 6, 1, 9, 0, 0, 0, paris))
+	e.reminderMinutes(dentiste, claire.ID, 30)
+	e.plan()
+
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		var when []string
+		for _, row := range rows {
+			when = append(when, wall(row.DueAt))
+		}
+		t.Fatalf("%d reminders are queued for one appointment after moving 60 minutes to 30 (%v), want 1", len(rows), when)
+	}
+	if want := time.Date(2026, 6, 1, 17, 30, 0, 0, paris); !rows[0].DueAt.Equal(want) {
+		t.Fatalf("the queued reminder is due %s, want %s: the row left behind is the old warning",
+			wall(rows[0].DueAt), wall(want))
+	}
+
+	// 17:00 comes and goes in silence, and the warning arrives at 17:30.
+	e.clk.Set(time.Date(2026, 6, 1, 17, 5, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 0 {
+		t.Errorf("%d pushes went out at 17:05, want 0: that is the reminder the family moved", got)
+	}
+	e.clk.Set(time.Date(2026, 6, 1, 17, 31, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes went out in all, want 1", got)
+	}
+}
+
 // reminderIDs is every reminder row in the database, in the order the planner walks
 // them. A test that means to reproduce a reused id has to say which ids it got.
 func reminderIDs(t *testing.T, e *env) []int64 {

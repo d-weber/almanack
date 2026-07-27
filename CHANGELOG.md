@@ -758,6 +758,27 @@ Notable changes to this project. The format follows
   that query claimed it was already doing this, which is the kind of thing that misleads
   whoever reads it next.
   ([#61](https://github.com/d-weber/almanack/issues/61))
+- **Saving a reminder you had not changed could send it a second time.** Open the reminder
+  editor on an appointment you have already been warned about, press save without touching
+  anything, and the warning went out again — and again on the save after that, so a
+  household that did it twice got three copies. A reminder waiting to go out is filed under
+  what it is for, and part of that is the reminder's own number. Saving a list threw all of
+  its rows away and wrote them out again, so they came back under numbers they had never had
+  unless they happened to be the last rows in the table; the warning already sent no longer
+  matched the one being prepared, so it was prepared afresh. It was then sent rather than
+  quietly dropped, because a reminder whose moment has gone by is still delivered while the
+  appointment itself is ahead — a late warning beats none. A duplicate rather than a silence
+  is the right way round for this application, and it was bounded to reminders whose moment
+  had passed while the appointment was still to come; it is worth fixing because pressing
+  save is not a thing anyone should have to avoid doing. Saving a list now keeps the rows
+  for the reminders it still contains instead of writing the whole list out again, so a list
+  you have not changed is left exactly as it was. Changing a reminder to another time is
+  still a different reminder, and what was queued for the old time is dropped rather than
+  left to fire: the planner works out the next two days again on every pass and removes
+  anything it would no longer prepare. Nothing about the database changes, and nothing
+  already queued or already sent is disturbed.
+  ([#65](https://github.com/d-weber/almanack/issues/65))
+
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

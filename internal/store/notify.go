@@ -48,6 +48,30 @@ func reminderScope(eventID, recurrenceID *int64, userID int64) (string, []any, e
 	}
 }
 
+// reminderShape is everything a reminder says: "30 minutes before", or "09:00 on the day
+// before". There is no name, no note and no other column, so two reminders of the same
+// shape are the same reminder — they fall due at the same instant, carry the same
+// payload and cannot be told apart by anything that reads them. It is also the identity
+// the editor already works in: web/js/views/event.js keys its picker on these fields and
+// will not offer a shape the list is holding.
+//
+// The values are compared as they are stored, byte for byte; normalising "9:00" to
+// "09:00" belongs to the caller that accepts it (internal/httpapi.parseReminders).
+//
+// Neither branch can be missed: ReplaceReminders rejects a reminder with neither shape
+// and the table's CHECK says the same about the rows. The default is there so that a
+// database someone has taken the constraint off cannot panic this.
+func reminderShape(r domain.Reminder) string {
+	switch {
+	case r.OffsetMinutes != nil:
+		return fmt.Sprintf("m%d", *r.OffsetMinutes)
+	case r.DaysBefore != nil:
+		return fmt.Sprintf("d%d@%s", *r.DaysBefore, r.AtTimeLocal)
+	default:
+		return ""
+	}
+}
+
 // ListReminders returns one user's reminders for one event or one series.
 //
 // Reminders are per user by design: creating an event never pushes reminders onto
@@ -77,7 +101,7 @@ func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID 
 }
 
 // ReplaceReminders sets one user's reminders for one event or series to exactly rs,
-// deleting and re-inserting inside a transaction.
+// inside a transaction.
 //
 // The scope and the owner come from the arguments, not from the structs: whatever
 // EventID, RecurrenceID and UserID the caller left in rs are overwritten, so a
@@ -88,6 +112,27 @@ func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID 
 // start) or DaysBefore together with AtTimeLocal (all-day events: "09:00, the day
 // before"), never both and never neither — "09:00 on the day" is not expressible as an
 // offset from midnight, which is why there are two shapes.
+//
+// What is there is reconciled against rs rather than deleted and re-inserted, so a
+// reminder in both keeps its row and with it its id. The id is part of the reference the
+// outbox files that reminder's notification under, and reminders.id is INTEGER PRIMARY
+// KEY without AUTOINCREMENT, so re-inserting moved the reference of the whole list
+// unless the rows deleted happened to be the highest in the table. The delivered row
+// then no longer absorbed the re-plan, and the second copy was not merely queued but
+// sent: a reminder whose slot has passed is planned while its event is still ahead, and
+// a late warning is delivered on purpose. Opening the reminder editor and pressing save
+// without changing anything sent the reminder again (#65).
+//
+// Matching is by shape, lowest id first, so that a list holding the same reminder twice
+// settles on one answer rather than on map order — and so that saving it again keeps
+// settling on the same one.
+//
+// A reminder moved to another time is a new row, and should be: it is a different
+// warning at a different instant. What was queued for the old one is not left behind,
+// and not because this prunes — nothing on this path does. The planner recomputes the
+// window on every pass and drops the undelivered rows it would no longer produce
+// (notify.reconcile), which is the single place that answers moving a reminder, deleting
+// one, muting a calendar and every other edit that invalidates the outbox.
 func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrenceID *int64, userID int64, rs []domain.Reminder) error {
 	where, args, err := reminderScope(eventID, recurrenceID, userID)
 	if err != nil {
@@ -103,10 +148,47 @@ func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrence
 	}
 
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM reminders WHERE `+where, args...); err != nil {
-			return mapErr(err)
+		// Read back through the same scope, so that what is compared cannot be a
+		// wider or narrower set of rows than what is about to be written.
+		stored, err := s.withTx(tx).ListReminders(ctx, eventID, recurrenceID, userID)
+		if err != nil {
+			return err
 		}
+		// ListReminders orders by id, so each shape's candidates arrive lowest first
+		// and stay that way — the whole of what makes the matching below repeatable.
+		byShape := map[string][]int64{}
+		for _, r := range stored {
+			shape := reminderShape(r)
+			byShape[shape] = append(byShape[shape], r.ID)
+		}
+		keep := map[int64]bool{}
+		var add []domain.Reminder
 		for _, r := range rs {
+			shape := reminderShape(r)
+			if ids := byShape[shape]; len(ids) > 0 {
+				keep[ids[0]] = true
+				byShape[shape] = ids[1:]
+				continue
+			}
+			add = append(add, r)
+		}
+
+		// A row at a time rather than one statement naming them all: rs arrives from a
+		// request and nothing bounds its length, and a list long enough to exceed the
+		// parameters a single statement may carry would turn a save that used to work
+		// into an error. Each still carries the scope beside the id, so that what a
+		// DELETE on this table can reach is legible where the DELETE is rather than by
+		// tracing where the id was read.
+		for _, r := range stored {
+			if keep[r.ID] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM reminders WHERE id = ? AND `+where,
+				append([]any{r.ID}, args...)...); err != nil {
+				return mapErr(err)
+			}
+		}
+		for _, r := range add {
 			var atTime any
 			if r.AtTimeLocal != "" {
 				atTime = r.AtTimeLocal

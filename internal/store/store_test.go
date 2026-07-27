@@ -3560,6 +3560,146 @@ func TestReplaceRemindersIsScopedToOneUser(t *testing.T) {
 	}
 }
 
+// What ReplaceReminders had to become for #65, and the cases that becoming it must not
+// break. A reminder keeps its row — and so the reference the outbox files it under —
+// for as long as the saved list still says what that row says; anything else is a new
+// row, because it is a different warning.
+//
+// Every case here also watches Marc, who never saves anything: reminders are per person,
+// and reconciliation reads and writes through exactly the scope ReplaceReminders was
+// given.
+func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	marc := mustUser(t, s, "marc@example.test", "Marc")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	e, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: claire.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+
+	// The list as the editor sends it: fresh structs, carrying no id at all. Matching
+	// therefore cannot lean on one, which is the whole difficulty.
+	at := func(minutes ...int) []domain.Reminder {
+		out := make([]domain.Reminder, 0, len(minutes))
+		for _, m := range minutes {
+			out = append(out, domain.Reminder{OffsetMinutes: &m})
+		}
+		return out
+	}
+	save := func(who int64, rs []domain.Reminder) {
+		t.Helper()
+		if err := s.ReplaceReminders(ctx(), &e.ID, nil, who, rs); err != nil {
+			t.Fatalf("ReplaceReminders: %v", err)
+		}
+	}
+	// rows is one member's list as "id:shape". The id is in there because the claim is
+	// about rows and not only about what they say; the numbers themselves are never
+	// asserted, since a row number that outlives a save is the point and one that a
+	// deletion frees is SQLite's business.
+	rows := func(who int64) []string {
+		t.Helper()
+		rs, err := s.ListReminders(ctx(), &e.ID, nil, who)
+		if err != nil {
+			t.Fatalf("ListReminders: %v", err)
+		}
+		out := make([]string, 0, len(rs))
+		for _, r := range rs {
+			out = append(out, fmt.Sprintf("%d:%s", r.ID, reminderShape(r)))
+		}
+		return out
+	}
+	shapesOf := func(list []string) []string {
+		out := make([]string, 0, len(list))
+		for _, v := range list {
+			out = append(out, v[strings.Index(v, ":")+1:])
+		}
+		return out
+	}
+	// check saves a list and reports what it did: the reminders that came back, and how
+	// many of them are still on the row they were on beforehand.
+	var before []string
+	check := func(what string, who int64, rs []domain.Reminder, wantShapes []string, wantKept int) {
+		t.Helper()
+		save(who, rs)
+		after := rows(who)
+		kept := 0
+		for _, v := range after {
+			if slices.Contains(before, v) {
+				kept++
+			}
+		}
+		if got := shapesOf(after); !slices.Equal(got, wantShapes) {
+			t.Errorf("%s: the list reads %v, want %v", what, got, wantShapes)
+		}
+		if kept != wantKept {
+			t.Errorf("%s: %d of %v are on the row they were on in %v, want %d",
+				what, kept, after, before, wantKept)
+		}
+		before = after
+	}
+
+	check("the first save", claire.ID, at(10, 60), []string{"m10", "m60"}, 0)
+
+	// Marc sets one of his own afterwards, which is the whole of what he is here for
+	// besides the scope: it puts a row above Claire's, so that re-inserting hers hands
+	// them numbers they have never had rather than politely giving their own back.
+	save(marc.ID, at(30))
+	marcs := rows(marc.ID)
+
+	// The action from the issue: open the editor, press save, change nothing.
+	check("saving an unchanged list", claire.ID, at(10, 60), []string{"m10", "m60"}, 2)
+
+	// Adding one leaves the reminders already there exactly where they were.
+	check("adding a reminder", claire.ID, at(10, 60, 1440), []string{"m10", "m60", "m1440"}, 2)
+
+	// Removing one takes that row and no other.
+	check("removing a reminder", claire.ID, at(10, 1440), []string{"m10", "m1440"}, 2)
+
+	// Moving one to another time is a different warning, so it is a different row — what
+	// was queued for the old instant is the planner's to drop. Its neighbour staying put
+	// is what says this was the one reminder moving and not the list being rewritten.
+	check("moving a reminder", claire.ID, at(10, 2880), []string{"m10", "m2880"}, 1)
+
+	// The list is a set. Two reminders that say the same thing are the same reminder, so
+	// the order they arrive in carries nothing and saving them in another one changes
+	// nothing — the editor has no way to reorder them either, only to add and remove.
+	check("reordering the list", claire.ID, at(2880, 10), []string{"m10", "m2880"}, 2)
+
+	// A list holding the same reminder more than once keeps a row per copy, matched
+	// lowest id first — so saving it again is a no-op rather than a shuffle, and dropping
+	// back to two keeps the two that have been there longest.
+	check("three of the same reminder", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 1)
+	check("saving the duplicates again", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 3)
+	check("dropping one of the duplicates", claire.ID, at(10, 10), []string{"m10", "m10"}, 2)
+
+	// The all-day shape is matched on both of its halves, so two reminders on the same
+	// day at different times are two reminders.
+	one, two := 1, 2
+	allDay := func(days int, at string) domain.Reminder {
+		return domain.Reminder{DaysBefore: &days, AtTimeLocal: at}
+	}
+	check("switching to the all-day shape", claire.ID,
+		[]domain.Reminder{allDay(one, "09:00"), allDay(two, "09:00")},
+		[]string{"d1@09:00", "d2@09:00"}, 0)
+	check("adding another time on the same day", claire.ID,
+		[]domain.Reminder{allDay(one, "09:00"), allDay(one, "18:00"), allDay(two, "09:00")},
+		[]string{"d1@09:00", "d2@09:00", "d1@18:00"}, 2)
+
+	// Clearing empties the list, and empties only it.
+	check("clearing the list", claire.ID, nil, []string{}, 0)
+	if got := rows(marc.ID); !slices.Equal(got, marcs) {
+		t.Errorf("Marc's reminders are %v after all of that, want %v: he saved once and nothing "+
+			"anyone else does may move his rows", got, marcs)
+	}
+}
+
 func TestPrefsDefaultsAndUpsert(t *testing.T) {
 	s, _, _ := newStore(t)
 	claire := mustUser(t, s, "claire@example.test", "Claire")
