@@ -1,16 +1,15 @@
 // Colour handling: the feature the family will judge this app on.
 //
-// Two reading modes (a per-device setting, prefs.colorBy):
-//   - by label   — the chip body takes the label colour, and a strip on its edge
-//                  still shows who the event concerns;
-//   - by person  — the chip body takes the participants' colours, and the label
-//                  survives as a small dot.
-// Either way "whose event is this" is answered by the strip, without reading text.
+// Two reading modes (a per-device setting, prefs.colorBy) decide where an event's
+// colour comes from:
+//   - by label   — the label's colour, with the participants' colours available to
+//                  whatever wants them;
+//   - by person  — the participants' colours, and the label survives as a dot.
 //
-// Chips never paint a solid colour behind body text. They expose `--c` (the full
-// colour, used for the strip and borders) and `--c-rgb` (the triplet), and the
-// stylesheet mixes the background alpha per theme. That keeps contrast honest in
-// both light and dark without per-chip luminance maths.
+// An event is drawn in that colour rather than in a wash of it, so `--c-on` carries
+// the text colour to use over it: readableOn() measures the WCAG contrast of black
+// and white against the actual colour and returns whichever wins. `--c-rgb` is the
+// same colour as a triplet, for the tint the phone paints behind a timed event.
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 const SHORT_HEX = /^#[0-9a-fA-F]{3}$/;
@@ -78,20 +77,6 @@ export function contrastRatio(a, b) {
 }
 
 /**
- * Multi-participant strip: hard-stopped bands, one per person, top to bottom.
- * Values are normalized hex, so the generated gradient is a safe style value.
- */
-export function stripBackground(colors) {
-  const list = colors.map((c) => normalizeHex(c));
-  if (list.length === 0) return normalizeHex(NEUTRAL);
-  if (list.length === 1) return list[0];
-  const capped = list.slice(0, 4);
-  const step = 100 / capped.length;
-  const stops = capped.map((c, i) => `${c} ${(i * step).toFixed(2)}% ${((i + 1) * step).toFixed(2)}%`);
-  return `linear-gradient(to bottom, ${stops.join(', ')})`;
-}
-
-/**
  * Colour decision for one occurrence.
  * `mode` is 'label' or 'person'; `people` are the participants' member records.
  * Falls back to the label colour when a person-coloured event has no participants,
@@ -104,7 +89,6 @@ export function occurrenceColors(occ, mode, people) {
   return {
     main,
     label: labelColor,
-    strip: stripBackground(personColors.length ? personColors : [main]),
     people: personColors,
   };
 }
@@ -114,7 +98,6 @@ export function chipStyle(colors) {
   return {
     '--c': colors.main,
     '--c-rgb': rgbTriplet(colors.main),
-    '--c-strip': colors.strip,
     '--c-label': colors.label,
     '--c-on': readableOn(colors.main),
   };

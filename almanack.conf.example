@@ -48,6 +48,10 @@ ALMANACK_TZ=Europe/Paris
 # St Stephen's Day).
 ALMANACK_ALSACE_MOSELLE=false
 
+# The colour public holidays are drawn in on the calendar. They belong to no
+# calendar and have no label, so this is their only source of colour.
+ALMANACK_HOLIDAY_COLOR=#d32f2f
+
 # Where the source of THIS build can be obtained. Almanack is AGPL-3.0: if you modify it
 # and let other people use it over a network, section 13 entitles them to your source,
 # not upstream's. Setting this puts a link in the app's About screen, which is the

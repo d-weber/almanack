@@ -4,9 +4,9 @@
  *  - all colours and sizes come from custom properties on :root;
  *  - light and dark are both first-class: prefers-color-scheme decides, and a
  *    [data-theme] attribute on <html> overrides it in either direction;
- *  - event colours arrive from JS as --c (full colour) and --c-rgb (triplet);
- *    the alpha of a chip's background is a theme token, so contrast stays honest
- *    without per-chip luminance maths;
+ *  - event colours arrive from JS as --c (the colour), --c-rgb (its triplet, for
+ *    tints) and --c-on (black or white, whichever colors.js measured as the more
+ *    legible over it);
  *  - mobile-first, with a two-column desktop layout at 900px;
  *  - 44px minimum tap targets — a grandparent uses this on a phone.
  */
@@ -33,9 +33,10 @@
   --warn-ink: #7a4a06;
   --today: #3b7ddd;
 
+  /* Public holidays have no label to take a colour from; the operator picks one
+     with ALMANACK_HOLIDAY_COLOR and state.js writes it over this default. */
+  --holiday: #d32f2f;
   --chip-alpha: 0.16;
-  --chip-alpha-hover: 0.26;
-  --strip-w: 4px;
 
   /* Days belonging to the month on screen sit on the surface colour; the days either
      side of it recede. --cell-outside is a token rather than --surface-2 because
@@ -81,7 +82,6 @@
     --warn-ink: #f2d9a6;
     --today: #6ba4f0;
     --chip-alpha: 0.30;
-    --chip-alpha-hover: 0.42;
     --cell-outside: #0c0e12;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -106,7 +106,6 @@
   --warn-ink: #f2d9a6;
   --today: #6ba4f0;
   --chip-alpha: 0.30;
-  --chip-alpha-hover: 0.42;
   --cell-outside: #0c0e12;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -882,9 +881,10 @@ a { color: var(--accent); }
 
 /* ------------------------------------------------------- events: chips */
 
-/* An event is drawn in the colour that was chosen for it, not a wash of it. The
-   text colour comes from readableOn() in colors.js, which picks black or white by
-   luminance, so a pale yellow label and a deep purple one are both legible. */
+/* Two shapes (see eventui.js). An all-day event is a filled box in its own colour
+   with the title reversed out of it; a timed event is a dot, a title and an hour.
+   The reversed text is black or white, whichever colors.js measured as the more
+   legible on that particular colour — white on all but the palest labels. */
 .chip,
 .bar,
 .event-row {
@@ -900,50 +900,81 @@ a { color: var(--accent); }
 }
 
 .chip {
-  gap: 4px;
+  gap: 5px;
   min-height: 20px;
-  padding: 2px 4px 2px 8px;
+  padding: 2px 5px;
   border-radius: 5px;
   font-size: 11px;
   line-height: 1.25;
 }
 
-.chip-strip,
-.bar-strip,
-.event-strip {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: var(--strip-w);
-  background: var(--c-strip, var(--c));
+/* A timed chip carries no fill on a wide screen: the dot is the colour, and the
+   title stays in the interface's own text colour so a dense day still reads as a
+   list rather than as a stack of coloured blocks. */
+.chip-timed {
+  background: none;
+  color: var(--text);
+  padding-left: 2px;
+}
+
+.chip-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c);
 }
 
 .chip-time {
-  font-variant-numeric: tabular-nums;
-  /* Inherited rather than a grey, because the background is now a real colour;
-     the slight transparency keeps the title dominant. */
-  color: inherit;
-  opacity: 0.75;
   flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 4px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
 }
 
 .chip-title {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
 }
 
-/* A month cell on a phone is about 55px wide, which is roughly eight characters.
-   Spending five of them on "16:30" leaves "Dentiste Léo" rendered as "D." — so in the
-   month grid the time drops out at this width and the title takes the cell. Nothing is
-   lost: the day sheet is one tap away, and the agenda view leads with the time. */
-@media (max-width: 560px) {
-  .month .chip-time {
+.chip-bar .chip-title { flex: 1 1 auto; }
+
+/* A month cell on a phone is about 55px wide, which is roughly eight characters —
+   too few to spend five of them on "16:30" and still read "Dentiste Léo". So the
+   phone drops the hour and the dot, and puts the colour into the title and a tint
+   of it behind: the same information, carried by hue instead of by characters.
+   Nothing is lost, the day sheet is one tap away and the agenda leads with the time. */
+@media (max-width: 899px) {
+  .month .chip-timed {
+    background: rgba(var(--c-rgb), var(--chip-alpha));
+    /* The title is the colour pulled half-way to the text colour: darker on the
+       light theme, lighter on the dark one. Half is the measured floor — at that
+       weight the worst pair in the palette still clears 4.5:1 against its own tint,
+       while the tint behind it carries the hue at full strength. A browser without
+       color-mix falls back to plain text on the tint, which is legible if duller. */
+    color: var(--text);
+    color: color-mix(in srgb, var(--c) 50%, var(--text));
+    padding-left: 5px;
+  }
+  .month .chip-timed .chip-dot,
+  .month .chip-timed .chip-time {
     display: none;
   }
+}
+
+/* Hover only where there is a pointer: on a filled box the colour itself brightens,
+   and a timed chip — which rests without a background on a wide screen — takes the
+   same tint the phone gives it. Holidays are not clickable and stay put. */
+@media (hover: hover) {
+  .chip-timed:hover { background: rgba(var(--c-rgb), var(--chip-alpha)); }
+  .chip-bar:hover,
+  .bar:not(.is-holiday-bar):hover,
+  .event-row.is-allday:hover { filter: brightness(1.08); }
+  .event-row.is-timed:hover { background: var(--surface-2); }
 }
 
 .event-label-dot {
@@ -967,14 +998,13 @@ a { color: var(--accent); }
 
 .bar {
   min-height: 20px;
-  padding: 2px 6px 2px 8px;
+  padding: 2px 6px;
   font-size: 11px;
   border-radius: 0;
 }
 
 .bar.is-start { border-top-left-radius: 5px; border-bottom-left-radius: 5px; }
 .bar.is-end { border-top-right-radius: 5px; border-bottom-right-radius: 5px; }
-.bar:not(.is-start) .bar-strip { display: none; }
 
 .bar-title {
   flex: 1 1 auto;
@@ -983,6 +1013,43 @@ a { color: var(--accent); }
   white-space: nowrap;
   font-weight: 600;
 }
+
+/* Holidays are not buttons — there is nothing to open — but they sit in the same
+   lane grid as the bars, so they take the same shape. */
+.is-holiday-bar { cursor: default; }
+
+/* The list screens follow the grid: an all-day event is a filled box, a timed one
+   is a card with a dot. A list of nothing but saturated blocks is hard to read and
+   leaves the time column with no colour it can safely be drawn in. */
+.event-row {
+  gap: 10px;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+}
+
+.event-row.is-timed {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.event-row .chip-dot { width: 9px; height: 9px; }
+
+.event-time {
+  flex: 0 0 auto;
+  min-width: 52px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  /* No opacity here: over a filled box this text is already at the contrast
+     readableOn() measured, and fading it would spend the margin it just won.
+     Size and weight carry the hierarchy instead. */
+  color: inherit;
+  font-weight: 600;
+}
+
+.event-row.is-timed .event-time,
+.event-row.is-timed .event-meta { color: var(--text-dim); }
 
 .event-list { display: flex; flex-direction: column; gap: 6px; }
 
@@ -1004,7 +1071,7 @@ a { color: var(--accent); }
 
 .event-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .event-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-meta { font-size: 12.5px; color: inherit; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-meta { font-size: 12.5px; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .event-people { display: inline-flex; flex: 0 0 auto; }
 .event-people .avatar + .avatar { margin-left: -6px; }
 
@@ -1066,7 +1133,6 @@ a { color: var(--accent); }
 
 .day-hit:last-child { border-right: 0; }
 .day-hit.is-outside { background: var(--cell-outside); }
-.day-hit.is-holiday { box-shadow: inset 0 3px 0 -1px var(--line-strong); }
 .day-hit.is-today { background: var(--accent-soft); }
 .day-hit:active { background: var(--surface-3); }
 
@@ -1112,16 +1178,10 @@ a { color: var(--accent); }
   color: #fff;
 }
 
-.holiday-name {
-  font-size: 9.5px;
-  line-height: 1.1;
-  color: var(--text-dim);
-  text-align: center;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* A public holiday tints its own date, the way a printed calendar does. Today's
+   filled disc still wins, because where you are matters more than what the day is. */
+.week-num.is-holiday .num { color: var(--holiday); }
+.week-num.is-today .num { color: #fff; }
 
 .week-bars {
   display: grid;
@@ -1179,7 +1239,7 @@ a { color: var(--accent); }
 
 .week-day-holiday {
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--holiday);
 }
 
 /* ------------------------------------------------------------- agenda */
@@ -1205,7 +1265,7 @@ a { color: var(--accent); }
 .agenda-holiday {
   font-size: 12px;
   font-weight: 500;
-  color: var(--text-dim);
+  color: var(--holiday);
 }
 
 .agenda-day.is-today .agenda-day-title { color: var(--accent); }

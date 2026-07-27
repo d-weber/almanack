@@ -16,6 +16,11 @@
 __pycache__/
 *.pyc
 
+# Reference screenshots dropped in the root while working on the design. They are
+# someone else's UI and have no business in this repository.
+/Screenshot*.png
+/screenshot*.png
+
 # Editor / OS
 .DS_Store
 *.swp

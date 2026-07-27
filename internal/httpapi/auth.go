@@ -122,6 +122,9 @@ type configResponse struct {
 	// SourceURL lets the About screen offer this build's source, which is how an
 	// AGPL-3.0 network service satisfies section 13. Empty when unconfigured.
 	SourceURL string `json:"source_url,omitempty"`
+	// HolidayColor is how public holidays are drawn; they belong to no calendar and
+	// so have no label colour of their own.
+	HolidayColor string `json:"holiday_color"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +135,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Languages:      []string{string(domain.LangFR), string(domain.LangEN)},
 		DevMode:        s.cfg.Dev,
 		SourceURL:      s.cfg.SourceURL,
+		HolidayColor:   s.cfg.HolidayColor,
 	})
 }
 

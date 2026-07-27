@@ -87,7 +87,18 @@ export function applyConfig(cfg) {
     setTimezone(cfg.family_tz);
     state.familyTz = cfg.family_tz || state.familyTz;
     state.appVersion = cfg.app_version || state.appVersion;
+    applyHolidayColor(cfg.holiday_color);
   }
+}
+
+/**
+ * Public holidays belong to no calendar, so their colour is an operator setting
+ * rather than a label. It reaches the stylesheet as a token; the fallback in
+ * style.css is what a browser paints in the moment before /config answers.
+ */
+function applyHolidayColor(color) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(String(color || ''))) return;
+  document.documentElement.style.setProperty('--holiday', color);
 }
 
 export function applyMe(me) {

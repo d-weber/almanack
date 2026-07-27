@@ -1,15 +1,19 @@
 // Occurrence chips, bars and rows — the shared vocabulary of the month, week,
 // agenda, day-sheet and search screens.
 //
-// Colour reading (see colors.js): the body colour follows the current mode, and
-// the leading strip always carries the participants' colours, so "whose event is
-// this" is answered before the title is read.
+// Two shapes, because the two kinds of event answer different questions. An
+// all-day event owns the day, so it is drawn as a filled box in its own colour.
+// A timed event is one moment in a day that holds several, so on a wide screen it
+// is a dot, the title, and the hour — the hour aligned down the column so a day
+// can be scanned vertically. A phone has no room for that column: there the title
+// takes the colour and sits on a tint of it, which reads at a glance without
+// spending characters on digits.
 
 import { h } from './dom.js';
 import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { state, participantsOf, calendarById } from './state.js';
-import { occurrenceColors, chipStyle } from './colors.js';
+import { occurrenceColors, chipStyle, normalizeHex } from './colors.js';
 import { formatTime, isBar, occStartDate, occEndDate } from './dates.js';
 import { avatar } from './ui.js';
 import { go } from './router.js';
@@ -31,6 +35,25 @@ function labelDot(occ, colors) {
   return h('span', { class: 'event-label-dot', style: { '--c-label': colors.label }, title: occ.label_name || '' });
 }
 
+/**
+ * Public holidays belong to no calendar and carry no label, so they have no
+ * colour of their own to take. The operator picks one (ALMANACK_HOLIDAY_COLOR);
+ * red is the default because that is what a wall calendar does.
+ */
+export function holidayColor() {
+  return normalizeHex(state.config && state.config.holiday_color, '#d32f2f');
+}
+
+/** A holiday drawn like the all-day event it effectively is. */
+export function holidayBar(name) {
+  const c = holidayColor();
+  return h('div', {
+    class: 'bar is-start is-end is-holiday-bar',
+    style: chipStyle({ main: c, label: c }),
+    title: name,
+  }, h('span', { class: 'bar-title' }, name));
+}
+
 /** Compact chip for a month cell. */
 export function eventChip(occ, { onclick } = {}) {
   const colors = occColors(occ);
@@ -41,10 +64,9 @@ export function eventChip(occ, { onclick } = {}) {
     style: chipStyle(colors),
     onclick: onclick || (() => openOccurrence(occ)),
   },
-  h('span', { class: 'chip-strip', style: { '--c-strip': colors.strip } }),
-  timed ? h('span', { class: 'chip-time' }, formatTime(occ.starts_at)) : null,
+  timed ? h('span', { class: 'chip-dot' }) : null,
   h('span', { class: 'chip-title' }, occ.title),
-  labelDot(occ, colors));
+  timed ? h('span', { class: 'chip-time' }, formatTime(occ.starts_at)) : null);
 }
 
 /** Spanning bar for an all-day or multi-day event inside a week row. */
@@ -56,9 +78,7 @@ export function eventBar(occ, { isStart = true, isEnd = true, onclick } = {}) {
     style: chipStyle(colors),
     onclick: onclick || (() => openOccurrence(occ)),
   },
-  h('span', { class: 'bar-strip', style: { '--c-strip': colors.strip } }),
-  h('span', { class: 'bar-title' }, isStart ? occ.title : ''),
-  labelDot(occ, colors));
+  h('span', { class: 'bar-title' }, isStart ? occ.title : ''));
 }
 
 /** Full-width row for the week, agenda, day sheet and search screens. */
@@ -70,14 +90,15 @@ export function eventRow(occ, { showCalendar = true, onclick } = {}) {
   if (showCalendar && cal) meta.push(cal.name);
   if (occ.location) meta.push(occ.location);
 
+  const allDay = isBar(occ);
   return h('button', {
-    class: 'event-row',
+    class: ['event-row', allDay ? 'is-allday' : 'is-timed'].join(' '),
     type: 'button',
     style: chipStyle(colors),
     onclick: onclick || (() => openOccurrence(occ)),
   },
-  h('span', { class: 'event-strip', style: { '--c-strip': colors.strip } }),
-  h('span', { class: 'event-time' }, isBar(occ) ? t('date.allDay') : formatTime(occ.starts_at)),
+  h('span', { class: 'event-time' }, allDay ? t('date.allDay') : formatTime(occ.starts_at)),
+  allDay ? null : h('span', { class: 'chip-dot' }),
   h('span', { class: 'event-body' },
     h('span', { class: 'event-title' }, occ.title),
     meta.length ? h('span', { class: 'event-meta' }, meta.join(' · ')) : null),

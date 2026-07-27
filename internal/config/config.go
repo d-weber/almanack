@@ -39,8 +39,11 @@ var known = map[string]bool{
 	"ALMANACK_PLAN_HORIZON": true, "ALMANACK_TICK": true,
 	"ALMANACK_BACKUP_KEEP_HOURLY": true, "ALMANACK_BACKUP_KEEP_DAILY": true,
 	"ALMANACK_BACKUP_KEEP_WEEKLY": true, "ALMANACK_BACKUP_KEEP_MONTHLY": true,
-	"ALMANACK_LOG_LEVEL": true, "ALMANACK_LOG_FORMAT": true,
+	"ALMANACK_LOG_LEVEL": true, "ALMANACK_LOG_FORMAT": true, "ALMANACK_HOLIDAY_COLOR": true,
 }
+
+// DefaultHolidayColor is the red public holidays are drawn in unless configured.
+const DefaultHolidayColor = "#d32f2f"
 
 // DefaultSourceURL is deliberately empty: only whoever publishes a build knows where
 // its source lives. Set ALMANACK_SOURCE_URL and the About screen links to it — which is
@@ -82,6 +85,10 @@ type Config struct {
 	VAPIDSubject string // ALMANACK_VAPID_SUBJECT — mailto: contact, required by RFC 8292
 
 	AlsaceMoselle bool // ALMANACK_ALSACE_MOSELLE — the two extra public holidays
+
+	// HolidayColor is the colour public holidays are drawn in. They are not events
+	// and belong to no calendar, so they have no label to take a colour from.
+	HolidayColor string // ALMANACK_HOLIDAY_COLOR
 
 	// SourceURL is where this build's source can be obtained. Almanack is AGPL-3.0:
 	// if you modify it and let other people use it over a network, section 13
@@ -200,6 +207,7 @@ func Load(path string) (Config, error) {
 		VAPIDPrivate:   get("ALMANACK_VAPID_PRIVATE", ""),
 		VAPIDSubject:   get("ALMANACK_VAPID_SUBJECT", ""),
 		AlsaceMoselle:  getBool("ALMANACK_ALSACE_MOSELLE", false),
+		HolidayColor:   get("ALMANACK_HOLIDAY_COLOR", DefaultHolidayColor),
 		SourceURL:      get("ALMANACK_SOURCE_URL", DefaultSourceURL),
 		PlanHorizon:    getDur("ALMANACK_PLAN_HORIZON", 48*time.Hour),
 		SchedulerTick:  getDur("ALMANACK_TICK", 30*time.Second),
@@ -265,6 +273,9 @@ func (c Config) validate(problems []string) error {
 	}
 	if c.BaseURL == "" {
 		problems = append(problems, "ALMANACK_BASE_URL is required (used in invite links and emails)")
+	}
+	if !isHexColor(c.HolidayColor) {
+		problems = append(problems, fmt.Sprintf("ALMANACK_HOLIDAY_COLOR=%q must be a hex colour such as #d32f2f", c.HolidayColor))
 	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
@@ -418,4 +429,17 @@ func validHHMM(s string) bool {
 	hh, err1 := strconv.Atoi(h)
 	mm, err2 := strconv.Atoi(m)
 	return err1 == nil && err2 == nil && hh >= 0 && hh < 24 && mm >= 0 && mm < 60
+}
+
+// isHexColor accepts the #rrggbb form the browser expects.
+func isHexColor(v string) bool {
+	if len(v) != 7 || v[0] != '#' {
+		return false
+	}
+	for _, r := range v[1:] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
 }

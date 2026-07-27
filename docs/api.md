@@ -23,7 +23,8 @@ so it is normative: if code and contract disagree, that is a bug in the code.
 Bootstrap for the login and join screens; safe to cache.
 ```json
 { "family_tz": "Europe/Paris", "app_version": "a1b2c3d4",
-  "vapid_public_key": "BEl…", "languages": ["fr","en"], "dev_mode": false }
+  "vapid_public_key": "BEl…", "languages": ["fr","en"], "dev_mode": false,
+  "holiday_color": "#d32f2f" }
 ```
 
 ### `GET /api/v1/invites/{token}`

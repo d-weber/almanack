@@ -14,7 +14,7 @@ import {
   startOfMonth, endOfMonth, formatDateLong,
 } from '../dates.js';
 import { occurrencesOn, holidayOn, weekStart } from '../state.js';
-import { eventChip, eventBar, eventRow } from '../eventui.js';
+import { eventChip, eventBar, eventRow, holidayBar } from '../eventui.js';
 import { openOverlay, button, emptyState } from '../ui.js';
 import { go } from '../router.js';
 
@@ -32,6 +32,13 @@ export function monthRange(dateISO, ws = 1) {
 function barsForWeek(days) {
   const first = days[0];
   const last = days[days.length - 1];
+  // Holidays are laid out first so they take the top lane: a holiday describes the
+  // day itself, not something a member decided to put in it.
+  const items = [];
+  days.forEach((day, col) => {
+    const name = holidayOn(day);
+    if (name) items.push({ holiday: name, startCol: col, endCol: col, isStart: true, isEnd: true });
+  });
   const seen = new Map();
   for (const day of days) {
     for (const occ of occurrencesOn(day)) {
@@ -40,7 +47,7 @@ function barsForWeek(days) {
       if (!seen.has(key)) seen.set(key, occ);
     }
   }
-  const items = Array.from(seen.values()).map((occ) => {
+  const events = Array.from(seen.values()).map((occ) => {
     const s = occStartDate(occ);
     const e = occEndDate(occ);
     return {
@@ -51,6 +58,7 @@ function barsForWeek(days) {
       isEnd: e <= last,
     };
   }).sort((a, b) => (a.startCol - b.startCol) || ((b.endCol - b.startCol) - (a.endCol - a.startCol)));
+  items.push(...events);
 
   const lanes = [];
   for (const it of items) {
@@ -65,11 +73,9 @@ function barsForWeek(days) {
 
 function dayCell(day, monthNum, today) {
   const { m } = parseDate(day);
-  const holiday = holidayOn(day);
   const classes = ['day-hit'];
   if (m !== monthNum) classes.push('is-outside');
   if (day === today) classes.push('is-today');
-  if (holiday) classes.push('is-holiday');
   return h('button', {
     class: classes.join(' '),
     type: 'button',
@@ -104,14 +110,19 @@ export function renderMonth({ date }) {
         h('div', { class: 'week-nums' }, ...week.map((day) => {
           const { m, d } = parseDate(day);
           const holiday = holidayOn(day);
-          return h('span', { class: ['week-num', m !== monthNum ? 'is-outside' : '', day === today ? 'is-today' : ''].filter(Boolean).join(' ') },
-            h('span', { class: 'num' }, String(d)),
-            holiday ? h('span', { class: 'holiday-name', title: holiday }, holiday) : null);
+          // The holiday's name is drawn as a bar below, the way a wall calendar
+          // prints it; here it only tints the number, as TimeTree does.
+          return h('span', {
+            class: ['week-num', m !== monthNum ? 'is-outside' : '', day === today ? 'is-today' : '', holiday ? 'is-holiday' : ''].filter(Boolean).join(' '),
+            title: holiday || null,
+          }, h('span', { class: 'num' }, String(d)));
         })),
         laneCount
           ? h('div', { class: 'week-bars', style: { '--lanes': String(laneCount) } },
             ...bars.map((b) => {
-              const node = eventBar(b.occ, { isStart: b.isStart, isEnd: b.isEnd });
+              const node = b.holiday
+                ? holidayBar(b.holiday)
+                : eventBar(b.occ, { isStart: b.isStart, isEnd: b.isEnd });
               node.style.setProperty('grid-column', `${b.startCol + 1} / span ${b.endCol - b.startCol + 1}`);
               node.style.setProperty('grid-row', String(b.lane + 1));
               return node;
