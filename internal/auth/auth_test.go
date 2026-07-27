@@ -236,6 +236,14 @@ func TestVerifyPasswordRejectsMalformedHashes(t *testing.T) {
 		{"negative time cost", "$argon2id$v=19$m=65536,t=-1,p=4" + body},
 		{"parameters out of order", "$argon2id$v=19$t=3,m=65536,p=4" + body},
 		{"missing parallelism", "$argon2id$v=19$m=65536,t=3" + body},
+		// These three used to panic inside argon2.IDKey rather than come back as
+		// errors — no passes, no lanes, and a tag of no length, none of which the
+		// derivation can run. The recover in the HTTP middleware turned each into a
+		// 500 on every login attempt for that account, which reads as "the site is
+		// broken" rather than "this row is corrupt".
+		{"zero time cost", "$argon2id$v=19$m=65536,t=0,p=4" + body},
+		{"zero parallelism", "$argon2id$v=19$m=65536,t=3,p=0" + body},
+		{"empty tag", "$argon2id$v=19$m=65536,t=3,p=4$" + saltB64 + "$"},
 		{"salt is not base64", "$argon2id$v=19$m=65536,t=3,p=4$!!!!$" + keyB64},
 		// The salt and key are standard base64, not the URL alphabet: '-' and '_'
 		// are not the same bytes, and quietly accepting them would verify against

@@ -438,6 +438,19 @@ Notable changes to this project. The format follows
   when there is a database to record it against; when there is not, the non-zero exit and
   the failure mail are the whole signal, as the deployment contract has always said.
   ([#29](https://github.com/d-weber/almanack/issues/29))
+- **A damaged password row answered every sign-in attempt for that account with a server
+  error.** Verification promises that a stored hash it cannot read is an error rather than a
+  quiet "wrong password", because treating a corrupt row as a bad password sends its owner
+  round the reset loop forever, resetting to a password that then also fails. Three shapes of
+  malformed hash never reached that promise: a row claiming no passes (`t=0`), one claiming no
+  parallel lanes (`p=0`), and one whose tag is empty. Each made the argon2 library panic
+  instead of returning, and since the HTTP layer recovers, what came out was a 500 on every
+  sign-in as that person — which reads as "the site is down" rather than "this one row is
+  damaged" — plus a stack trace in the log that names no account. Reaching it needs a corrupt
+  or hand-edited `users` row rather than anything a visitor can send, so nobody's calendar was
+  exposed by it; it is fixed because a library panicking on data from its own database is the
+  wrong answer at any frequency.
+  ([#31](https://github.com/d-weber/almanack/issues/31))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

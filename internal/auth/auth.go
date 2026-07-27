@@ -74,6 +74,18 @@ func VerifyPassword(encoded, plain string) (bool, error) {
 		return false, fmt.Errorf("unreadable hash: %w", err)
 	}
 
+	// argon2.IDKey panics rather than erring on a profile it cannot run: fewer than
+	// one pass, fewer than one lane, or a tag of no length (blake2b has no
+	// zero-size constructor). Those are all shapes a corrupt row can hold, and this
+	// function's contract is that a malformed hash is an error — a panic here is a
+	// 500 on every login attempt for that account instead.
+	if times < 1 || threads < 1 {
+		return false, fmt.Errorf("argon2 parameters %q are out of range: t and p must be at least 1", parts[3])
+	}
+	if len(want) == 0 {
+		return false, fmt.Errorf("stored argon2 hash is empty")
+	}
+
 	got := argon2.IDKey([]byte(plain), salt, times, memory, threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }

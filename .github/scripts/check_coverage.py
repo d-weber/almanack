@@ -40,7 +40,7 @@ FLOORS: dict[str, float] = {
     "almanack/cmd/almanack": 52.0,
     # Passwords and token minting. The uncovered remainder is the crypto/rand failure
     # branches, which need a seam that does not exist.
-    "almanack/internal/auth": 93.0,
+    "almanack/internal/auth": 94.0,
     "almanack/internal/clock": 100.0,
     # The strict-configuration promise from 0.2.0. The gap is Load's fallback to
     # /etc/almanack/almanack.conf, which cannot be exercised without a system file.
