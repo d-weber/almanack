@@ -286,7 +286,18 @@ func TestVerifyPasswordRejectsNearMisses(t *testing.T) {
 		{"one bit of the last byte of the tag", withKey(flip(len(key) - 1))},
 		{"the tag truncated by one byte", withKey(key[:len(key)-1])},
 		{"the tag with a byte appended", withKey(append(bytes.Clone(key), 0))},
-		{"an empty-ish tag of one byte", withKey(key[:1])},
+		// Eight bytes rather than one. Verification re-derives at the *stored* tag
+		// length, and argon2's output is not a prefix of a longer output, so a short
+		// tag is compared against an independently derived one of the same size: at
+		// one byte the two collide once in 256 runs and this test failed in CI on a
+		// hash that was behaving correctly. Eight bytes keeps the case — a stored tag
+		// far shorter than the profile must still not wave a password through — while
+		// putting the collision at one in 2^64.
+		//
+		// Whether a tag that short should be refused outright is a policy question
+		// rather than a comparison one, and belongs with the parameter lower bounds in
+		// issue #31.
+		{"a tag much shorter than the profile", withKey(key[:8])},
 		{"a tag of the right length from another password", withKey(argon2.IDKey([]byte("something else"), salt, 3, 64*1024, 4, 32))},
 		{"the right tag under a different salt", phc(64*1024, 3, 4, []byte("different-salt!!"), key)},
 	}
