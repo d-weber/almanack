@@ -102,3 +102,67 @@ func TestTheDemoEveningOutStaysNearTodayAndOnItsMonth(t *testing.T) {
 		}
 	}
 }
+
+// The seaside holiday is the largest of these by frequency and was missed by both of the
+// issues that fixed the others (#72). It ran from today + 10 to today + 16, so the whole
+// week was in the following month on a third of the days the seed could be run, and off
+// the end of a Monday-start grid entirely on 164 of the 730 days of 2026 and 2027 —
+// while the seeder's summary went on advertising a multi-day holiday.
+//
+// A span is asked about at both of its ends, which is the part the earlier two fixes had
+// no occasion to think about: a bar is wholly on the screen only if the day it begins and
+// the day it finishes are both on it, and seven days need seven consecutive days of the
+// month. The tightest month is a 28-day February, which allows a start no later than the
+// 22nd.
+func TestTheDemoHolidayLandsWhollyOnTheMonthTheAppOpensOn(t *testing.T) {
+	last := domain.NewDate(2033, time.December, 31)
+	for day := domain.NewDate(2024, time.January, 1); !day.After(last); day = day.AddDays(1) {
+		start, end := seasideHoliday(day)
+
+		for _, c := range []struct {
+			what string
+			date domain.Date
+		}{
+			{"the holiday starts", start},
+			{"the holiday ends", end},
+		} {
+			if c.date.Year != day.Year || c.date.Month != day.Month {
+				t.Fatalf("seeded on %s: %s %s, outside %s %d", day, c.what, c.date, day.Month, day.Year)
+			}
+		}
+
+		// Still a week. Shortening the span is the easy way to satisfy everything above
+		// and leave the demo without the multi-day case it is in the seed for.
+		if days := start.DaysUntil(end); days != 6 {
+			t.Fatalf("seeded on %s: the holiday runs %s to %s, %d days long", day, start, end, days+1)
+		}
+
+		// Saturday, so the bar is drawn in two week rows for both of the week starts the
+		// settings screen offers. A seven-day span sits in one row exactly when it begins
+		// on the reader's first day of the week, and one row is not the case the lane
+		// layout in web/js/views/month.js exists for.
+		if start.Weekday() != time.Saturday {
+			t.Fatalf("seeded on %s: the holiday starts %s, a %s", day, start, start.Weekday())
+		}
+	}
+}
+
+// The parents' evening was the last seeded date still counted blindly from the day the
+// seed ran, and the mildest case of the same fault: tomorrow leaves the seeded month on
+// the last day of one, and leaves the grid as well when that day ends a week.
+//
+// Both halves are asked for, as they are for the cinema. Beside today is what the
+// appointment is doing in the seed, and on the month is what makes it visible to every
+// reader; either assertion alone invites the other to be optimised away.
+func TestTheDemoParentsEveningStaysBesideTodayAndOnItsMonth(t *testing.T) {
+	last := domain.NewDate(2033, time.December, 31)
+	for day := domain.NewDate(2024, time.January, 1); !day.After(last); day = day.AddDays(1) {
+		evening := parentsEvening(day)
+		if days := day.DaysUntil(evening); days != 1 && days != -1 {
+			t.Fatalf("seeded on %s: the parents' evening is %s, %d days away", day, evening, days)
+		}
+		if evening.Year != day.Year || evening.Month != day.Month {
+			t.Fatalf("seeded on %s: the parents' evening is %s, outside %s %d", day, evening, day.Month, day.Year)
+		}
+	}
+}

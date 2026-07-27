@@ -894,6 +894,31 @@ Notable changes to this project. The format follows
   seeded day and on the month the app opens on. Both are pinned in `cmd/almanack` on every
   date in a decade.
   ([#67](https://github.com/d-weber/almanack/issues/67))
+- **The demo's seaside holiday could open nowhere at all, and on nearly a quarter of days
+  it did.** It ran from the tenth day after the seed to the sixteenth, so unlike the three
+  events fixed above it was not merely its far end that could fall off the calendar — the
+  whole week could. On 164 of the 730 days of 2026 and 2027 no part of it was on the
+  five-row grid the app opens on, and on a third of them no part of it was in the seeded
+  month at all, while the seeder's summary went on advertising a multi-day holiday. Two
+  issues had already been through this seed without catching it, because nothing asserted
+  the holiday. A span is bounded at both ends, which is what makes it a different problem
+  from the events fixed before it: seven days need seven consecutive days of the month, so
+  a week fits only if it starts on or before the 22nd of a 28-day February. That leaves no
+  room to keep it near the day the demo was made, the way the cinema outing is kept — past
+  the middle of a month the only week that fits is the one ending on its last day, so
+  clamping the old anchor rather than replacing it would have jammed the holiday against
+  the month's edge on more than half of the days the seed can be run, which reads as an
+  artefact of seeding rather than as a holiday anyone booked. It is pinned like the two
+  series instead: the second Saturday of the month and the six days after it, so it starts
+  no earlier than the 8th and ends no later than the 20th, clear of both ends of every
+  month. Saturday because that is the day a week by the sea starts on, and because seven
+  days from one are drawn in two week rows for both of the week starts the settings screen
+  offers — the continuation a multi-day bar is in the demo to show, which a week sitting in
+  a single row would not. The seed's last remaining blind offset went with it: the parents'
+  evening was tomorrow, which leaves the month on the last day of one and the grid as well
+  when that day ends a week, so it steps back to yesterday there rather than crossing. Both
+  are pinned in `cmd/almanack` on every date in a decade.
+  ([#72](https://github.com/d-weber/almanack/issues/72))
 
 ## [0.2.0] — 2026-07-27
 
