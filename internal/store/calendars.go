@@ -121,8 +121,47 @@ func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
 
 // DeleteCalendar removes a calendar and, by ON DELETE CASCADE, its members, labels,
 // invites and events — and through those, participants, overrides and reminders.
+//
+// Two things the cascade cannot reach have to go first, in the same transaction, while
+// the events that name them are still there to name them:
+//
+// Recurrences have no calendar_id, and events.recurrence_id is ON DELETE SET NULL — the
+// direction that lets a pattern be dropped from a series without taking the event with
+// it — so deleting the events lets go of the recurrences rather than following them.
+// What is left is a pattern belonging to nothing, and the reminders hanging off it,
+// which the planner walks on every pass. A recurrences.calendar_id column would make
+// this a cascade, but not without a nullable column, a backfill and a signature change
+// in three places, since SQLite cannot add a NOT NULL column with no default in place —
+// only rebuild the table, which is the opposite of the expand-only rule migrations here
+// follow (CONVENTIONS §8).
+//
+// Queued notifications are the half a family actually sees. The outbox is denormalised
+// on purpose, so that it survives the thing it announces being edited, and delivery
+// never re-checks that the event is still there: a reminder already materialised for
+// the next two days goes out for a calendar that no longer exists. Only undelivered
+// rows go; sent and skipped ones are history.
 func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
-	err := affected(s.q.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM recurrences
+			 WHERE id IN (SELECT recurrence_id FROM events
+			               WHERE calendar_id = ? AND recurrence_id IS NOT NULL)`, id); err != nil {
+			return mapErr(err)
+		}
+		// source_ref is "reminder:{eventID}:{occurrenceDate}:{reminderID}" — the layout
+		// internal/events.ReminderSourceRef writes and prunes by, which cannot be
+		// imported here (it depends on this package). TestDeletingACalendarPrunesTheOutbox
+		// in internal/events holds the two together.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM notification_queue
+			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND EXISTS (SELECT 1 FROM events e
+			                WHERE e.calendar_id = ?
+			                  AND notification_queue.source_ref LIKE 'reminder:' || e.id || ':%')`, id); err != nil {
+			return mapErr(err)
+		}
+		return affected(tx.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))
+	})
 	if err != nil {
 		return fmt.Errorf("delete calendar %d: %w", id, err)
 	}
@@ -202,15 +241,46 @@ func (s *Store) AddMember(ctx context.Context, calendarID, userID int64) error {
 	return nil
 }
 
-// RemoveMember removes a membership, reporting domain.ErrNotFound when there was none.
+// RemoveMember removes a membership and everything in that calendar that was only
+// there because of it, reporting domain.ErrNotFound when there was no membership.
+//
+// event_participants and reminders are keyed on users rather than on membership, so the
+// membership row is not the only thing that has to go. What is left otherwise is an
+// ex-member still shown on other people's events — a state the API refuses to create,
+// since an edit that lists a non-member is rejected — and their reminders lying dormant
+// until somebody re-invites them, at which point they start firing again. Both are
+// scoped to this calendar: the same person's rows in the calendars they are staying in
+// are none of this method's business. The reminders reach the series patterns by joining
+// through events, which is the same route DeleteCalendar takes.
+//
+// The membership row goes last, so its domain.ErrNotFound rolls the rest back: removing
+// somebody who was never there stays an error that changed nothing.
 //
 // It does not touch the calendar's creator_id: removing the creator leaves a calendar
 // with a dangling owner, so the caller must pair this with TransferCreator (or
 // DeleteCalendar when nobody is left). Only the creator is allowed to remove other
 // people — that check belongs in the handler, not here.
 func (s *Store) RemoveMember(ctx context.Context, calendarID, userID int64) error {
-	err := affected(s.q.ExecContext(ctx,
-		`DELETE FROM calendar_members WHERE calendar_id = ? AND user_id = ?`, calendarID, userID))
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM event_participants
+			 WHERE user_id = ?
+			   AND event_id IN (SELECT id FROM events WHERE calendar_id = ?)`,
+			userID, calendarID); err != nil {
+			return mapErr(err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM reminders
+			 WHERE user_id = ?
+			   AND (event_id IN (SELECT id FROM events WHERE calendar_id = ?)
+			     OR recurrence_id IN (SELECT recurrence_id FROM events
+			                           WHERE calendar_id = ? AND recurrence_id IS NOT NULL))`,
+			userID, calendarID, calendarID); err != nil {
+			return mapErr(err)
+		}
+		return affected(tx.ExecContext(ctx,
+			`DELETE FROM calendar_members WHERE calendar_id = ? AND user_id = ?`, calendarID, userID))
+	})
 	if err != nil {
 		return fmt.Errorf("remove user %d from calendar %d: %w", userID, calendarID, err)
 	}

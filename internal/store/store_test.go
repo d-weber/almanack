@@ -1319,6 +1319,247 @@ func TestMembershipAndCreatorTransfer(t *testing.T) {
 	}
 }
 
+// countRows is for the teardown tests, which are about rows nothing in the API can see
+// any more: an orphaned recurrence has no calendar to be listed under, and a queued
+// notification is only readable through the planner's own queries.
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// TestDeletingACalendarLeavesNothingBehind covers the two tables no cascade reaches
+// from the calendar row: recurrences, which have no calendar_id and are reached only
+// through events.recurrence_id (ON DELETE SET NULL, so the cascade lets go of them
+// rather than following them), and the outbox, whose payload is denormalised and never
+// re-checked against the calendar it came from.
+func TestDeletingACalendarLeavesNothingBehind(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	// The same shape in both calendars, so the delete has to be scoped and not merely
+	// thorough: a series with a reminder on the pattern, a one-off with a reminder of
+	// its own, and a notification already materialised for each.
+	seed := func(cal domain.Calendar, title string) (series, single domain.Event) {
+		t.Helper()
+		label := firstLabel(t, s, cal.ID)
+		starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+		series, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+			DTStart: domain.MustParseDate("2026-08-04"),
+		})
+		if err != nil {
+			t.Fatalf("create series in %s: %v", cal.Name, err)
+		}
+		single, err = s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title + " (une fois)", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("create event in %s: %v", cal.Name, err)
+		}
+		thirty := 30
+		if err := s.ReplaceReminders(ctx(), nil, series.RecurrenceID, u.ID,
+			[]domain.Reminder{{OffsetMinutes: &thirty}}); err != nil {
+			t.Fatalf("reminder on the series in %s: %v", cal.Name, err)
+		}
+		if err := s.ReplaceReminders(ctx(), &single.ID, nil, u.ID,
+			[]domain.Reminder{{OffsetMinutes: &thirty}}); err != nil {
+			t.Fatalf("reminder on the event in %s: %v", cal.Name, err)
+		}
+		for _, e := range []domain.Event{series, single} {
+			// The format internal/events.ReminderSourceRef writes.
+			if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+				UserID: u.ID, Kind: domain.KindReminder,
+				SourceRef: fmt.Sprintf("reminder:%d:2026-08-04:1", e.ID),
+				Payload:   `{"title":"` + title + `"}`, DueAt: baseTime.Add(time.Hour),
+			}); err != nil {
+				t.Fatalf("enqueue for %s: %v", cal.Name, err)
+			}
+		}
+		return series, single
+	}
+	doomedSeries, _ := seed(doomed, "Piscine")
+	seed(kept, "Réunion")
+
+	// A row that was already delivered is history, not pending work, and must survive.
+	sent := domain.QueuedNotification{
+		UserID: u.ID, Kind: domain.KindReminder,
+		SourceRef: fmt.Sprintf("reminder:%d:2026-07-28:1", doomedSeries.ID),
+		Payload:   `{"title":"Piscine"}`, DueAt: baseTime.Add(-time.Hour),
+	}
+	if err := s.EnqueueNotification(ctx(), sent); err != nil {
+		t.Fatalf("enqueue the delivered row: %v", err)
+	}
+	if err := s.MarkSent(ctx(), queuedIDBySourceRef(t, s, sent.SourceRef), baseTime); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	if _, err := s.RecurrenceByID(ctx(), *doomedSeries.RecurrenceID); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("the recurrence outlived its calendar: %v", err)
+	}
+	if n := countRows(t, s, "recurrences"); n != 1 {
+		t.Errorf("%d recurrences left; want only the surviving calendar's", n)
+	}
+	// The reminders hang off the recurrence and the event, so both cascades have to
+	// have fired: two rows are the kept calendar's.
+	if n := countRows(t, s, "reminders"); n != 2 {
+		t.Errorf("%d reminders left; want only the surviving calendar's two", n)
+	}
+	if all, _ := s.ListAllReminders(ctx()); len(all) != 2 {
+		t.Errorf("the planner still walks %d reminders", len(all))
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(48*time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Errorf("%d notifications still queued; want only the surviving calendar's two", len(pending))
+	}
+	for _, p := range pending {
+		if strings.Contains(p.Payload, "Piscine") {
+			t.Errorf("a notification for the deleted calendar is still queued: %+v", p)
+		}
+	}
+	if n := countRows(t, s, "notification_queue"); n != 3 {
+		t.Errorf("%d queue rows left; want two pending plus the delivered one", n)
+	}
+}
+
+// queuedIDBySourceRef finds a queued row the way no store method does, because
+// EnqueueNotification deliberately reports nothing about what it inserted.
+func queuedIDBySourceRef(t *testing.T, s *Store, ref string) int64 {
+	t.Helper()
+	var id int64
+	if err := s.DB().QueryRow(`SELECT id FROM notification_queue WHERE source_ref = ?`, ref).Scan(&id); err != nil {
+		t.Fatalf("find queued row %q: %v", ref, err)
+	}
+	return id
+}
+
+// TestRemovingAMemberTakesTheirRowsWithThem: event_participants and reminders are keyed
+// on users rather than on membership, so deleting the membership row alone leaves an
+// ex-member attached to other people's events and their reminders waiting to fire again
+// the moment somebody re-invites them.
+func TestRemovingAMemberTakesTheirRowsWithThem(t *testing.T) {
+	s, _, _ := newStore(t)
+	creator := mustUser(t, s, "claire@example.test", "Claire")
+	leaver := mustUser(t, s, "marc@example.test", "Marc")
+	shared := mustCalendar(t, s, creator.ID, "Maison")
+	elsewhere := mustCalendar(t, s, leaver.ID, "Travail")
+	if err := s.AddMember(ctx(), shared.ID, leaver.ID); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: shared.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: firstLabel(t, s, shared.ID).ID, CreatedBy: creator.ID,
+	}, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		DTStart: domain.MustParseDate("2026-08-04"),
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	own, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: elsewhere.ID, Title: "Réunion", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: firstLabel(t, s, elsewhere.ID).ID, CreatedBy: leaver.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent elsewhere: %v", err)
+	}
+	if err := s.SetParticipants(ctx(), series.ID, []int64{creator.ID, leaver.ID}); err != nil {
+		t.Fatalf("SetParticipants: %v", err)
+	}
+	if err := s.SetParticipants(ctx(), own.ID, []int64{leaver.ID}); err != nil {
+		t.Fatalf("SetParticipants elsewhere: %v", err)
+	}
+
+	thirty := 30
+	rs := []domain.Reminder{{OffsetMinutes: &thirty}}
+	// One of each shape the leaver can own: on the event, on the pattern behind it,
+	// and one in a calendar they are staying in.
+	if err := s.ReplaceReminders(ctx(), &series.ID, nil, leaver.ID, rs); err != nil {
+		t.Fatalf("reminder on the event: %v", err)
+	}
+	if err := s.ReplaceReminders(ctx(), nil, series.RecurrenceID, leaver.ID, rs); err != nil {
+		t.Fatalf("reminder on the series: %v", err)
+	}
+	if err := s.ReplaceReminders(ctx(), &own.ID, nil, leaver.ID, rs); err != nil {
+		t.Fatalf("reminder elsewhere: %v", err)
+	}
+	if err := s.ReplaceReminders(ctx(), &series.ID, nil, creator.ID, rs); err != nil {
+		t.Fatalf("the creator's reminder: %v", err)
+	}
+
+	if err := s.RemoveMember(ctx(), shared.ID, leaver.ID); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+
+	parts, err := s.ListParticipants(ctx(), series.ID)
+	if err != nil {
+		t.Fatalf("ListParticipants: %v", err)
+	}
+	if len(parts) != 1 || parts[0] != creator.ID {
+		t.Errorf("participants = %v; the ex-member is still on the event", parts)
+	}
+	for _, scope := range []struct {
+		name         string
+		eventID      *int64
+		recurrenceID *int64
+	}{
+		{"event", &series.ID, nil},
+		{"series", nil, series.RecurrenceID},
+	} {
+		if got, _ := s.ListReminders(ctx(), scope.eventID, scope.recurrenceID, leaver.ID); len(got) != 0 {
+			t.Errorf("the ex-member kept %d reminders on the %s", len(got), scope.name)
+		}
+	}
+	if got, _ := s.ListReminders(ctx(), &series.ID, nil, creator.ID); len(got) != 1 {
+		t.Errorf("the creator's reminder = %+v; removing somebody else must not touch it", got)
+	}
+	if got, _ := s.ListParticipants(ctx(), own.ID); len(got) != 1 || got[0] != leaver.ID {
+		t.Errorf("participants elsewhere = %v; only the shared calendar was left", got)
+	}
+	if got, _ := s.ListReminders(ctx(), &own.ID, nil, leaver.ID); len(got) != 1 {
+		t.Errorf("the ex-member's reminders elsewhere = %+v; want the one they still own", got)
+	}
+
+	// The one that matters: being invited back must not resurrect anything.
+	if err := s.AddMember(ctx(), shared.ID, leaver.ID); err != nil {
+		t.Fatalf("AddMember on the way back in: %v", err)
+	}
+	if got, _ := s.ListReminders(ctx(), &series.ID, nil, leaver.ID); len(got) != 0 {
+		t.Errorf("re-inviting resurrected %d reminders on the event", len(got))
+	}
+	if got, _ := s.ListReminders(ctx(), nil, series.RecurrenceID, leaver.ID); len(got) != 0 {
+		t.Errorf("re-inviting resurrected %d reminders on the series", len(got))
+	}
+	if got, _ := s.ListParticipants(ctx(), series.ID); len(got) != 1 {
+		t.Errorf("re-inviting put the ex-member back on the event: %v", got)
+	}
+
+	// Removing somebody who is not there is still an error, and still changes nothing.
+	stranger := mustUser(t, s, "stranger@example.test", "Stranger")
+	if err := s.RemoveMember(ctx(), shared.ID, stranger.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("removing a non-member = %v; want domain.ErrNotFound", err)
+	}
+}
+
 func TestInviteExpiryAndRevocation(t *testing.T) {
 	s, _, _ := newStore(t)
 	u := mustUser(t, s, "claire@example.test", "Claire")
