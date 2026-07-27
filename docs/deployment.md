@@ -5,6 +5,11 @@ deliberately ships **no** deployment code — no roles, no playbooks, no unit fi
 the deployment belongs to whoever runs the server. What it does ship is an application that
 can be configured entirely from one file, plus this contract describing what it expects.
 
+> Looking for step-by-step instructions rather than a contract? **[install.md](install.md)**
+> is a worked example that satisfies everything on this page — unit files, proxy
+> configuration, mail, backups — written to be copied and adapted. This document is what to
+> read when your setup differs from it, or when you want to know why a step exists.
+
 The complete list of settings is [`almanack.conf.example`](../almanack.conf.example), which is
 in systemd `EnvironmentFile` format so the same templated file works as `EnvironmentFile=` in
 a unit or as `almanack --config <path>`.

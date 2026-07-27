@@ -5,7 +5,7 @@ TimeTree has no export feature. This talks to the same private web API the
 TimeTree web app uses, and writes what it returns to disk unmodified: no
 conversion, no field mapping, no interpretation. The point is to get the data
 out once, completely, while the account still exists. Turning it into Almanack
-rows is a separate job (docs/timetree-migration.md) that reads these files.
+rows is a separate job (docs/migrating-from-timetree.md) that reads these files.
 
 Standard library only, so there is nothing to install and nothing to rot.
 

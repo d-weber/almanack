@@ -6,7 +6,20 @@ Notable changes to this project. The format follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **[docs/install.md](docs/install.md)** — a worked install, from downloading a binary to a
+  checklist that tells you it is working. A five-minute local trial that needs no domain and
+  no TLS, then a server install with systemd units, Caddy and nginx configuration, mail
+  relaying, backup timers and failure alerting, plus a section for people with no public
+  domain name. Every command in it was run; the unit files pass `systemd-analyze verify`.
+- **[docs/RESTORE.md](docs/RESTORE.md)** — the restore runbook `docs/development.md` had been
+  pointing at for some time without it existing.
+
+### Fixed
+
+- `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
+  under that name.
 
 ## [0.2.0] — 2026-07-27
 

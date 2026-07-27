@@ -15,8 +15,13 @@ One static Go binary. One SQLite file. A hand-written PWA with no build step.
 make seed && make dev          # http://localhost:8080 — mum@example.org / password
 ```
 
-That is the entire setup. [Go 1.25+](https://go.dev/dl/) is the only prerequisite —
-no npm, no Docker, no database server, no API keys.
+That is the entire setup for a look at it. [Go 1.25+](https://go.dev/dl/) is the only
+prerequisite — no npm, no Docker, no database server, no API keys. No Go either? Download a
+binary from [the latest release](https://github.com/d-weber/almanack/releases/latest) and
+follow [docs/install.md](docs/install.md), which starts with a five-minute local trial.
+
+To run it properly, for people who are not you, go straight to
+**[docs/install.md](docs/install.md)**.
 
 ## What you get
 
@@ -66,27 +71,41 @@ Those are deliberate omissions rather than a roadmap — see the architecture do
 
 ## Running it for real
 
+**[docs/install.md](docs/install.md) walks the whole thing**, from downloading a binary to
+the checklist that tells you it is actually working. The short version:
+
 ```sh
-make build                                        # a single static binary, ~13 MB
-./almanack gen-vapid                                # push keys: once per deployment, never rotated
-cp almanack.conf.example /etc/almanack/almanack.conf    # every setting lives in this one file
-./almanack --config /etc/almanack/almanack.conf bootstrap --email you@example.org --name "Your name"
-./almanack --config /etc/almanack/almanack.conf serve
+# Download a binary for your machine — no Go toolchain needed.
+VERSION=v0.2.0
+curl -LO "https://github.com/d-weber/almanack/releases/download/$VERSION/almanack-$VERSION-linux-amd64"
+curl -LO "https://github.com/d-weber/almanack/releases/download/$VERSION/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+
+almanack gen-vapid                                        # push keys: once ever, never rotated
+cp almanack.conf.example /etc/almanack/almanack.conf      # every setting lives in this one file
+almanack --config /etc/almanack/almanack.conf bootstrap --email you@example.org --name "Your name"
+almanack --config /etc/almanack/almanack.conf serve
 ```
+
+Releases cover linux amd64, arm64 and armv7, and macOS on both architectures. `make build`
+still builds it yourself if you would rather.
 
 You supply a reverse proxy with TLS (HTTPS is not optional — Web Push and PWA install
 both refuse an insecure origin) and a local mail relay. The binary handles migrations,
 readiness signalling, a watchdog and verified backups.
 
-[docs/deployment.md](docs/deployment.md) is the contract: what the binary provides, and
-what your deployment must provide. There is deliberately **no** Ansible role or Compose
-file here — the config file is in systemd `EnvironmentFile` format so it drops straight
-into whatever you already use.
+There is deliberately **no** Ansible role or Compose file here — the config file is in
+systemd `EnvironmentFile` format so it drops straight into whatever you already use, and
+install.md gives you unit files to copy rather than a system to adopt.
+[docs/deployment.md](docs/deployment.md) is the underlying contract: what the binary
+provides, and what your deployment must provide.
 
 ## Documentation
 
 | Document | What it covers |
 |---|---|
+| [docs/install.md](docs/install.md) | **Start here to run it.** Trying it locally in five minutes, then a worked server install with unit files, proxy config and a verification checklist |
+| [docs/RESTORE.md](docs/RESTORE.md) | Getting the calendar back from a snapshot, and rehearsing that before you need it |
 | [docs/development.md](docs/development.md) | Running and testing locally, including notifications with no push service and no mail server |
 | [docs/architecture.md](docs/architecture.md) | How it is built and why, the data model, and the rules that keep dates correct |
 | [docs/api.md](docs/api.md) | The HTTP API, normative for both the server and the browser |
