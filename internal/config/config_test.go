@@ -618,10 +618,13 @@ func TestNonLoopbackListenWarnsRatherThanRefusing(t *testing.T) {
 		})
 	}
 
-	// Development binds every interface on purpose — it is how the app is opened
-	// from a phone on the same wifi — and a warning that fires every `make dev`
-	// is a warning nobody reads when it matters.
-	t.Run("silent in dev", func(t *testing.T) {
+	// Dev mode used to be exempt from this warning, on the grounds that binding every
+	// interface is how the app is opened from a phone on the same wifi. That silenced
+	// it in the one configuration where the stakes are highest: dev mode serves
+	// /dev/login/{id}, which signs in as any account with no password, and the comment
+	// justifying that says dev mode binds to localhost — which nothing checked. It is
+	// still a warning rather than a refusal, because the phone is a real use.
+	t.Run("dev is warned loudest of all", func(t *testing.T) {
 		cfg, err := loadConf(t,
 			"ALMANACK_DEV=true",
 			"ALMANACK_DATA=/tmp/dev.db",
@@ -629,12 +632,47 @@ func TestNonLoopbackListenWarnsRatherThanRefusing(t *testing.T) {
 			"ALMANACK_LISTEN=0.0.0.0:8080",
 		)
 		if err != nil {
+			t.Fatalf("a non-loopback bind in dev was refused rather than warned about: %v", err)
+		}
+		warnings := strings.Join(cfg.Warnings, "\n")
+		if !strings.Contains(warnings, "/dev/login") {
+			t.Errorf("dev mode did not name the endpoint that makes this dangerous; warnings were %q", warnings)
+		}
+	})
+
+	t.Run("dev on loopback is still quiet", func(t *testing.T) {
+		cfg, err := loadConf(t,
+			"ALMANACK_DEV=true",
+			"ALMANACK_DATA=/tmp/dev.db",
+			"ALMANACK_BASE_URL=http://localhost:8080",
+			"ALMANACK_LISTEN=127.0.0.1:8080",
+		)
+		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
 		if len(cfg.Warnings) != 0 {
-			t.Errorf("dev mode warned about its own listen address: %q", cfg.Warnings)
+			t.Errorf("make dev warned about a loopback bind: %q", cfg.Warnings)
 		}
 	})
+}
+
+// TestEnvironmentValuesAreTrimmedLikeFileOnes pins that a setting means the same thing
+// whichever way it arrives. systemd's Environment= keeps the spacing it was written
+// with, and an untrimmed ALMANACK_LISTEN warned that a loopback address was not one and
+// then failed to bind it.
+func TestEnvironmentValuesAreTrimmedLikeFileOnes(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", " 127.0.0.1:8080 ")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenAddr != "127.0.0.1:8080" {
+		t.Errorf("Listen = %q; want it trimmed", cfg.ListenAddr)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("a loopback bind with stray spaces warned: %q", cfg.Warnings)
+	}
 }
 
 // ---------------------------------------------------------------------------

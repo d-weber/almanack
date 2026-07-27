@@ -544,7 +544,12 @@ Notable changes to this project. The format follows
   holiday colour, the log format and the dev mail directory were all missing, so a household
   could not see the retention policy that was deleting their snapshots at the moment they
   went looking for it. A test now cross-checks that list against the settings the parser
-  accepts, so it cannot fall behind again.
+  accepts, so it cannot fall behind again. Development mode gets the loudest version of the
+  bind warning rather than being exempt from it, which is how it started out: `make dev`
+  serves `/dev/login/{id}`, which signs anyone in as any account without a password, and the
+  comment justifying that says dev mode binds to localhost — an assumption nothing was
+  checking. It stays a warning, since opening the app from a phone on the same wifi is the
+  reason to bind wider in the first place.
   ([#33](https://github.com/d-weber/almanack/issues/33))
 - **An edited occurrence could be announced twice, and the reminder you took off it went
   off anyway.** Moving a single swimming lesson leaves a copy of the event behind, and the

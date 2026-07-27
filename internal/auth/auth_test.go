@@ -244,6 +244,13 @@ func TestVerifyPasswordRejectsMalformedHashes(t *testing.T) {
 		{"zero time cost", "$argon2id$v=19$m=65536,t=0,p=4" + body},
 		{"zero parallelism", "$argon2id$v=19$m=65536,t=3,p=0" + body},
 		{"empty tag", "$argon2id$v=19$m=65536,t=3,p=4$" + saltB64 + "$"},
+		// A fourth of the same kind, and the worst of them. argon2 allocates m KiB
+		// before it does anything, so this one asks for 4 TiB — and an allocation that
+		// large is a runtime fatal error rather than a panic, which no recover() can
+		// catch. The three above cost one account its logins; this one costs the whole
+		// household its server, on every attempt, until the row is repaired.
+		{"absurd memory cost", "$argon2id$v=19$m=4294967295,t=3,p=4" + body},
+		{"memory just over the ceiling", "$argon2id$v=19$m=1048577,t=3,p=4" + body},
 		{"salt is not base64", "$argon2id$v=19$m=65536,t=3,p=4$!!!!$" + keyB64},
 		// The salt and key are standard base64, not the URL alphabet: '-' and '_'
 		// are not the same bytes, and quietly accepting them would verify against
@@ -509,5 +516,15 @@ func TestHashToken(t *testing.T) {
 			t.Errorf("HashToken(%q) and HashToken(%q) both give %q", token, other, hash)
 		}
 		seen[hash] = token
+	}
+}
+
+// TestMemoryCeilingLeavesRoomForTheProfile guards the one way the m= bound could turn
+// into a bug of its own: a future profile raised past the ceiling would make every
+// password this application writes unverifiable, on a line nobody would think to check.
+func TestMemoryCeilingLeavesRoomForTheProfile(t *testing.T) {
+	if argonMemory > maxMemoryKiB {
+		t.Fatalf("argonMemory %d KiB is above maxMemoryKiB %d KiB, so VerifyPassword would "+
+			"refuse every hash HashPassword writes", argonMemory, maxMemoryKiB)
 	}
 }

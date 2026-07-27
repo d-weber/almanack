@@ -156,9 +156,14 @@ func Load(path string) (Config, error) {
 		}
 	}
 
+	// Environment values are trimmed the way ParseFile already trims the file's, so
+	// that the same setting means the same thing whichever way it arrives. systemd's
+	// Environment= keeps whatever spacing was written, and an ALMANACK_LISTEN with a
+	// leading space would otherwise be reported as "not a loopback address" — about
+	// an address that is one — and then fail to bind.
 	get := func(key, def string) string {
-		if v, ok := os.LookupEnv(key); ok && v != "" {
-			return v
+		if v, ok := os.LookupEnv(key); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
 		}
 		if v, ok := file[key]; ok && v != "" {
 			return v
@@ -574,12 +579,23 @@ func checkListen(addr string, dev bool) (problem, warning string) {
 			"ALMANACK_LISTEN=%q must end in a port number between 1 and 65535, such as 127.0.0.1:8080",
 			addr), ""
 	}
-	if dev || isLoopbackHost(host) {
+	if isLoopbackHost(host) {
 		return "", ""
 	}
 	where := addr
 	if host == "" {
 		where = addr + " (every interface)"
+	}
+	// Dev mode gets the louder version rather than being let off. It registers
+	// /dev/login/{id}, which hands out a session for any account with no password at
+	// all, and the comment justifying that says dev mode binds to localhost — an
+	// assumption nothing was checking. Exempting dev from this warning silenced it in
+	// the one configuration where it matters most. It stays a warning, because
+	// reaching a dev server from a phone on the same network is a real thing to want.
+	if dev {
+		return "", fmt.Sprintf(
+			"ALMANACK_LISTEN=%s is not a loopback address and ALMANACK_DEV is set: the /dev endpoints are reachable from that address, and /dev/login/{id} signs in as any account without a password. Anyone who can reach it owns the calendar. Bind 127.0.0.1 unless you meant this.",
+			where)
 	}
 	return "", fmt.Sprintf(
 		"ALMANACK_LISTEN=%s is not a loopback address, and this server speaks plain HTTP: anything that can reach that address can read the calendar unencrypted. That is right only if TLS is terminated in front of it.",
@@ -620,12 +636,24 @@ func looksLikeEmail(addr string) bool {
 	if at <= 0 || at == len(addr)-1 || strings.Count(addr, "@") != 1 {
 		return false
 	}
-	return !strings.ContainsAny(addr, " \t\r\n,;<>\"")
+	return !strings.ContainsAny(addr, ",;<>\"") && !hasControlOrSpace(addr)
+}
+
+// hasControlOrSpace reports whether s holds a C0 control character, a space or DEL.
+// The shape checks above are reaching for "nothing invisible in here", and naming the
+// handful of whitespace characters one thinks of first stops short of that: a NUL, a
+// vertical tab or a form feed would pass a list of " \t\r\n" and still be a value no
+// operator typed on purpose.
+func hasControlOrSpace(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f })
 }
 
 // isContactURI matches internal/webpush's rule exactly, case sensitivity included,
 // so that a subject this accepts cannot be refused a moment later by the sender.
 func isContactURI(s string) bool {
+	if hasControlOrSpace(s) {
+		return false
+	}
 	for _, scheme := range []string{"mailto:", "https://"} {
 		if strings.HasPrefix(s, scheme) && len(s) > len(scheme) {
 			return true

@@ -29,6 +29,12 @@ const (
 	argonSaltLen = 16
 )
 
+// maxMemoryKiB is the largest m= VerifyPassword will attempt from a stored hash: 1 GiB,
+// sixteen times the profile above. It exists to bound an allocation, not to express a
+// policy — see the note in VerifyPassword. Raising argonMemory past this is fine so long
+// as this rises too, which the test cross-checks.
+const maxMemoryKiB = 1024 * 1024
+
 // HashPassword returns a PHC-format argon2id string. The parameters travel inside the
 // hash, so raising them later leaves existing passwords verifiable.
 func HashPassword(plain string) (string, error) {
@@ -84,6 +90,16 @@ func VerifyPassword(encoded, plain string) (bool, error) {
 	}
 	if len(want) == 0 {
 		return false, fmt.Errorf("stored argon2 hash is empty")
+	}
+	// m is worse than the three above rather than milder. argon2 allocates m KiB up
+	// front, so a row claiming m=4294967295 asks for 4 TiB and the runtime answers
+	// with `fatal error: out of memory` — which, unlike a panic, no recover() can
+	// catch, including the one in the HTTP middleware. One corrupt row would take the
+	// whole process down on every login attempt rather than failing that one login.
+	// The ceiling is far above anything this application writes (Profile uses 64 MiB)
+	// and far below what a machine running a household calendar has.
+	if memory > maxMemoryKiB {
+		return false, fmt.Errorf("argon2 parameters %q are out of range: m must be at most %d KiB", parts[3], maxMemoryKiB)
 	}
 
 	got := argon2.IDKey([]byte(plain), salt, times, memory, threads, uint32(len(want)))
