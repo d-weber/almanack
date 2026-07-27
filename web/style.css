@@ -1718,6 +1718,45 @@ a { color: var(--accent); }
   font-weight: 700;
 }
 
+/* --------------------------------------------------------------- fatal */
+
+/* The one screen that stands in for the application rather than sitting inside it:
+   a timezone the browser cannot resolve leaves no calendar to draw (js/app.js). It
+   replaces #app, so it carries its own centring rather than inheriting the shell's,
+   and it stays legible before any of the theme classes have been applied. */
+
+.fatal {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-t) + 24px) var(--pad) 40px;
+}
+
+.fatal-card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  text-align: center;
+}
+
+.fatal-icon {
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  color: var(--danger);
+}
+
+.fatal-title { font-size: 20px; font-weight: 700; }
+.fatal-body { color: var(--text-dim); }
+.fatal-fix { color: var(--text-faint); font-size: 14px; }
+
 /* ------------------------------------------------------------ desktop */
 
 @media (min-width: 900px) {

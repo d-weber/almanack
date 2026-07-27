@@ -156,7 +156,11 @@ server on 2026b put `Europe/Chisinau` 2026-03-29 03:30 an hour apart, and put *e
 stopped changing its clocks. Nothing here can fix that from one side; what it means is that
 the guarantee is about the algorithm, and a household in a zone whose rules have just
 changed should expect an occurrence and a typed time to differ until the browser updates.
-France has not changed its rules since 1996.
+France has not changed its rules since 1996. The far end of the same disagreement is a zone
+the browser does not carry at all, which a recent addition can be — `America/Coyhaique`
+arrived in tzdata 2025a. There is then no conversion to compare, and the browser draws no
+calendar at all: it names the zone it cannot resolve and stops, rather than substituting
+one that works and moving every hour on the screen by an amount nothing there can reveal.
 
 ### Occurrences are never stored
 

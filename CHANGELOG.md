@@ -779,6 +779,27 @@ Notable changes to this project. The format follows
   already queued or already sent is disturbed.
   ([#65](https://github.com/d-weber/almanack/issues/65))
 
+- **A timezone the server was perfectly happy with could leave the browser unable to show
+  anything at all.** The two halves of this application read different copies of the timezone
+  database: `ALMANACK_TZ` is checked at startup against the one on the machine, and the browser
+  resolves the same name against whatever its own engine shipped with. A zone young enough to
+  be in one and not the other — `America/Coyhaique` was added to tzdata in 2025a — therefore
+  started the server without a murmur and then failed in every browser that had not caught up.
+  Every date this app puts on a screen is converted through that zone, so the first conversion
+  to run threw `Invalid time zone specified` and the application stopped there: signed out you
+  were given the login form, and typing the right password gave you the login form again, and
+  again, with nothing anywhere saying why. The browser now says which setting is wrong instead
+  of showing a calendar — the configured zone by name, the fact that this browser has never
+  heard of it, and the two things that fix it: update the browser, or choose a zone it knows.
+  A button reloads, because correcting the server is all it takes. It refuses rather than
+  falling back, and that is the decision in this change: substituting UTC, or the device's own
+  zone, would not show a smaller calendar but the same one with every hour moved, by an amount
+  nothing on the screen can reveal, in the one kind of application where a plausible wrong hour
+  is the whole of the damage. Reading "dentist, 16:30" and arriving four hours late is a worse
+  thing to do to a household than telling it the calendar cannot be drawn. The server is
+  unchanged and still accepts any zone its own database knows: it cannot see what the browsers
+  in the house support, and the browser can.
+  ([#58](https://github.com/d-weber/almanack/issues/58))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

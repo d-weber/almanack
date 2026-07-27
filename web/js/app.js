@@ -2,7 +2,9 @@
 //
 // Boot order matters: config first (it carries the family timezone, the app
 // version and the VAPID key), then the locale, then /me. Nothing renders before
-// the timezone is known — a screen drawn in the device zone would be wrong.
+// the timezone is known — a screen drawn in the device zone would be wrong — and
+// nothing renders at all when it is a zone this browser cannot resolve, which is
+// what refuseUnknownTimezone below is for.
 
 import { h, clear, mount } from './dom.js';
 import { icon } from './icons.js';
@@ -16,9 +18,10 @@ import {
 } from './state.js';
 import {
   todayISO, addDays, addMonths, startOfMonth, formatMonthTitle, formatDateShort,
+  unknownTimezone,
 } from './dates.js';
 import { normalizeHex, readableOn } from './colors.js';
-import { spinner, errorBox, banner } from './ui.js';
+import { spinner, errorBox, banner, button } from './ui.js';
 import { route, notFound, start, go, current, reload } from './router.js';
 import { confirmPush, needsIOSInstall } from './push.js';
 
@@ -553,6 +556,42 @@ function afterLogin() {
   if (needsIOSInstall() && !iosDismissed()) go('/ios-install');
 }
 
+/**
+ * The screen shown instead of the application when the browser does not know the
+ * configured timezone. It replaces the shell rather than filling the main area:
+ * there is no calendar behind it and no tab bar back into one.
+ *
+ * Falling back to a zone that does work was the other way and is worse than nothing
+ * here. Every hour this app shows is converted through the family timezone
+ * (CONVENTIONS §4), so a substitute does not remove some of the information — it
+ * changes all of it, by an amount nobody on the screen can see. UTC would put the
+ * dentist at the wrong hour and the last evening of a holiday on the wrong day; the
+ * device zone would be right most of the time and wrong for the trip that made
+ * somebody's laptop disagree, which is the version a household would believe. A
+ * banner over a plausible wrong calendar is a banner people stop reading. So the
+ * calendar is withheld, and the message says which setting to change: this is an
+ * operator's misconfiguration and the operator is in the same house.
+ *
+ * The message comes from the catalogue like every other string (CONVENTIONS §6).
+ * Whenever this screen can appear, the catalogue is there to render it: the zone
+ * arrives from /config, /locales/<lang>.json comes off the same server, and the
+ * service worker precaches both — a boot that could not reach either falls back to
+ * Europe/Paris, which every browser has known for decades. The name of the zone is
+ * the load-bearing part and it is not a translation.
+ */
+function refuseUnknownTimezone(tz) {
+  mount(root, h('div', { class: 'fatal' },
+    h('div', { class: 'fatal-card', role: 'alert' },
+      icon('warning', { class: 'fatal-icon' }),
+      h('h1', { class: 'fatal-title' }, t('error.timezone.title')),
+      h('p', { class: 'fatal-body' }, t('error.timezone.body', { tz })),
+      h('p', { class: 'fatal-fix' }, t('error.timezone.fix')),
+      // Reloading is the whole recovery: /config is read again on every boot, so the
+      // family gets their calendar back the moment the server is corrected, without
+      // anybody having to explain what a hard refresh is.
+      button(t('action.retry'), { variant: 'quiet', onclick: () => location.reload() }))));
+}
+
 async function boot() {
   // Invite and password-reset links were once emitted without the "#/", and some are
   // already in inboxes. Translate them rather than dropping their holder on the login
@@ -575,6 +614,17 @@ async function boot() {
   } catch (_) { /* offline first-run: fall back to defaults and the cached shell */ }
 
   await loadLang(pickLang(rememberedLang())).catch(() => { /* keys render as keys */ });
+
+  // After the catalogue, so the refusal can be read, and before /me, because reading
+  // it sets the cursor to today and there is no today in a zone that does not resolve.
+  // This is the only place that asks: a zone that fails here fails for the whole run,
+  // and adding a second check on some later screen would be machinery for a state that
+  // cannot arrive without another reload.
+  const badTz = unknownTimezone();
+  if (badTz) {
+    refuseUnknownTimezone(badTz);
+    return;
+  }
 
   try {
     await loadSession();
