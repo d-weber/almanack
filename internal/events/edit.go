@@ -314,11 +314,12 @@ func (s *Service) updateOccurrence(ctx context.Context, actor int64, template do
 		if err := s.st.SetOverride(ctx, rec.ID, occDate, &created.ID); err != nil {
 			return domain.Event{}, fmt.Errorf("record override for %s: %w", occDate, err)
 		}
-		// The copy takes a copy of everyone's reminders and is from then on the only
-		// thing that says when this occurrence is announced — see copyRemindersToEvent.
-		if err := s.copyRemindersToEvent(ctx, rec.ID, created.ID); err != nil {
-			return domain.Event{}, err
-		}
+		// No reminders are written here, deliberately. The copy inherits the series'
+		// until somebody changes them on this occurrence (docs/architecture.md), so
+		// moving a lesson changes when everybody is reminded about it and nothing else.
+		// Copying them onto the copy instead was tried, and it silently dropped every
+		// reminder the series gained afterwards — the copy was written once and never
+		// heard from the series again.
 		s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
 		s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
 		return created, nil
@@ -405,22 +406,26 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 		if err := s.st.RepointOverrides(ctx, rec.ID, newRecID, splitDate); err != nil {
 			return domain.Event{}, fmt.Errorf("move overrides to the split series: %w", err)
 		}
-		// An override only survives if the new pattern still produces its date. When the
-		// pattern moved — Tuesdays to Wednesdays — the ones it no longer produces would
-		// otherwise become rows nothing can reach: invisible to the series (which does
-		// not generate that date) and hidden from the plain-event query (which excludes
-		// anything an override points at). Detaching them turns each back into an
-		// ordinary event the family can still see and deal with.
-		if err := s.detachUnreachableOverrides(ctx, newRecID, newRec); err != nil {
-			return domain.Event{}, err
-		}
 
-		// 4. Carry everyone's reminders across, or the second half goes quiet.
+		// 4. Carry everyone's reminders across, or the second half goes quiet. This
+		// comes before the detaching below, which hands an occurrence leaving the
+		// series the reminders it was inheriting — from the new series, since that is
+		// the one it is leaving.
 		if err := s.copyReminders(ctx, rec.ID, newRecID); err != nil {
 			return domain.Event{}, err
 		}
 
-		// 5. Both halves changed shape; let the planner rebuild their notifications.
+		// 5. An override only survives if the new pattern still produces its date. When
+		// the pattern moved — Tuesdays to Wednesdays — the ones it no longer produces
+		// would otherwise become rows nothing can reach: invisible to the series (which
+		// does not generate that date) and hidden from the plain-event query (which
+		// excludes anything an override points at). Detaching them turns each back into
+		// an ordinary event the family can still see and deal with.
+		if err := s.detachUnreachableOverrides(ctx, newRecID, newRec); err != nil {
+			return domain.Event{}, err
+		}
+
+		// 6. Both halves changed shape; let the planner rebuild their notifications.
 		s.pruneQueued(ctx, EventSourcePrefix(template.ID))
 		s.pruneQueued(ctx, EventSourcePrefix(created.ID))
 
@@ -473,6 +478,13 @@ func reanchor(r domain.Recurrence, from, to domain.Date) domain.Recurrence {
 
 // detachUnreachableOverrides removes override rows whose date the pattern no longer
 // produces, leaving any edited copy as a standalone event rather than an orphan.
+//
+// A copy leaving its series takes the reminders it was inheriting with it. Up to this
+// point it had none of its own — an edited occurrence inherits the series' until
+// somebody changes them on it — and an ordinary event with no reminders of its own is
+// announced by nothing at all, so without this the family would simply stop being told
+// about the one occurrence a re-patterned split stranded. Members who had already set
+// their own reminders on that occurrence keep exactly those.
 func (s *Service) detachUnreachableOverrides(ctx context.Context, recurrenceID int64, rec domain.Recurrence) error {
 	overrides, err := s.st.Overrides(ctx, recurrenceID)
 	if err != nil {
@@ -481,6 +493,11 @@ func (s *Service) detachUnreachableOverrides(ctx context.Context, recurrenceID i
 	for date, ov := range overrides {
 		if recur.Occurs(rec, date) {
 			continue
+		}
+		if ov != nil {
+			if err := s.keepInheritedReminders(ctx, recurrenceID, *ov); err != nil {
+				return err
+			}
 		}
 		if err := s.st.DeleteOverride(ctx, recurrenceID, date); err != nil {
 			return fmt.Errorf("detach override %s: %w", date, err)
@@ -493,24 +510,18 @@ func (s *Service) detachUnreachableOverrides(ctx context.Context, recurrenceID i
 	return nil
 }
 
-// copyRemindersToEvent gives a freshly created override copy its own copy of every
-// member's series reminders.
+// keepInheritedReminders writes onto an override copy the series reminders it has been
+// inheriting, for every member who has not set their own on it — which is what has to
+// happen just before the copy stops being an occurrence of that series and inheritance
+// stops applying to it.
 //
-// This is the writing half of one rule: an edited occurrence *owns* its reminders. The
-// alternative — inheriting the series' until the copy sets its own — is what the planner
-// used to do, and it cannot be made truthful. The editor lists the copy's reminders and
-// a PUT of that list writes to the copy, so under inheritance a member who took the
-// reminder off one lesson was shown an empty list and reminded anyway, and one who left
-// it alone was reminded twice: once from the copy the editor had just written, once from
-// the series. Copying once and detaching answers both, and it is the only answer that
-// lets "no reminder, just for this one" mean anything.
-//
-// Everyone's reminders are copied and not only the editor's, because a reminder is
-// personal: Papa moving Tuesday's lesson must not take Maman's reminder off it.
-func (s *Service) copyRemindersToEvent(ctx context.Context, fromRec, toEvent int64) error {
+// Everyone's are written and not only the editor's, because a reminder is personal:
+// re-patterning the series must not take Maman's reminder off the lesson she still
+// expects to be told about.
+func (s *Service) keepInheritedReminders(ctx context.Context, fromRec, toEvent int64) error {
 	all, err := s.st.ListAllReminders(ctx)
 	if err != nil {
-		return fmt.Errorf("load reminders for the edited occurrence: %w", err)
+		return fmt.Errorf("load the reminders a detached occurrence inherits: %w", err)
 	}
 	byUser := map[int64][]domain.Reminder{}
 	for _, r := range all {
@@ -519,8 +530,18 @@ func (s *Service) copyRemindersToEvent(ctx context.Context, fromRec, toEvent int
 		}
 	}
 	for userID, rs := range byUser {
+		// "Has set their own on it" includes having cleared them there, which is why
+		// this asks the store rather than counting rows: an empty list somebody chose
+		// must not be refilled from the series on the way out of it.
+		own, err := s.st.RemindersDetached(ctx, toEvent, userID)
+		if err != nil {
+			return err
+		}
+		if own {
+			continue
+		}
 		if err := s.st.ReplaceReminders(ctx, &toEvent, nil, userID, rs); err != nil {
-			return fmt.Errorf("copy reminders onto the edited occurrence for user %d: %w", userID, err)
+			return fmt.Errorf("keep the reminders of the detached occurrence for user %d: %w", userID, err)
 		}
 	}
 	return nil

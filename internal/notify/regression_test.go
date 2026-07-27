@@ -218,12 +218,12 @@ func TestActivityCursorSurvivesAReusedID(t *testing.T) {
 	}
 }
 
-// editOneOccurrence is the sequence the app performs when somebody moves a single
-// lesson: the occurrence is edited, which leaves a standalone copy of the event
-// behind, and the caller's reminder list is then filed against the id the edit
-// answered with — the copy's. Both tests below start from it.
-func editOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.Event,
-	userID int64, occDate domain.Date, newStart time.Time, reminders []domain.Reminder) domain.Event {
+// moveOneOccurrence moves a single lesson and touches nobody's reminders, which is
+// what the app does when the reminder section of the editor was not changed: the
+// occurrence is edited, leaving a standalone copy of the event behind, and no reminder
+// list is saved against it.
+func moveOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.Event,
+	userID int64, occDate domain.Date, newStart time.Time) domain.Event {
 	t.Helper()
 	copyEvent, err := e.ev.Update(e.ctx, userID, series.ID, domain.ScopeThis, occDate, events.Input{
 		CalendarID: cal.ID, Title: series.Title,
@@ -236,8 +236,26 @@ func editOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.
 	if copyEvent.ID == series.ID {
 		t.Fatalf("editing one occurrence answered with the series template itself")
 	}
+	return copyEvent
+}
+
+// editOneOccurrence is the sequence the app performs when somebody moves a single
+// lesson *and* changes its reminders: the reminder list is filed against the id the
+// edit answered with — the copy's — which is what says "these, for this one occasion".
+func editOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.Event,
+	userID int64, occDate domain.Date, newStart time.Time, reminders []domain.Reminder) domain.Event {
+	t.Helper()
+	copyEvent := moveOneOccurrence(t, e, cal, series, userID, occDate, newStart)
 	e.setReminders(copyEvent, userID, reminders)
 	return copyEvent
+}
+
+// piscine is the series the reminder tests are about: swimming at 17:00 every Tuesday
+// from 1 June 2027.
+func piscine(e *env, cal domain.Calendar, userID int64) domain.Event {
+	return e.timedEvent(cal, userID, "Piscine", 2027, time.June, 1, 17, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
 }
 
 // An edited occurrence used to be reminded twice. The copy left behind by the edit
@@ -306,6 +324,170 @@ func TestRemovingTheReminderFromOneOccurrenceStopsIt(t *testing.T) {
 	if got := len(e.push.received()); got != 1 {
 		t.Errorf("%d pushes for the untouched occurrence a week later, want 1: removing a reminder"+
 			" from one lesson must not remove it from the series", got)
+	}
+}
+
+// An occurrence somebody had edited used to stop hearing about anything the series
+// learned afterwards. The copy left behind by the edit took a copy of the reminders as
+// they stood at that moment, and the planner read nothing else for that date — so a
+// reminder added to the series later reached every lesson except the one that had been
+// moved, permanently, with nothing on screen to say so. This is the first of the two
+// ways a family runs into that, and the reason an occurrence inherits its series'
+// reminders until somebody changes them on the occurrence itself.
+func TestASeriesReminderAddedAfterAnEditReachesTheEditedOccurrence(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	e.subscribe(alice.ID, "iphone")
+	e.noDigests()
+
+	series := piscine(e, cal, alice.ID)
+
+	// Tuesday's lesson is moved to the evening. Nobody has any reminders yet, so
+	// there is no reminder list to save with the edit.
+	moved := date(2027, 6, 8)
+	moveOneOccurrence(t, e, cal, series, alice.ID, moved, time.Date(2027, 6, 8, 18, 0, 0, 0, paris))
+
+	// Only afterwards does she ask to be reminded about swimming.
+	e.reminderMinutes(series, alice.ID, 30)
+
+	e.plan()
+	if got := rowsForOccurrence(e, series.ID, moved); len(got) != 1 {
+		t.Fatalf("%d reminders queued for the moved lesson, want 1: a reminder added to the series"+
+			" after an occurrence was edited must still reach that occurrence", len(got))
+	} else if w := wall(got[0].DueAt); w != "2027-06-08 17:30 CEST" {
+		t.Errorf("the moved lesson's reminder is at %s, want 2027-06-08 17:30 CEST"+
+			" (half an hour before where it was moved to)", w)
+	}
+
+	e.clk.Set(time.Date(2027, 6, 8, 17, 30, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes for the moved lesson, want 1", got)
+	}
+}
+
+// The second way, and the one nobody would ever suspect: the member is not the person
+// who made the edit and was not even here when it happened. Everything they do is
+// ordinary — join the calendar, ask to be reminded about swimming — and one lesson,
+// the one somebody moved before they arrived, silently never reminds them.
+func TestAMemberWhoJoinsAfterAnEditIsRemindedAboutTheEditedOccurrence(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	series := piscine(e, cal, alice.ID)
+
+	moved := date(2027, 6, 8)
+	moveOneOccurrence(t, e, cal, series, alice.ID, moved, time.Date(2027, 6, 8, 18, 0, 0, 0, paris))
+
+	// Bob arrives after the lesson was moved and sets his first reminder.
+	bob := e.user("bob")
+	e.join(cal.ID, bob.ID)
+	e.subscribe(bob.ID, "pixel")
+	e.noDigests()
+	e.reminderMinutes(series, bob.ID, 30)
+
+	e.plan()
+	rows := rowsForOccurrence(e, series.ID, moved)
+	if len(rows) != 1 || rows[0].UserID != bob.ID {
+		t.Fatalf("reminders queued for the moved lesson = %+v, want one for Bob (%d):"+
+			" a member who joins after an occurrence was edited must be reminded about it too",
+			rows, bob.ID)
+	}
+	if w := wall(rows[0].DueAt); w != "2027-06-08 17:30 CEST" {
+		t.Errorf("Bob's reminder for the moved lesson is at %s, want 2027-06-08 17:30 CEST", w)
+	}
+
+	e.clk.Set(time.Date(2027, 6, 8, 17, 30, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes for the moved lesson, want 1 (Bob's)", got)
+	}
+}
+
+// Setting a different reminder on one occurrence replaces the series' for that date
+// rather than adding to it — the same rule as removing one, said with a non-empty list.
+func TestAReminderSetOnOneOccurrenceReplacesTheSeriesOne(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	e.subscribe(alice.ID, "iphone")
+	e.noDigests()
+
+	series := piscine(e, cal, alice.ID)
+	e.reminderMinutes(series, alice.ID, 30)
+
+	// This one is across town, so she wants two hours' warning for it alone.
+	moved := date(2027, 6, 8)
+	editOneOccurrence(t, e, cal, series, alice.ID, moved,
+		time.Date(2027, 6, 8, 18, 0, 0, 0, paris),
+		[]domain.Reminder{{OffsetMinutes: ptrInt(120)}})
+
+	e.plan()
+	rows := rowsForOccurrence(e, series.ID, moved)
+	if len(rows) != 1 {
+		t.Fatalf("%d reminders queued for the edited occurrence, want 1: the reminder set on it"+
+			" replaces the series' for that date rather than joining it", len(rows))
+	}
+	if w := wall(rows[0].DueAt); w != "2027-06-08 16:00 CEST" {
+		t.Errorf("the edited occurrence's reminder is at %s, want 2027-06-08 16:00 CEST"+
+			" (two hours before, not the series' half hour)", w)
+	}
+
+	// And the series is untouched: next Tuesday is still half an hour before 17:00.
+	e.clk.Set(time.Date(2027, 6, 15, 6, 0, 0, 0, time.UTC))
+	e.plan()
+	next := rowsForOccurrence(e, series.ID, date(2027, 6, 15))
+	if len(next) != 1 {
+		t.Fatalf("%d reminders queued for next week's lesson, want 1", len(next))
+	}
+	if w := wall(next[0].DueAt); w != "2027-06-15 16:30 CEST" {
+		t.Errorf("next week's reminder is at %s, want 2027-06-15 16:30 CEST", w)
+	}
+}
+
+// Inheritance is per series, which is the sort of claim a query gets wrong in a way no
+// other test notices: with one series in the fixture, a lookup that answers "every
+// series reminder in the database" is indistinguishable from one that answers "this
+// occurrence's series". So there are two series here, deliberately on the same evening
+// and with different offsets, and the edited occurrence of one must inherit only its
+// own — a stray reminder from the other would show up as a second row, at 15:00.
+func TestASeriesRemindersDoNotReachAnotherSeriesEditedOccurrence(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 8, 6, 0, 0, 0, time.UTC))
+	alice := e.user("alice")
+	cal := e.calendar("Famille", alice.ID)
+	e.subscribe(alice.ID, "iphone")
+	e.noDigests()
+
+	swimming := piscine(e, cal, alice.ID)
+	e.reminderMinutes(swimming, alice.ID, 30)
+
+	judo := e.timedEvent(cal, alice.ID, "Judo", 2027, time.June, 1, 19, 0, time.Hour, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	e.reminderMinutes(judo, alice.ID, 180)
+
+	moved := date(2027, 6, 8)
+	moveOneOccurrence(t, e, cal, swimming, alice.ID, moved, time.Date(2027, 6, 8, 18, 0, 0, 0, paris))
+
+	e.plan()
+	rows := rowsForOccurrence(e, swimming.ID, moved)
+	if len(rows) != 1 {
+		t.Fatalf("%d reminders queued for the moved swimming lesson, want exactly 1:"+
+			" it inherits its own series' reminders and no other series'", len(rows))
+	}
+	if w := wall(rows[0].DueAt); w != "2027-06-08 17:30 CEST" {
+		t.Errorf("the moved lesson's reminder is at %s, want 2027-06-08 17:30 CEST"+
+			" (swimming's half hour, not judo's three)", w)
+	}
+
+	// Judo, which nobody edited, is unaffected in both directions.
+	judoRows := rowsForOccurrence(e, judo.ID, moved)
+	if len(judoRows) != 1 {
+		t.Fatalf("%d reminders queued for judo, want 1", len(judoRows))
+	}
+	if w := wall(judoRows[0].DueAt); w != "2027-06-08 16:00 CEST" {
+		t.Errorf("judo's reminder is at %s, want 2027-06-08 16:00 CEST", w)
 	}
 }
 

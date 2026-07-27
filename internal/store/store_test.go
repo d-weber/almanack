@@ -147,16 +147,12 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 }
 
-// TestOverrideReminderBackfill covers 0004, the one migration in this project that
-// writes rows rather than columns. It gives every occurrence somebody had already
-// edited its own copy of the series' reminders, because from this release on the
-// series' reminders no longer fire for a date that has an override — so without it the
-// one lesson a family had moved would quietly stop being announced.
-//
-// The store opens at head, so the migration has already run against an empty file. The
-// rows below are then written as an older binary would have left them and the migration
-// is replayed over them, which is the situation it exists for.
-func TestOverrideReminderBackfill(t *testing.T) {
+// TestReminderDetachmentIsRecordedWhereItIsMeant covers what 0004 creates: the record of
+// which members have set the reminders for an edited occurrence on the occurrence
+// itself. It is a record and not an inference because the list a member sets there may
+// be empty — "no reminder, just for this one" — and an empty list is otherwise
+// indistinguishable from never having said anything about it.
+func TestReminderDetachmentIsRecordedWhereItIsMeant(t *testing.T) {
 	s, _, _ := newStore(t)
 	dad := mustUser(t, s, "dad@example.test", "Dad")
 	mum := mustUser(t, s, "mum@example.test", "Mum")
@@ -185,66 +181,200 @@ func TestOverrideReminderBackfill(t *testing.T) {
 	if err := s.SetOverride(ctx(), recID, domain.MustParseDate("2026-08-11"), &copyEv.ID); err != nil {
 		t.Fatalf("SetOverride: %v", err)
 	}
+	plain, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the plain event: %v", err)
+	}
 
-	// Dad has two reminders on the series and none on the copy. Both must arrive:
-	// a check that could see the rows the statement is itself inserting would copy
-	// the first, decide he now has one, and drop the second.
+	detached := func(eventID, userID int64) bool {
+		t.Helper()
+		got, err := s.RemindersDetached(ctx(), eventID, userID)
+		if err != nil {
+			t.Fatalf("RemindersDetached(%d, %d): %v", eventID, userID, err)
+		}
+		return got
+	}
+
+	// Reminders on the series say nothing about any one occurrence.
 	if err := s.ReplaceReminders(ctx(), nil, &recID, dad.ID, []domain.Reminder{
-		{OffsetMinutes: ptrTo(30)}, {OffsetMinutes: ptrTo(1440)},
+		{OffsetMinutes: ptrTo(30)},
 	}); err != nil {
 		t.Fatalf("ReplaceReminders(series, Dad): %v", err)
 	}
-	// Mum already has one of her own on the copy — that is the list the editor showed
-	// her — so hers must be left exactly as it stands, series reminder or no.
-	if err := s.ReplaceReminders(ctx(), nil, &recID, mum.ID, []domain.Reminder{
-		{OffsetMinutes: ptrTo(60)},
-	}); err != nil {
-		t.Fatalf("ReplaceReminders(series, Mum): %v", err)
+	if detached(copyEv.ID, dad.ID) {
+		t.Error("setting a reminder on the series detached the edited occurrence from it")
 	}
+
+	// Dad clears his reminders on the moved lesson. There is nothing to see in the
+	// reminders table afterwards, which is exactly why the choice is recorded.
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, dad.ID, nil); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Dad): %v", err)
+	}
+	if !detached(copyEv.ID, dad.ID) {
+		t.Error("clearing the reminders on one occurrence was not recorded, so it would be" +
+			" read back as never having been said and the series' would fire anyway")
+	}
+	if left, err := s.ListReminders(ctx(), &copyEv.ID, nil, dad.ID); err != nil {
+		t.Fatalf("ListReminders(copy, Dad): %v", err)
+	} else if len(left) != 0 {
+		t.Errorf("clearing left %d rows behind", len(left))
+	}
+	if detached(copyEv.ID, mum.ID) {
+		t.Error("Dad's choice for this occurrence detached Mum as well; reminders are per person")
+	}
+	if series, err := s.ListReminders(ctx(), nil, &recID, dad.ID); err != nil {
+		t.Fatalf("ListReminders(series, Dad): %v", err)
+	} else if len(series) != 1 {
+		t.Errorf("the series has %d of Dad's reminders, want 1: the rest of the lessons are untouched", len(series))
+	}
+
+	// Mum sets one of her own there, which detaches her the same way.
 	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, mum.ID, []domain.Reminder{
 		{DaysBefore: ptrTo(1), AtTimeLocal: "09:00"},
 	}); err != nil {
 		t.Fatalf("ReplaceReminders(copy, Mum): %v", err)
 	}
+	if !detached(copyEv.ID, mum.ID) {
+		t.Error("setting a reminder on one occurrence was not recorded")
+	}
 
-	backfill := migrationSQL(t, 4)
-	for pass := 1; pass <= 2; pass++ {
-		if _, err := s.DB().Exec(backfill); err != nil {
-			t.Fatalf("run migration 0004, pass %d: %v", pass, err)
-		}
+	// A plain event is nobody's edited occurrence, so nothing is recorded about it.
+	if err := s.ReplaceReminders(ctx(), &plain.ID, nil, dad.ID, []domain.Reminder{
+		{OffsetMinutes: ptrTo(10)},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(plain, Dad): %v", err)
+	}
+	if n := countRows(t, s, "reminder_detachments"); n != 2 {
+		t.Errorf("reminder_detachments holds %d rows, want 2: an ordinary event's reminders"+
+			" are simply its own and have nothing to detach from", n)
+	}
 
-		dads, err := s.ListReminders(ctx(), &copyEv.ID, nil, dad.ID)
+	// Deleting the copy takes the record with it rather than leaving it pointing at
+	// nothing, which is what the foreign key is for.
+	if err := s.DeleteEvent(ctx(), copyEv.ID); err != nil {
+		t.Fatalf("DeleteEvent(copy): %v", err)
+	}
+	if n := countRows(t, s, "reminder_detachments"); n != 0 {
+		t.Errorf("%d detachment rows survived the event they are about", n)
+	}
+}
+
+// TestDetachmentReadsAgreeInBulkAndOneAtATime holds together the two ways the same
+// question is asked: the planner reads every pair in one query, the event detail view
+// asks about one. They are one predicate written twice, and the failure if they drift is
+// that the editor shows a list the planner will not use.
+func TestDetachmentReadsAgreeInBulkAndOneAtATime(t *testing.T) {
+	s, _, _ := newStore(t)
+	dad := mustUser(t, s, "dad@example.test", "Dad")
+	mum := mustUser(t, s, "mum@example.test", "Mum")
+	cal := mustCalendar(t, s, dad.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	moved := time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)
+	copyEv, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (plus tard)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the override: %v", err)
+	}
+	if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate("2026-08-11"), &copyEv.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	// Dad's is the shape a release before this table wrote: reminders sitting on the
+	// copy with nothing to say they were deliberate. They were — the editor wrote them
+	// there — so both reads must count them, or upgrading a calendar that has them
+	// would overrule somebody's choice with the series'.
+	if _, err := s.DB().Exec(
+		`INSERT INTO reminders (event_id, recurrence_id, user_id, offset_minutes) VALUES (?, NULL, ?, 15)`,
+		copyEv.ID, dad.ID); err != nil {
+		t.Fatalf("write a pre-0004 reminder on the copy: %v", err)
+	}
+	// Mum's is the shape this release writes: a cleared list, recorded.
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, mum.ID, nil); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Mum): %v", err)
+	}
+
+	bulk, err := s.ListReminderDetachments(ctx())
+	if err != nil {
+		t.Fatalf("ListReminderDetachments: %v", err)
+	}
+	inBulk := map[ReminderDetachment]bool{}
+	for _, d := range bulk {
+		inBulk[d] = true
+	}
+	for _, u := range []domain.User{dad, mum} {
+		one, err := s.RemindersDetached(ctx(), copyEv.ID, u.ID)
 		if err != nil {
-			t.Fatalf("ListReminders(copy, Dad): %v", err)
+			t.Fatalf("RemindersDetached(%s): %v", u.DisplayName, err)
 		}
-		var offsets []int
-		for _, r := range dads {
-			if r.OffsetMinutes == nil {
-				t.Fatalf("copied reminder %+v lost its shape", r)
-			}
-			offsets = append(offsets, *r.OffsetMinutes)
+		pair := ReminderDetachment{EventID: copyEv.ID, UserID: u.ID}
+		if !one || !inBulk[pair] {
+			t.Errorf("%s: RemindersDetached = %v, in ListReminderDetachments = %v; want both true",
+				u.DisplayName, one, inBulk[pair])
 		}
-		slices.Sort(offsets)
-		if !slices.Equal(offsets, []int{30, 1440}) {
-			t.Errorf("after pass %d Dad's reminders on the edited occurrence are %v, want [30 1440]", pass, offsets)
+	}
+	if len(bulk) != 2 {
+		t.Errorf("ListReminderDetachments returned %d pairs, want 2: %+v", len(bulk), bulk)
+	}
+	// And the series template is nobody's edited occurrence.
+	if one, err := s.RemindersDetached(ctx(), series.ID, dad.ID); err != nil || one {
+		t.Errorf("RemindersDetached(series) = %v, %v; want false", one, err)
+	}
+}
+
+// TestMigration0004AddsSchemaAndNothingElse is the property that makes 0004 safe to run
+// on a database a family has been using for a year, and it is worth stating separately
+// from the fixture: the fixture proves it for one household's rows, this proves there
+// are no rows it could go wrong on. A migration that only creates a table either
+// succeeds or does not run — it cannot half-write anybody's data, cannot trip over a row
+// somebody's older release left in an unexpected state, and leaves the previous binary
+// reading and writing every table it knows exactly as before.
+func TestMigration0004AddsSchemaAndNothingElse(t *testing.T) {
+	var code []string
+	for _, line := range strings.Split(migrationSQL(t, 4), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
 		}
-		if series, err := s.ListReminders(ctx(), nil, &recID, dad.ID); err != nil {
-			t.Fatalf("ListReminders(series, Dad): %v", err)
-		} else if len(series) != 2 {
-			t.Errorf("after pass %d the series has %d of Dad's reminders, want 2: the copy is a copy", pass, len(series))
+		code = append(code, line)
+	}
+	body := strings.ToUpper(strings.Join(code, " "))
+	// Every statement creates something. INSERT, UPDATE, DELETE, DROP and ALTER all
+	// fail this by not starting with CREATE; the two ways a CREATE can still write or
+	// destroy rows — a table defined AS SELECT, and a trigger — are named as well.
+	// (DELETE and UPDATE do appear inside the statement, in the foreign keys' ON
+	// DELETE CASCADE, which is why this looks at how statements begin.)
+	for _, stmt := range strings.Split(body, ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
 		}
-		mums, err := s.ListReminders(ctx(), &copyEv.ID, nil, mum.ID)
-		if err != nil {
-			t.Fatalf("ListReminders(copy, Mum): %v", err)
-		}
-		if len(mums) != 1 || mums[0].DaysBefore == nil || *mums[0].DaysBefore != 1 {
-			t.Errorf("after pass %d Mum's reminders on the edited occurrence are %+v, want only her own", pass, mums)
+		if !strings.HasPrefix(stmt, "CREATE ") || strings.Contains(stmt, "SELECT") ||
+			strings.Contains(stmt, "TRIGGER") {
+			t.Errorf("0004 runs %q. Writing rows in a migration is what this one exists"+
+				" *instead of*: a backfill onto every existing edited occurrence would mark"+
+				" each of them as having had its reminders set by hand, which is precisely"+
+				" the bug, applied to every household at once.", stmt)
 		}
 	}
 }
 
-// migrationSQL returns the body of one embedded migration, so that a test can replay it
-// over rows written the way an older release left them.
+// migrationSQL returns the body of one embedded migration, so that a test can read it or
+// replay it over rows written the way an older release left them.
 func migrationSQL(t *testing.T, version int) string {
 	t.Helper()
 	ms, err := loadMigrations()
@@ -508,12 +638,13 @@ type releaseFixture struct {
 var releaseFixtures = []releaseFixture{
 	{
 		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
-		// 0004 gives each occurrence somebody had already edited its own copy of the
-		// series' reminders, because from now on the series' no longer fire for it.
-		// This household has one such occurrence — the swimming lesson moved to the
-		// evening of 4 August — and Dad has a reminder on that series, so exactly one
-		// row is added and he goes on being reminded about the lesson he moved.
-		backfilled: map[string]int{"reminders": 1},
+		// Nothing: no migration between 0002 and head writes a row of this
+		// household's data. 0004 creates a table and 0005 rewrites a derived
+		// search column in place, neither of which changes a count. The swimming
+		// lesson this family moved to the evening of 4 August keeps being announced
+		// because the occurrence goes on inheriting the series' reminder, not
+		// because anything was copied onto it — see checkV020Family.
+		backfilled: nil,
 		check:      checkV020Family,
 	},
 }
@@ -916,9 +1047,10 @@ func checkV020Family(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatalf("ListAllReminders: %v", err)
 	}
-	// Three as written by 0.2.0, plus the one 0004 copied onto the moved lesson.
-	if len(all) != 4 {
-		t.Errorf("ListAllReminders returned %d, want 4", len(all))
+	// The three 0.2.0 wrote, and only those: no migration since has added, moved or
+	// rewritten a reminder.
+	if len(all) != 3 {
+		t.Errorf("ListAllReminders returned %d, want the 3 rows v0.2.0 wrote", len(all))
 	}
 	timed, err := s.ListReminders(ctx(), ptrTo(int64(dentistID)), nil, mumID)
 	if err != nil {
@@ -944,19 +1076,26 @@ func checkV020Family(t *testing.T, s *Store) {
 	if len(series) != 1 || series[0].OffsetMinutes == nil || *series[0].OffsetMinutes != 30 {
 		t.Errorf("Dad's swimming reminder = %+v; want one at 30 minutes before", series)
 	}
-	// The lesson Dad moved to the evening now carries its own copy of that reminder,
-	// put there by 0004. Without it the new rule — an edited occurrence is reminded by
-	// its own reminders and not by its series' — would have made this one lesson, and
-	// only this one, go quiet on a calendar that has been running for a year.
+	// The lesson Dad moved to the evening has no reminders of its own, before the
+	// upgrade or after it, and nobody has said anything about its reminders in
+	// particular — so it goes on being announced by the series' reminder above, which
+	// is what this household has been receiving all along. An upgrade that wrote a
+	// copy of that reminder onto the lesson would look the same today and go silent
+	// the moment Dad changed the series, which is why nothing is written here.
 	movedLesson, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, dadID)
 	if err != nil {
 		t.Fatalf("ListReminders(moved lesson): %v", err)
 	}
-	if len(movedLesson) != 1 || movedLesson[0].OffsetMinutes == nil || *movedLesson[0].OffsetMinutes != 30 {
-		t.Errorf("Dad's reminder for the moved lesson = %+v; want one at 30 minutes before", movedLesson)
+	if len(movedLesson) != 0 {
+		t.Errorf("Dad's reminders on the moved lesson = %+v; want none of its own", movedLesson)
 	}
-	// Mum has none on the series, so she gets none on the copy either: the backfill
-	// hands out what each member already had, not what somebody else had.
+	if detached, err := s.RemindersDetached(ctx(), movedSwimID, dadID); err != nil {
+		t.Fatalf("RemindersDetached(moved lesson, Dad): %v", err)
+	} else if detached {
+		t.Error("the upgrade decided Dad had set the reminders for the moved lesson himself;" +
+			" he never did, and reading it that way is how a household stops being reminded" +
+			" about one lesson for good")
+	}
 	if mums, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, mumID); err != nil {
 		t.Fatalf("ListReminders(moved lesson, Mum): %v", err)
 	} else if len(mums) != 0 {

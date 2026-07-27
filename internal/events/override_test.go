@@ -298,13 +298,16 @@ func TestDetachedOverrideCopyIsAnOrdinaryEventAgain(t *testing.T) {
 	}
 }
 
-// TestEditingAnOccurrenceCopiesTheSeriesReminders is the writing half of the rule that
-// an edited occurrence owns its reminders. The copy has to arrive carrying them, for
-// everybody and not only for whoever made the edit, because the planner stops firing the
-// series' reminders for a date that has an override — so a copy that arrived empty would
-// mean the one lesson the family moved is the one nobody is reminded about, and Papa
-// would lose his reminder because Maman moved the lesson.
-func TestEditingAnOccurrenceCopiesTheSeriesReminders(t *testing.T) {
+// TestEditingAnOccurrenceWritesNobodysReminders is the writing half of the rule that an
+// edited occurrence *inherits* its series' reminders until somebody changes them on that
+// occurrence. Moving a lesson must therefore leave every member's reminders exactly where
+// they were: on the series, where a later change to them still reaches this occurrence.
+//
+// Writing a copy of them onto the copy instead is what this replaces, and it looks
+// harmless until you notice what it makes "no rows on the copy" mean — both "cleared on
+// purpose" and "written before you set that reminder". A reminder added to the series
+// afterwards then never reaches the occurrence, and nobody is told.
+func TestEditingAnOccurrenceWritesNobodysReminders(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
@@ -330,22 +333,29 @@ func TestEditingAnOccurrenceCopiesTheSeriesReminders(t *testing.T) {
 		t.Fatalf("move one occurrence: %v", err)
 	}
 
-	mamans, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.maman)
-	if err != nil {
-		t.Fatalf("list Maman's reminders on the copy: %v", err)
-	}
-	if len(mamans) != 1 || mamans[0].OffsetMinutes == nil || *mamans[0].OffsetMinutes != 30 {
-		t.Errorf("Maman's reminders on the edited occurrence = %+v, want one at 30 minutes before", mamans)
-	}
-	papas, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.papa)
-	if err != nil {
-		t.Fatalf("list Papa's reminders on the copy: %v", err)
-	}
-	if len(papas) != 1 || papas[0].DaysBefore == nil || *papas[0].DaysBefore != 1 || papas[0].AtTimeLocal != "09:00" {
-		t.Errorf("Papa's reminders on the edited occurrence = %+v, want his own, unchanged", papas)
+	for _, who := range []struct {
+		name string
+		id   int64
+	}{{"Maman", f.maman}, {"Papa", f.papa}} {
+		own, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, who.id)
+		if err != nil {
+			t.Fatalf("list %s's reminders on the copy: %v", who.name, err)
+		}
+		if len(own) != 0 {
+			t.Errorf("%s has %d reminders on the edited occurrence, want none of her own:"+
+				" the occurrence inherits the series' until somebody changes them on it", who.name, len(own))
+		}
+		detached, err := f.st.RemindersDetached(ctx, copyEvent.ID, who.id)
+		if err != nil {
+			t.Fatalf("detachment for %s: %v", who.name, err)
+		}
+		if detached {
+			t.Errorf("%s counts as having set her own reminders on an occurrence somebody"+
+				" merely moved; nothing she did says that", who.name)
+		}
 	}
 
-	// The series keeps its reminders: every other Tuesday is unaffected.
+	// The series keeps everyone's, which is what the occurrence goes on reading.
 	rest, err := f.st.ListReminders(ctx, nil, series.RecurrenceID, f.maman)
 	if err != nil {
 		t.Fatalf("list Maman's reminders on the series: %v", err)
@@ -354,8 +364,22 @@ func TestEditingAnOccurrenceCopiesTheSeriesReminders(t *testing.T) {
 		t.Errorf("the series has %d of Maman's reminders after one occurrence was edited, want 1", len(rest))
 	}
 
-	// Re-editing the same occurrence must not copy them a second time: the copy is
-	// already the authority on that date, and the series' list may have moved on.
+	// Changing them on the occurrence is a deliberate act, and it detaches that member
+	// there and only there. Maman wants two hours' warning for this one lesson.
+	twoHours := 120
+	if err := f.st.ReplaceReminders(ctx, &copyEvent.ID, nil, f.maman,
+		[]domain.Reminder{{OffsetMinutes: &twoHours}}); err != nil {
+		t.Fatalf("set Maman's reminder on the occurrence: %v", err)
+	}
+	if detached, err := f.st.RemindersDetached(ctx, copyEvent.ID, f.maman); err != nil || !detached {
+		t.Errorf("after Maman saved a list on the occurrence, detached = %v, %v; want true", detached, err)
+	}
+	if detached, err := f.st.RemindersDetached(ctx, copyEvent.ID, f.papa); err != nil || detached {
+		t.Errorf("Maman's choice for this lesson detached Papa too: detached = %v, %v", detached, err)
+	}
+
+	// And a second edit of the same occurrence still writes nobody's reminders: it is
+	// an edit to the event, not to anyone's mind about being reminded.
 	if _, err := f.svc.Update(ctx, f.maman, copyEvent.ID, domain.ScopeThis, date, Input{
 		Title: "Piscine (re-déplacée)", StartsAt: f.at("2026-04-14", 20, 0), EndsAt: f.at("2026-04-14", 21, 0),
 		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
@@ -366,7 +390,12 @@ func TestEditingAnOccurrenceCopiesTheSeriesReminders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list Maman's reminders after the second edit: %v", err)
 	}
-	if len(again) != 1 {
-		t.Errorf("Maman has %d reminders on the occurrence after a second edit, want 1", len(again))
+	if len(again) != 1 || again[0].OffsetMinutes == nil || *again[0].OffsetMinutes != 120 {
+		t.Errorf("Maman's reminders on the occurrence after a second edit = %+v, want the two hours she set", again)
+	}
+	if papas, err := f.st.ListReminders(ctx, &copyEvent.ID, nil, f.papa); err != nil {
+		t.Fatalf("list Papa's reminders after the second edit: %v", err)
+	} else if len(papas) != 0 {
+		t.Errorf("Papa gained %d reminders on the occurrence from an edit he did not make", len(papas))
 	}
 }

@@ -176,20 +176,30 @@ to reconstruct it would be one release away from getting it wrong again. Not doi
 how "delete this occurrence" deleted the exception instead of the occurrence, and brought
 it back at its original time.
 
-**An edited occurrence owns its reminders.** Creating the copy copies every member's
-series reminders onto it — everyone's, not just the editor's, or Papa would lose his
-reminder because Maman moved the lesson — and from that moment the series' reminders no
-longer apply to that date. The copy is what the editor lists, what a
-`PUT /events/{id}/reminders` writes to, and what the planner reads. The alternative,
-inheriting the series' reminders until the copy sets its own, cannot be made truthful,
-because the reader and the writer both address the copy already: a member who took the
-reminder off one lesson was shown an empty list and reminded anyway, and one who left it
-alone was reminded twice — once from the copy the editor had just written, once from the
-series. Copying once and detaching is the only answer under which "no reminder, just for
-this one" means anything. It costs the other direction, since changing the series'
-reminders afterwards does not reach an occurrence somebody has already edited, and that is
-the rule the rest of an override already follows: a whole-series edit leaves edited
-occurrences alone rather than reverting somebody's work.
+**An edited occurrence inherits its series' reminders until somebody changes them on that
+occurrence.** For a date with an override the planner reads the copy's reminders if that
+member has set them there, and the series' if not — one list or the other, never both.
+Both is what announced a moved swimming lesson twice, from two rows the outbox could not
+tell apart. "Has set them there" is recorded, per (copy, member), when they save a
+reminder list against the copy, *including an empty one*: that is how "no reminder, just
+for this one" is expressed, and without somewhere to write it, removing a reminder from a
+single occurrence showed an empty list and went off anyway.
+
+The reason it is a record rather than "does the copy have any rows of its own" is the
+whole of this rule. Copying the series' reminders onto the copy when the copy is created
+— which is what an earlier attempt at #42 did — makes "no rows" mean two different
+things, and the one it silently gets wrong is the dangerous one: rows are copied at that
+moment and never again, so a reminder the series is given afterwards, or the first
+reminder a member sets after joining the calendar, never reaches an occurrence somebody
+had already moved. Nothing on screen distinguishes such an occurrence, and the outbox is
+at-least-once by design precisely because a missing notification is worse than a repeated
+one. Inheritance also costs nothing in the other direction: an edit to the series still
+leaves an edited occurrence's *contents* alone, as it always has.
+
+Creating an override therefore writes no reminders at all. The one place a copy is given
+reminders of its own is when a "this and following" edit re-patterns the series out from
+under it: the copy stops being an occurrence of that series, so it takes the reminders it
+was inheriting with it, per member, or it would be announced by nothing at all.
 
 "This and following" **splits the series**: the original gets an end date the day before,
 a new series starts at the split, overrides at or after the split move across, and every
@@ -309,15 +319,17 @@ knows, so a mistaken downgrade fails loudly instead of corrupting data, and a de
 one is a decision somebody takes rather than a surprise. Every migration is proved against
 a database a shipped release really wrote, checked in under `internal/store/testdata/`.
 
-0004 is the first that writes rows rather than columns: it gives every occurrence somebody
-had already edited its own copy of the series' reminders, since this release stops the
-series' reminders firing for a date that has an override and those copies would otherwise
-go quiet. No table is rebuilt and nothing is dropped, so the previous binary still runs on
-the file — it would announce those occurrences twice, which is the fault being fixed here
-rather than a new one. A backfill is an exception that has to be argued for out loud, and
-`TestUpgradeFromReleasedDatabase` makes it one: the number of rows a migration is expected
-to add is named per release beside the fixture, and any other movement in the family's rows
-fails the build.
+0004 adds the table that records which members have set an edited occurrence's reminders
+on the occurrence itself, and it is deliberately schema only. The version of it that
+backfilled — writing the series' reminders onto every copy already in the database — would
+have marked every edited occurrence in every household as having had its reminders set by
+hand, which is exactly the failure the rule above exists to avoid, applied retroactively
+and invisibly. There is nothing to backfill under inheritance: an existing copy has no
+reminders of its own, so it inherits, which is what those families have been receiving all
+along. A migration that writes rows is an exception that has to be argued for out loud,
+and `TestUpgradeFromReleasedDatabase` makes it one: the number of rows a migration is
+expected to add is named per release beside the fixture, and any other movement in the
+family's rows fails the build.
 
 Backups are `almanack backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
 **on the output**, fsync, then rename atomically. Checking the copy rather than the source

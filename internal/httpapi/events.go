@@ -338,21 +338,6 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The reminders reported are the ones that will actually fire for *this*
-	// occurrence, which for an edited one are its own: an override copy owns its
-	// reminders (docs/architecture.md), and the planner reads them from there. Asking
-	// by the series id and the date is the same occurrence as asking by the copy's id,
-	// so the two spellings have to answer alike — reading them off the event named in
-	// the path is what made the second spelling report the series' list instead.
-	remindersOf := event
-	if occ.IsOverride {
-		remindersOf = occ.Event
-	}
-	reminders, err := s.listReminders(ctx, remindersOf, user.ID)
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
 	// The recurrence reported is the *series'*, which for an edited occurrence is not
 	// the one on the event in the path: that id is the standalone copy the edit left
 	// behind, and it has no recurrence of its own. Reading it from there told the
@@ -375,6 +360,32 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rec = &loaded
+	}
+
+	// The reminders reported are the ones that will actually fire for *this*
+	// occurrence, so that the editor shows what the planner will do rather than a
+	// second opinion. An edited occurrence inherits its series' reminders until
+	// somebody changes them on that occurrence (docs/architecture.md), so the copy's
+	// own list is reported once there is one — including an empty one, which is how
+	// "no reminder, just for this one" is said — and the series' until then. Asking by
+	// the series id and the date is the same occurrence as asking by the copy's id, so
+	// the two spellings answer alike; reading them off the event named in the path is
+	// what made them disagree.
+	remindersOf := seriesEvent
+	if occ.IsOverride {
+		detached, err := s.store.RemindersDetached(ctx, occ.Event.ID, user.ID)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if detached {
+			remindersOf = occ.Event
+		}
+	}
+	reminders, err := s.listReminders(ctx, remindersOf, user.ID)
+	if err != nil {
+		fail(w, r, err)
+		return
 	}
 	writeJSON(w, r, http.StatusOK, eventDetail{
 		Occurrence:  dec.occurrence(occ),

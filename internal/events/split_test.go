@@ -164,6 +164,60 @@ func TestSplitKeepsAnEditedOccurrenceReachable(t *testing.T) {
 	t.Error("the edited occurrence vanished from the calendar when the pattern moved")
 }
 
+// An occurrence a re-patterned split leaves behind stops being an occurrence of its
+// series, so it stops inheriting the series' reminders — and an ordinary event with no
+// reminders of its own is announced by nothing at all. It takes what it was inheriting
+// with it, per member, or the family simply stops hearing about the one lesson the
+// split stranded, which is the failure mode this application exists to prevent.
+func TestASplitLeavesAStrandedOccurrenceItsReminders(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	thirty := 30
+	if err := f.st.ReplaceReminders(ctx, nil, series.RecurrenceID, f.maman,
+		[]domain.Reminder{{OffsetMinutes: &thirty}}); err != nil {
+		t.Fatalf("reminders for Maman: %v", err)
+	}
+	// Papa wants nothing for the lesson of 21 April specifically, and says so.
+	stranded, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeThis, domain.MustParseDate("2026-04-21"), Input{
+		Title: "Piscine + goûter", StartsAt: f.at("2026-04-21", 19, 0), EndsAt: f.at("2026-04-21", 20, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	})
+	if err != nil {
+		t.Fatalf("override: %v", err)
+	}
+	if err := f.st.ReplaceReminders(ctx, &stranded.ID, nil, f.papa, nil); err != nil {
+		t.Fatalf("clear Papa's reminders on the occurrence: %v", err)
+	}
+
+	// Swimming moves to Wednesdays from 14 April, so 21 April is no longer a date the
+	// pattern produces and the copy is detached from the series.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeUpcoming, domain.MustParseDate("2026-04-14"), Input{
+		Title: "Piscine", StartsAt: f.at("2026-04-15", 17, 30), EndsAt: f.at("2026-04-15", 18, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("split: %v", err)
+	}
+
+	mamans, err := f.st.ListReminders(ctx, &stranded.ID, nil, f.maman)
+	if err != nil {
+		t.Fatalf("list Maman's reminders on the stranded occurrence: %v", err)
+	}
+	if len(mamans) != 1 || mamans[0].OffsetMinutes == nil || *mamans[0].OffsetMinutes != 30 {
+		t.Errorf("Maman's reminders on the stranded occurrence = %+v, want the half hour she was"+
+			" inheriting: it has no series left to inherit from", mamans)
+	}
+	if papas, err := f.st.ListReminders(ctx, &stranded.ID, nil, f.papa); err != nil {
+		t.Fatalf("list Papa's reminders on the stranded occurrence: %v", err)
+	} else if len(papas) != 0 {
+		t.Errorf("Papa has %d reminders on the occurrence he had silenced; a split must not"+
+			" undo that", len(papas))
+	}
+}
+
 // Cancelling a date that is not an occurrence used to write a junk exception that
 // would spring to life if the pattern ever changed to include that date.
 func TestCancellingANonOccurrenceIsRefused(t *testing.T) {

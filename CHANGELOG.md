@@ -566,19 +566,18 @@ Notable changes to this project. The format follows
   on the copy, so taking the reminder off one occurrence showed an empty list and left the
   series' one to arrive that evening regardless. "No reminder, just for this one" was not
   something the app could be told, and it did not say so. Underneath both was one question
-  nobody had answered — does an edited occurrence inherit its series' reminders, or take a
-  copy of them and go its own way? It takes a copy. Editing an occurrence now copies every
-  member's reminders onto it, everyone's and not only yours, since otherwise your partner
-  would lose theirs because you moved the lesson; from then on that occurrence is announced
-  by its own reminders and by nothing else. Removing one there removes it there and nowhere
-  else, and changing the series afterwards leaves the occasions somebody has already edited
-  alone — which is what a whole-series edit already did with everything else about them.
-  Calendars that already have edited occurrences are brought into line when the new version
-  first opens them: each of those occurrences is given the copy of the reminders it should
-  have had, so nobody stops being reminded about a lesson they moved months ago and nobody
-  is reminded twice. The one thing that change cannot preserve is a reminder somebody had
-  cleared on a single occurrence, because clearing it was the bug: it comes back on that
-  occurrence, and clearing it now works.
+  nobody had answered — does an edited occurrence inherit its series' reminders, or go its
+  own way? It inherits them, until you say otherwise about that occurrence. A lesson you
+  have moved is reminded about like every other one, including by a reminder you add to
+  the series next month and by the first reminder somebody sets after joining the calendar.
+  Change the reminders on that one lesson and only that one changes — that is what tells
+  the app you mean this occasion in particular, and an empty list is a perfectly good thing
+  to mean, which is how "no reminder, just for this one" is finally sayable. The lesson is
+  announced once either way. Nothing is rewritten in calendars that already exist: the
+  occurrences you have already edited go on being reminded about exactly as they are
+  today, minus the duplicate push. Clearing the reminder on a single occurrence has never
+  worked, so there is nothing on disk that means it; it works from the moment you upgrade,
+  for the occurrences you clear from then on.
   ([#42](https://github.com/d-weber/almanack/issues/42))
 - **Renaming one occurrence of a series made it impossible to find.** Rename next Tuesday's
   swimming lesson to "Swimming (later than usual)" and searching for those words returned

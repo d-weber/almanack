@@ -579,20 +579,17 @@ func TestScopedEditThisOccurrenceOnly(t *testing.T) {
 	}
 }
 
-// TestEditedOccurrenceOwnsItsReminders is the reader's half of the rule in
-// docs/architecture.md: an edited occurrence carries its own copy of the series'
-// reminders, and those are what fire for it. The list must therefore be the same
-// whichever way the occurrence is named — by the copy's id, or by the series' id and the
-// date — and taking a reminder off it must not reach the rest of the series.
-func TestEditedOccurrenceOwnsItsReminders(t *testing.T) {
+// TestEditedOccurrenceReportsTheRemindersThatWillFire is the reader's half of the rule
+// in docs/architecture.md: an edited occurrence inherits its series' reminders until
+// somebody changes them on that occurrence, so `my_reminders` has to report whichever
+// of the two will actually fire. The list must also be the same whichever way the
+// occurrence is named — by the copy's id, or by the series' id and the date — because
+// the editor shows it and a save writes it back.
+func TestEditedOccurrenceReportsTheRemindersThatWillFire(t *testing.T) {
 	e := newEnv(t)
 	_, cal := e.family()
 	labels := e.labels(cal.ID)
 	series := e.weeklySeries(cal, labels[4].ID)
-
-	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", series.ID), map[string]any{
-		"reminders": []map[string]any{{"offset_minutes": 30}},
-	}).expect(http.StatusOK)
 
 	e.do(http.MethodPatch,
 		fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", series.ID),
@@ -617,17 +614,46 @@ func TestEditedOccurrenceOwnsItsReminders(t *testing.T) {
 		e.get(path).expect(http.StatusOK).decode(&detail)
 		return detail.MyReminders
 	}
+	offsetOf := func(rs []domain.Reminder) string {
+		if len(rs) != 1 || rs[0].OffsetMinutes == nil {
+			return fmt.Sprintf("%+v", rs)
+		}
+		return fmt.Sprintf("%d minutes before", *rs[0].OffsetMinutes)
+	}
 	byCopy := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", copyID)
 	bySeries := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", series.ID)
 
+	// The reminder is set on the series *after* the occurrence was edited, which is the
+	// case a copy taken at the moment of the edit can never account for.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", series.ID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 30}},
+	}).expect(http.StatusOK)
+
 	for _, path := range []string{byCopy, bySeries} {
-		rs := remindersFor(path)
-		if len(rs) != 1 || rs[0].OffsetMinutes == nil || *rs[0].OffsetMinutes != 30 {
-			t.Errorf("%s reports my_reminders = %+v, want the copy of the series' one", path, rs)
+		if got := offsetOf(remindersFor(path)); got != "30 minutes before" {
+			t.Errorf("%s reports my_reminders = %s, want the series' 30 minutes:"+
+				" an edited occurrence inherits until somebody changes them on it", path, got)
 		}
 	}
 
-	// Take it off this one occurrence, the way the editor does.
+	// Changing them on this one occurrence, the way the editor does, replaces the
+	// inherited list for that date and nothing else.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", copyID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 120}},
+	}).expect(http.StatusOK)
+
+	for _, path := range []string{byCopy, bySeries} {
+		if got := offsetOf(remindersFor(path)); got != "120 minutes before" {
+			t.Errorf("%s reports my_reminders = %s after two hours were set on that occurrence", path, got)
+		}
+	}
+	if got := offsetOf(remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID))); got != "30 minutes before" {
+		t.Errorf("an untouched occurrence reports my_reminders = %s, want the series' 30 minutes", got)
+	}
+
+	// And taking it off this one occurrence — an empty list, which is the only way to
+	// say "no reminder, just for this one" — is remembered as a choice rather than read
+	// back as "nothing has been set here", which would inherit the series' again.
 	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", copyID), map[string]any{
 		"reminders": []map[string]any{},
 	}).expect(http.StatusOK)
@@ -638,8 +664,8 @@ func TestEditedOccurrenceOwnsItsReminders(t *testing.T) {
 		}
 	}
 	// Every other lesson keeps it.
-	if rs := remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID)); len(rs) != 1 {
-		t.Errorf("an untouched occurrence reports my_reminders = %+v, want the series' one", rs)
+	if got := offsetOf(remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID))); got != "30 minutes before" {
+		t.Errorf("an untouched occurrence reports my_reminders = %s, want the series' one", got)
 	}
 }
 

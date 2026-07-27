@@ -176,16 +176,35 @@ func (n *Notifier) planReminders(ctx context.Context, from, to time.Time) error 
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i] < users[j] })
 
+	// Read once for the whole pass, like the reminders themselves: at family scale
+	// this is a handful of rows, and the alternative is a query per occurrence.
+	rows, err := n.st.ListReminderDetachments(ctx)
+	if err != nil {
+		return err
+	}
+	detached := make(map[detachedPair]bool, len(rows))
+	for _, d := range rows {
+		detached[detachedPair{eventID: d.EventID, userID: d.UserID}] = true
+	}
+
 	var errs []error
 	for _, userID := range users {
-		if err := n.planUserReminders(ctx, userID, byUser[userID], from, to); err != nil {
+		if err := n.planUserReminders(ctx, userID, byUser[userID], detached, from, to); err != nil {
 			errs = append(errs, fmt.Errorf("reminders for user %d: %w", userID, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []domain.Reminder, from, to time.Time) error {
+// detachedPair identifies one member's reminders for one edited occurrence — the copy
+// the edit left behind, and the member who set them on it.
+type detachedPair struct {
+	eventID int64
+	userID  int64
+}
+
+func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []domain.Reminder,
+	detached map[detachedPair]bool, from, to time.Time) error {
 	byEvent := map[int64][]domain.Reminder{}
 	byRecurrence := map[int64][]domain.Reminder{}
 	var maxLead time.Duration
@@ -219,6 +238,7 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		return err
 	}
 
+	recurrenceOfSeries := map[int64]*int64{}
 	var errs []error
 	for _, occ := range occs {
 		// Source references are keyed on the *series* event for a recurring
@@ -229,21 +249,37 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			sourceEvent = *occ.SeriesEventID
 		}
 
-		// An edited occurrence owns its reminders. Editing one occurrence copies the
-		// series' reminders onto the standalone event the edit leaves behind (see
-		// internal/events.updateOccurrence) and that copy is what the editor lists and
-		// what a PUT of the reminder list writes to — so counting the series' as well
-		// meant two rows, with different reminder ids, for one swimming lesson: two
-		// identical pushes. It also meant the reminder somebody had just removed from
-		// this one occurrence went off anyway, from the series, while the screen said
-		// there was none. The copy is the whole answer for its date.
+		// An occurrence inherits its series' reminders until somebody changes them on
+		// that occurrence — one list or the other, never both. Both is what announced a
+		// moved swimming lesson twice, from two rows the outbox could not tell apart;
+		// and reading only the copy's is what made a reminder added to the series later,
+		// or the first one a member set after joining, never reach an occurrence
+		// somebody had already edited.
+		//
+		// "Changed them on that occurrence" is a recorded fact rather than something
+		// inferred from the rows, because the change may be to an empty list: that is
+		// how "no reminder, just for this one" is said, and it has to outrank the
+		// series' or removing a reminder from one lesson does nothing at all.
 		//
 		// A reminder is scoped to an event or to a recurrence and never to both — the
 		// schema's CHECK says so — so the two lists cannot overlap and nothing has to
 		// be deduplicated between them.
 		var cands []domain.Reminder
 		cands = append(cands, byEvent[occ.Event.ID]...)
-		if !occ.IsOverride && occ.RecurrenceID != nil {
+		switch {
+		case occ.IsOverride:
+			if detached[detachedPair{eventID: occ.Event.ID, userID: userID}] {
+				break // the copy's own list is the whole answer for this date
+			}
+			// An override copy is a standalone event row, so the reminders it
+			// inherits have to be found through the series template it stands in for.
+			rid, err := n.recurrenceOfSeries(ctx, sourceEvent, recurrenceOfSeries)
+			if err != nil {
+				errs = append(errs, err)
+			} else if rid != nil {
+				cands = append(cands, byRecurrence[*rid]...)
+			}
+		case occ.RecurrenceID != nil:
 			cands = append(cands, byRecurrence[*occ.RecurrenceID]...)
 		}
 
@@ -285,6 +321,24 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// recurrenceOfSeries resolves a series template event id to its recurrence id,
+// memoised for the pass. It is how an edited occurrence finds the reminders it
+// inherits: the copy standing in for it is a standalone event row and names no
+// recurrence of its own, so the series it belongs to is the only place to ask —
+// and asking the series it actually belongs to, rather than any series, is what
+// keeps one family's judo reminder off another lesson.
+func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
+	if rid, ok := cache[eventID]; ok {
+		return rid, nil
+	}
+	e, err := n.st.EventByID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("series template %d: %w", eventID, err)
+	}
+	cache[eventID] = e.RecurrenceID
+	return e.RecurrenceID, nil
 }
 
 // lead is how far ahead of its occurrence a reminder fires, used only to size the

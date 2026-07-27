@@ -191,14 +191,20 @@ Replaces **the caller's** reminders for the event or its series.
 `{ "reminders": [ { "offset_minutes": 30 } ] }` → `{ "reminders": [Reminder] }`
 
 Which of the two it is depends on the id: a series template's reminders are the series',
-and an **edited occurrence's are its own**. Creating an override copies every member's
-series reminders onto it, and from then on that copy alone decides when the occurrence is
-announced — so removing a reminder there removes it from that occurrence and nowhere else,
-and changing the series afterwards does not reach it. `my_reminders` on
-`GET /events/{id}` is the same list by the same rule, which is what makes it truthful.
-Send the reminder list to the id the `PATCH` answered with, not the one it was addressed
-to: editing one occurrence answers with the copy, and posting to the series instead
-changes every occurrence's reminder rather than the one on screen.
+and an **edited occurrence's** are that occurrence's. Sending a list to an edited
+occurrence is what makes it stop following the series — for the caller alone, and from
+then on, including when the list is empty, which is how "no reminder, just for this one"
+is said. Until somebody does that, an edited occurrence is announced by its series'
+reminders, so one added to the series afterwards reaches it like every other date.
+`my_reminders` on `GET /events/{id}` reports whichever list will actually fire, which is
+what makes it truthful.
+
+Two consequences for a client. Send the reminder list to the id the `PATCH` answered
+with, not the one it was addressed to: editing one occurrence answers with the copy, and
+posting to the series instead changes every occurrence's reminder rather than the one on
+screen. And **only send it when it changed** — sending the list back unchanged after an
+edit to a single occurrence detaches that occurrence from the series for no reason, and
+the family would not hear about it again.
 
 ### `GET /api/v1/search?q=&participant=&label_id=&calendar_id=`
 Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once, as

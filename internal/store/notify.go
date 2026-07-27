@@ -118,12 +118,91 @@ func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrence
 				return mapErr(err)
 			}
 		}
+		if eventID != nil {
+			// Saving a list against an edited occurrence is what detaches it from its
+			// series, and it is recorded here rather than inferred from the rows,
+			// because the list saved may be empty — "no reminder, just for this one" —
+			// and an empty list is indistinguishable from never having set one.
+			// Recording it in the same transaction as the rows is what stops the two
+			// disagreeing. The WHERE keeps the table to what it is about: events that
+			// are somebody's edited copy of one occurrence of a series.
+			if _, err := tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO reminder_detachments (event_id, user_id)
+				SELECT ?, ? WHERE EXISTS (
+					SELECT 1 FROM event_overrides WHERE override_event_id = ?)`,
+				*eventID, userID, *eventID); err != nil {
+				return mapErr(err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("replace reminders: %w", err)
 	}
 	return nil
+}
+
+// A member's reminders for an occurrence somebody has edited are their own if they have
+// set them on the copy, and the series' otherwise. Two things say they have set them:
+// the marker row ReplaceReminders writes, and — for calendars written before that table
+// existed — reminders of their own already sitting on the copy. The second is what makes
+// the upgrade honest without touching a single row of the family's data: a release
+// before this one let the editor write reminders onto a copy (and then announced the
+// occurrence twice, once from each list), so those rows are exactly as deliberate as a
+// marker, and they are read as such rather than being overruled by the series'.
+//
+// The two queries below are the same predicate asked in bulk and one at a time;
+// TestDetachmentReadsAgreeInBulkAndOneAtATime holds them together.
+const detachedPairsSQL = `
+	SELECT event_id, user_id FROM reminder_detachments
+	UNION
+	SELECT r.event_id, r.user_id
+	  FROM reminders r
+	 WHERE r.event_id IS NOT NULL
+	   AND EXISTS (SELECT 1 FROM event_overrides o WHERE o.override_event_id = r.event_id)`
+
+// ReminderDetachment names one edited occurrence and the member whose reminders for it
+// are that occurrence's own rather than its series'.
+type ReminderDetachment struct {
+	EventID int64
+	UserID  int64
+}
+
+// ListReminderDetachments returns every such pair. The planner reads the whole set once
+// per pass, beside the whole set of reminders, because it plans every user in one walk.
+func (s *Store) ListReminderDetachments(ctx context.Context) ([]ReminderDetachment, error) {
+	rows, err := s.q.QueryContext(ctx, detachedPairsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("list reminder detachments: %w", mapErr(err))
+	}
+	defer rows.Close()
+	var out []ReminderDetachment
+	for rows.Next() {
+		var d ReminderDetachment
+		if err := rows.Scan(&d.EventID, &d.UserID); err != nil {
+			return nil, fmt.Errorf("list reminder detachments: %w", mapErr(err))
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list reminder detachments: %w", mapErr(err))
+	}
+	return out, nil
+}
+
+// RemindersDetached answers the same question for one pair: has this member set the
+// reminders for this edited occurrence on the occurrence itself? It is what
+// `GET /events/{id}` asks to decide whether to report the copy's list or the series',
+// so that the editor shows what will actually fire.
+func (s *Store) RemindersDetached(ctx context.Context, eventID, userID int64) (bool, error) {
+	var detached bool
+	err := s.q.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM (`+detachedPairsSQL+`) WHERE event_id = ? AND user_id = ?)`,
+		eventID, userID).Scan(&detached)
+	if err != nil {
+		return false, fmt.Errorf("reminders detached for event %d, user %d: %w", eventID, userID, mapErr(err))
+	}
+	return detached, nil
 }
 
 // ListAllReminders returns every reminder in the database. The planner walks them each

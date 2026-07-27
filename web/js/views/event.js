@@ -334,6 +334,10 @@ export async function renderEventEditor({ id, date, query }) {
     return view;
   }
 
+  // What the reminder list looked like when the editor opened, so that saving the event
+  // can tell whether the family touched it. See save().
+  const loadedReminders = reminderSignature(form);
+
   const errors = h('div', { class: 'form-errors' });
   let saving = false;
   let saveBtn = null;
@@ -423,15 +427,21 @@ export async function renderEventEditor({ id, date, query }) {
         // and this used to send `null` for both, which was accepted and then dropped.
         if (form.recurrence && scope === 'all') payload.recurrence = apiRecurrence(form);
         const saved = await api.updateEvent(form.id, payload, scope ? { scope, date: form.occurrence_date } : {});
-        // Reminders are the caller's own and have their own endpoint. They are filed
-        // against the event the edit answered with, not the one it was addressed to:
-        // editing a single occurrence of a series leaves a standalone copy behind, and
-        // that copy is what owns the reminders for that occurrence from then on. Sending
-        // them to form.id — the series, on the first edit of an occurrence — changed the
-        // reminder on every lesson instead of the one on screen, and left the one the
-        // family had just been shown unchanged.
-        const target = (saved && saved.event && saved.event.id) || form.id;
-        await api.putReminders(target, form.reminders.map((r) => apiReminder(r, form.all_day)));
+        // Reminders are the caller's own and have their own endpoint, and they are only
+        // sent when they were actually changed. Saving them regardless is not harmless:
+        // editing a single occurrence leaves a standalone copy behind, and a reminder
+        // list saved against that copy means "these, for this one occasion" — it stops
+        // the occurrence following the series. Moving a lesson would otherwise quietly
+        // cut it off from every reminder the series is given afterwards.
+        //
+        // When they *were* changed they are filed against the event the edit answered
+        // with, not the one it was addressed to: on the first edit of an occurrence
+        // those differ, and sending the list to form.id — the series — changed the
+        // reminder on every lesson instead of the one on screen.
+        if (reminderSignature(form) !== loadedReminders) {
+          const target = (saved && saved.event && saved.event.id) || form.id;
+          await api.putReminders(target, form.reminders.map((r) => apiReminder(r, form.all_day)));
+        }
       }
       invalidateRange();
       go(`/${state.view}?d=${form.start_date}`);
@@ -469,6 +479,14 @@ function apiReminder(r, allDay) {
   return allDay
     ? { days_before: Number(r.days_before || 0), at_time_local: r.at_time_local || '09:00' }
     : { offset_minutes: Number(r.offset_minutes || 0) };
+}
+
+// reminderSignature is the reminder list as it would be sent, so that two of them can be
+// compared: what the editor loaded against what it is about to save. It is the request
+// itself that is compared, not the form fields, so a change that makes no difference to
+// the server — removing a reminder and adding the same one back — is not a change.
+function reminderSignature(form) {
+  return JSON.stringify(form.reminders.map((r) => apiReminder(r, form.all_day)));
 }
 
 // -- editor sections --------------------------------------------------------
