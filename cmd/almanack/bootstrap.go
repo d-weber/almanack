@@ -26,8 +26,8 @@ func runBootstrap(ctx context.Context, cfg config.Config, args []string) error {
 	var email, name, calendarName, color, lang string
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	fs.StringVar(&email, "email", "", "email address of the first account (required)")
-	fs.StringVar(&name, "name", "", "display name, e.g. \"Maman\" (required)")
-	fs.StringVar(&calendarName, "calendar", "Famille", "name of the first shared calendar")
+	fs.StringVar(&name, "name", "", "display name, e.g. \"Alex\" (required)")
+	fs.StringVar(&calendarName, "calendar", "Family", "name of the first shared calendar")
 	fs.StringVar(&color, "color", "#c0392b", "this person's colour, #rrggbb")
 	fs.StringVar(&lang, "lang", "fr", "interface language: fr or en")
 	if err := fs.Parse(args); err != nil {

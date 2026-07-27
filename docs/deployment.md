@@ -87,7 +87,7 @@ entered after the upgrade.
 4. Configure the MTA and send yourself a test message.
 5. Point DNS at the host, forward the ports, issue the certificate.
 6. Start the service; confirm `/healthz` returns 200 and that the readiness signal arrived.
-7. Run `almanack bootstrap --email you@example.org --name "Maman"` on the host. Sign in with the
+7. Run `almanack bootstrap --email you@example.org --name "Your name"` on the host. Sign in with the
    printed password, change it immediately, and send the printed invite link to the rest of the
    family. There is no way to create the first account over HTTP — that is the point.
 8. Check that the ops heartbeat mail arrives the next morning. If it does not, the monitoring

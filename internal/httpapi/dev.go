@@ -47,7 +47,7 @@ func (s *Server) devRoutes() []route {
 // handleDevLogin signs in as any account by navigating to a link, then redirects to
 // the app. It is what makes the UI reachable to a headless browser taking screenshots
 // (which cannot fill a login form), and it saves a developer from typing a password
-// every time they want to see the calendar as Léo rather than as Maman.
+// every time they want to see the calendar as Leo rather than as Mum.
 //
 // It is knowingly the one state-changing GET in this codebase. That is a rule worth
 // keeping for the API — a single mutating GET reopens CSRF — but it does not apply
@@ -116,7 +116,10 @@ func (s *Server) handleDevDashboard(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`</ul></article>`)
 
 	b.WriteString(`<article class="card"><h2>Accounts</h2><div id="users">…</div>`)
-	b.WriteString(`<p class="muted">The seeder gives every demo account the password <code>motdepasse</code>.</p>`)
+	// Printed from the constant, not typed out again: this line claimed the password
+	// was still "motdepasse" for as long as it took someone to notice.
+	b.WriteString(`<p class="muted">The seeder gives every demo account the password <code>` +
+		html.EscapeString(devPassword) + `</code>.</p>`)
 	b.WriteString(`</article>`)
 
 	b.WriteString(`<article class="card"><h2>This build</h2><dl class="kv">`)
@@ -408,7 +411,7 @@ func (s *Server) handleDevTick(w http.ResponseWriter, r *http.Request) {
 }
 
 // devPassword is the demo family's password, matching docs/development.md.
-const devPassword = "motdepasse"
+const devPassword = "password"
 
 // handleDevSeed fills an empty database with a family that has something to look at. On
 // a database that already has accounts it adds a few events instead, so pressing the
@@ -437,9 +440,9 @@ func (s *Server) handleDevSeed(w http.ResponseWriter, r *http.Request) {
 		email, name, color string
 		admin              bool
 	}{
-		{"maman@example.org", "Maman", "#c0392b", true},
-		{"papa@example.org", "Papa", "#2980b9", false},
-		{"leo@example.org", "Léo", "#27ae60", false},
+		{"mum@example.org", "Mum", "#c0392b", true},
+		{"dad@example.org", "Dad", "#2980b9", false},
+		{"leo@example.org", "Leo", "#27ae60", false},
 	}
 	hash, err := auth.HashPassword(devPassword)
 	if err != nil {
@@ -451,7 +454,7 @@ func (s *Server) handleDevSeed(w http.ResponseWriter, r *http.Request) {
 	for _, p := range people {
 		u, err := s.store.CreateUser(ctx, domain.User{
 			Email: p.email, DisplayName: p.name, Color: p.color,
-			Lang: domain.LangFR, WeekStart: time.Monday, TimeFormat: "24h", IsAdmin: p.admin,
+			Lang: domain.LangEN, WeekStart: time.Monday, TimeFormat: "24h", IsAdmin: p.admin,
 		}, hash)
 		if err != nil {
 			fail(w, r, err)
@@ -465,7 +468,7 @@ func (s *Server) handleDevSeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cal, err := s.store.CreateCalendar(ctx, domain.Calendar{
-		Name: "Famille", Color: "#3b7ddd", CreatorID: created[0].ID,
+		Name: "Family", Color: "#3b7ddd", CreatorID: created[0].ID,
 	})
 	if err != nil {
 		fail(w, r, err)
@@ -521,20 +524,20 @@ func (s *Server) seedEvents(ctx context.Context) (int, error) {
 
 	inputs := []events.Input{
 		{
-			CalendarID: cal.ID, Title: "Dentiste Léo", LabelID: labels[3].ID,
+			CalendarID: cal.ID, Title: "Leo's dentist", LabelID: labels[3].ID,
 			StartsAt:     tomorrow.At(14, 30, loc).UTC(),
 			EndsAt:       tomorrow.At(15, 15, loc).UTC(),
-			Location:     "Cabinet du centre",
+			Location:     "Bridge Street Dental",
 			Participants: []int64{users[len(users)-1].ID},
 		},
 		{
-			CalendarID: cal.ID, Title: "Piscine", LabelID: labels[4].ID,
+			CalendarID: cal.ID, Title: "Swimming", LabelID: labels[4].ID,
 			StartsAt: today.At(17, 0, loc).UTC(), EndsAt: today.At(18, 0, loc).UTC(),
 			Participants: everyone,
 			Recurrence:   &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{today.Weekday()}},
 		},
 		{
-			CalendarID: cal.ID, Title: "Vacances à la mer", LabelID: labels[7].ID,
+			CalendarID: cal.ID, Title: "Seaside holiday", LabelID: labels[7].ID,
 			AllDay: true, StartDate: today.AddDays(7), EndDate: today.AddDays(13),
 			Participants: everyone,
 		},

@@ -96,7 +96,7 @@ seed: ## Reset the local database and fill it with a demo family
 	@rm -rf $(DEVDATA)/mail
 	$(DEV_ENV) $(GO) run ./cmd/almanack seed
 	@echo
-	@echo "Sign in at http://localhost:8080 with  maman@example.org / motdepasse"
+	@echo "Sign in at http://localhost:8080 with  mum@example.org / password"
 
 .PHONY: backup
 backup: ## Take a verified snapshot of the local database

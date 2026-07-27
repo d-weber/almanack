@@ -30,13 +30,13 @@ Bootstrap for the login and join screens; safe to cache.
 ### `GET /api/v1/invites/{token}`
 Preview an invite before signing up. Always 200 with `valid`, never leaking why.
 ```json
-{ "valid": true, "calendar_name": "Famille", "calendar_color": "#3b7ddd" }
+{ "valid": true, "calendar_name": "Family", "calendar_color": "#3b7ddd" }
 ```
 
 ### `POST /api/v1/auth/signup`
 The only route to an account.
 ```json
-{ "invite_token":"…", "email":"…", "password":"…", "display_name":"Maman", "color":"#c0392b", "lang":"fr" }
+{ "invite_token":"…", "email":"…", "password":"…", "display_name":"Mum", "color":"#c0392b", "lang":"en" }
 ```
 → `201` `{ "user": User }` + session cookie. `409 conflict` if the email exists.
 
@@ -80,10 +80,10 @@ before upload; the server re-encodes to a 128 px JPEG and stores only that. → 
 
 `CalendarView` is what `/me` returns per calendar:
 ```json
-{ "id":1, "name":"Famille", "color":"#3b7ddd", "creator_id":1,
+{ "id":1, "name":"Family", "color":"#3b7ddd", "creator_id":1,
   "membership": { "muted":false, "participating_only":false },
-  "members": [ { "user_id":1, "display_name":"Maman", "color":"#c0392b", "has_avatar":true } ],
-  "labels": [ { "id":1, "name":"Rendez-vous", "color":"#e8743b", "position":0 } ] }
+  "members": [ { "user_id":1, "display_name":"Mum", "color":"#c0392b", "has_avatar":true } ],
+  "labels": [ { "id":1, "name":"Emerald green", "color":"#2ecc87", "position":0 } ] }
 ```
 
 | Method | Path | Body / notes |
@@ -119,12 +119,12 @@ The main read. `from`/`to` are inclusive family-tz dates; `calendar_ids` is opti
 `Occurrence`:
 ```json
 { "event_id": 12, "calendar_id": 1, "calendar_color": "#3b7ddd",
-  "title": "Dentiste Léo", "all_day": false,
+  "title": "Leo's dentist", "all_day": false,
   "starts_at": "2026-08-04T14:30:00Z", "ends_at": "2026-08-04T15:15:00Z",
   "start_date": null, "end_date": null,
   "occurrence_date": "2026-08-04",
   "location": "", "url": "", "notes": "",
-  "label_id": 3, "label_color": "#e8743b", "label_name": "Rendez-vous",
+  "label_id": 3, "label_color": "#47b2f7", "label_name": "Sky blue",
   "participants": [2,3],
   "recurrence_id": 5, "series_event_id": 12, "is_override": false,
   "created_by": 2, "updated_at": "2026-07-01T10:00:00Z" }
@@ -134,7 +134,7 @@ scoped edit. For non-recurring events it is the start date.
 
 ### `POST /api/v1/events`
 ```json
-{ "calendar_id":1, "title":"Piscine", "all_day":false,
+{ "calendar_id":1, "title":"Swimming", "all_day":false,
   "starts_at":"2026-08-04T14:30:00Z", "ends_at":"2026-08-04T15:15:00Z",
   "location":"", "url":"", "notes":"", "label_id":3, "participants":[2,3],
   "recurrence": { "freq":"weekly", "interval":1, "by_weekday":[2], "until":"2026-12-31" },
@@ -191,8 +191,8 @@ repair banner and email is forced on.
 ## Push payload (server → service worker)
 
 ```json
-{ "kind":"reminder", "title":"Dentiste Léo", "body":"Demain à 14:30",
-  "url":"/#/event/12/2026-08-04", "tag":"reminder:12:2026-08-04", "lang":"fr" }
+{ "kind":"reminder", "title":"Leo's dentist", "body":"Tomorrow at 14:30",
+  "url":"/#/event/12/2026-08-04", "tag":"reminder:12:2026-08-04", "lang":"en" }
 ```
 Kept under ~3 900 bytes (aes128gcm ceiling is 4 096). Digests carry a count and the first few
 truncated titles; the full day is fetched when the notification is clicked.

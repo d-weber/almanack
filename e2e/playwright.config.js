@@ -17,7 +17,7 @@ export default {
   reporter: [['list']],
   use: {
     baseURL: process.env.ALMANACK_URL || 'http://localhost:8080',
-    locale: 'fr-FR',
+    locale: 'en-GB',
     timezoneId: 'Europe/Paris',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',

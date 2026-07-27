@@ -22,8 +22,9 @@ make check     # gofmt + go vet + every test
 make seed && make dev
 ```
 
-`make dev` serves <http://localhost:8080>. Sign in as **maman@example.org** / **motdepasse**
-(the demo family the seeder creates, all with the same password).
+`make dev` serves <http://localhost:8080>. Sign in as **mum@example.org** / **password**
+(the demo family the seeder creates, all with the same password). Gran reads the app in
+French, so signing in as **gran@example.org** is the quickest way to check a translation.
 
 `make seed` wipes `devdata/` and rebuilds it, so run it whenever you want a clean slate.
 

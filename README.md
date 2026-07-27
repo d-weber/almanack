@@ -12,7 +12,7 @@ One static Go binary. One SQLite file. A hand-written PWA with no build step.
 ![Month view](docs/screenshots/month-desktop-light.png)
 
 ```sh
-make seed && make dev          # http://localhost:8080 — maman@example.org / motdepasse
+make seed && make dev          # http://localhost:8080 — mum@example.org / password
 ```
 
 That is the entire setup. [Go 1.25+](https://go.dev/dl/) is the only prerequisite —

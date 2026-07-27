@@ -16,7 +16,7 @@ work. Most review comments a change would otherwise attract are already answered
 Go 1.25 or newer, and nothing else.
 
 ```sh
-make seed && make dev     # http://localhost:8080 — maman@example.org / motdepasse
+make seed && make dev     # http://localhost:8080 — mum@example.org / password
 make check                # gofmt + go vet + the whole test suite
 ```
 

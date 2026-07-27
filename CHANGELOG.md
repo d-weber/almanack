@@ -6,6 +6,19 @@ Notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The demo seed is in English.** `make seed` now creates Mum, Dad, Leo and Gran with
+  the calendars Family, Parents and Kids' activities, and signs in with
+  `mum@example.org` / `password`. Gran still reads the app in French, because a family
+  that does not share one language is the case this was built for.
+- **A new calendar's ten labels are now named after their own colours** — Emerald
+  green, Lagoon teal, Sky blue, Warm taupe, Midnight black, Poppy red, Raspberry pink,
+  Sunset coral, Golden amber, Soft lilac — on the palette TimeTree uses. A label starts
+  as a colour and nothing else; what it means is what a group types in. That is also why
+  they are not translated: guessing a meaning would freeze every label in the language of
+  whoever created the calendar. Calendars that already exist keep the labels they have.
+
 ### Fixed
 
 Findings from an adversarial review of the built system. Each was reproduced before

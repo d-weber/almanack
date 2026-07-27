@@ -8,12 +8,16 @@
 
 import { test, expect } from '@playwright/test';
 
-test('events render in the family timezone, not the device one', async ({ page }) => {
+async function signIn(page) {
   await page.goto('/');
-  await page.getByLabel(/Adresse e-mail/i).fill('maman@example.org');
-  await page.getByLabel(/Mot de passe/i).fill('motdepasse');
-  await page.getByRole('button', { name: /Se connecter/i }).click();
-  await expect(page.getByRole('button', { name: /Aujourd'hui/i })).toBeVisible();
+  await page.getByLabel(/Email address/i).fill('mum@example.org');
+  await page.getByLabel(/Password/i).fill('password');
+  await page.getByRole('button', { name: /Sign in/i }).click();
+}
+
+test('events render in the family timezone, not the device one', async ({ page }) => {
+  await signIn(page);
+  await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
 
   // Confirm the browser really is in Lisbon (one hour behind Paris), or this test
   // proves nothing.
@@ -22,21 +26,18 @@ test('events render in the family timezone, not the device one', async ({ page }
 
   // The seeded dentist appointment is at 16:30 Paris time. A device-timezone bug
   // would render it as 15:30.
-  const card = page.getByText('Dentiste Léo').first();
+  const card = page.getByText("Leo's dentist").first();
   await card.click();
   await expect(page.getByText('16:30')).toBeVisible();
   await expect(page.getByText('15:30')).toHaveCount(0);
 });
 
 test('an all-day event does not slip to the previous day', async ({ page }) => {
-  await page.goto('/');
-  await page.getByLabel(/Adresse e-mail/i).fill('maman@example.org');
-  await page.getByLabel(/Mot de passe/i).fill('motdepasse');
-  await page.getByRole('button', { name: /Se connecter/i }).click();
+  await signIn(page);
 
-  // "Vacances à la mer" is seeded as a multi-day all-day event. Stored as a midnight
+  // "Seaside holiday" is seeded as a multi-day all-day event. Stored as a midnight
   // instant it would start a day early west of Paris; stored as a date it cannot.
   await page.getByRole('button', { name: /Agenda/i }).click();
-  const holiday = page.getByText('Vacances à la mer').first();
+  const holiday = page.getByText('Seaside holiday').first();
   await expect(holiday).toBeVisible();
 });

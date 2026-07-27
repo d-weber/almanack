@@ -9,20 +9,20 @@
 
 import { test, expect } from '@playwright/test';
 
-const CREDENTIALS = { email: 'maman@example.org', password: 'motdepasse' };
+const CREDENTIALS = { email: 'mum@example.org', password: 'password' };
 
 async function signIn(page, who = CREDENTIALS) {
   await page.goto('/');
-  await page.getByLabel(/Adresse e-mail/i).fill(who.email);
-  await page.getByLabel(/Mot de passe/i).fill(who.password);
-  await page.getByRole('button', { name: /Se connecter/i }).click();
-  await expect(page.getByRole('button', { name: /Aujourd'hui/i })).toBeVisible();
+  await page.getByLabel(/Email address/i).fill(who.email);
+  await page.getByLabel(/Password/i).fill(who.password);
+  await page.getByRole('button', { name: /Sign in/i }).click();
+  await expect(page.getByRole('button', { name: /Today/i })).toBeVisible();
 }
 
 test('the seeded family calendar loads and shows its events', async ({ page }) => {
   await signIn(page);
-  await expect(page.getByText('Dentiste Léo')).toBeVisible();
-  await expect(page.getByText('Piscine').first()).toBeVisible();
+  await expect(page.getByText("Leo's dentist")).toBeVisible();
+  await expect(page.getByText('Swimming').first()).toBeVisible();
 });
 
 test('no console errors and no CSP violations on load', async ({ page }) => {
@@ -33,7 +33,7 @@ test('no console errors and no CSP violations on load', async ({ page }) => {
   page.on('pageerror', (err) => problems.push(String(err)));
 
   await signIn(page);
-  await page.getByRole('button', { name: /Aujourd'hui/i }).click();
+  await page.getByRole('button', { name: /Today/i }).click();
 
   // A CSP violation surfaces here as "Refused to execute…". Since the app ships
   // without unsafe-inline, an inline handler someone added would fail loudly.
@@ -42,19 +42,19 @@ test('no console errors and no CSP violations on load', async ({ page }) => {
 
 test('creating an event shows it in the month grid', async ({ page }) => {
   await signIn(page);
-  await page.getByRole('button', { name: /Ajouter|\+/ }).first().click();
-  await page.getByLabel(/Titre/i).fill('Réunion de test');
-  await page.getByRole('button', { name: /Enregistrer/i }).click();
-  await expect(page.getByText('Réunion de test')).toBeVisible();
+  await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
+  await page.getByLabel(/Title/i).fill('Test meeting');
+  await page.getByRole('button', { name: /Save/i }).click();
+  await expect(page.getByText('Test meeting')).toBeVisible();
 });
 
 test('a hostile event title is rendered as text, never as markup', async ({ page }) => {
   const hostile = '<img src=x onerror="window.__pwned = true">';
   await signIn(page);
 
-  await page.getByRole('button', { name: /Ajouter|\+/ }).first().click();
-  await page.getByLabel(/Titre/i).fill(hostile);
-  await page.getByRole('button', { name: /Enregistrer/i }).click();
+  await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
+  await page.getByLabel(/Title/i).fill(hostile);
+  await page.getByRole('button', { name: /Save/i }).click();
 
   // The literal characters must appear on screen…
   await expect(page.getByText(hostile)).toBeVisible();
@@ -84,12 +84,12 @@ test('the service worker registers and the app is installable', async ({ page })
 
 test('the offline banner appears and cached events remain readable', async ({ page, context }) => {
   await signIn(page);
-  await expect(page.getByText('Dentiste Léo')).toBeVisible();
+  await expect(page.getByText("Leo's dentist")).toBeVisible();
 
   await context.setOffline(true);
   await page.reload();
 
   // The calendar still renders from cache rather than showing a browser error page.
-  await expect(page.getByText('Dentiste Léo')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("Leo's dentist")).toBeVisible({ timeout: 10_000 });
   await context.setOffline(false);
 });

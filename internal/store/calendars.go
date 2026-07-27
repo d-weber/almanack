@@ -26,9 +26,19 @@ func scanCalendar(row rowScanner) (domain.Calendar, error) {
 }
 
 // defaultLabels is the palette every new calendar is seeded with: exactly
-// domain.LabelsPerCalendar rows, in French, in ten hues that stay distinguishable
-// side by side on a month grid (and, being spread around the wheel rather than merely
-// different, remain separable for the commonest colour-vision deficiencies).
+// domain.LabelsPerCalendar rows, in ten hues spread around the wheel rather than
+// merely different, so that they stay separable side by side on a month grid and for
+// the commonest colour-vision deficiencies.
+//
+// Each label is named after its own colour, and that is the point. A label starts life
+// as a colour and nothing else; what it *means* — school, work, the dog — is something
+// a group decides for itself and types in. Naming them "Sky blue" rather than "Work"
+// says so honestly, and the names are worth a second word each ("Poppy red", not "Red")
+// because a list of ten flat colour words reads like a form to fill in rather than a
+// palette to pick from. It also sidesteps the translation problem a guessed-at meaning
+// creates: baking a language in at creation time would freeze every label in whichever
+// one the person who made the calendar happened to read, and translating at display
+// time would mean overwriting a name someone had chosen.
 //
 // Labels are never created or deleted afterwards — only renamed, recoloured and
 // reordered. That is what lets events.label_id be NOT NULL forever, so no event can
@@ -37,16 +47,16 @@ var defaultLabels = [domain.LabelsPerCalendar]struct {
 	Name  string
 	Color string
 }{
-	{"Famille", "#e53935"},       // red
-	{"École", "#1e88e5"},         // blue
-	{"Travail", "#43a047"},       // green
-	{"Santé", "#fb8c00"},         // orange
-	{"Sport", "#8e24aa"},         // purple
-	{"Loisirs", "#00acc1"},       // cyan
-	{"Anniversaires", "#d81b60"}, // pink
-	{"Vacances", "#c0ca33"},      // lime
-	{"Rendez-vous", "#6d4c41"},   // brown
-	{"Autre", "#757575"},         // grey
+	{"Emerald green", "#2ecc87"},
+	{"Lagoon teal", "#3dc2c8"},
+	{"Sky blue", "#47b2f7"},
+	{"Warm taupe", "#948078"},
+	{"Midnight black", "#212121"},
+	{"Poppy red", "#e73b3b"},
+	{"Raspberry pink", "#f35f8c"},
+	{"Sunset coral", "#fb7f77"},
+	{"Golden amber", "#fdc02d"},
+	{"Soft lilac", "#b38bdc"},
 }
 
 // CreateCalendar creates a calendar and, in the same transaction, the two things a

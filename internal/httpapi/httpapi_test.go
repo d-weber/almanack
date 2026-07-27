@@ -529,8 +529,12 @@ func TestDevSeedAndInboxes(t *testing.T) {
 		t.Fatalf("seed result = %+v", seeded)
 	}
 	// The seeded family can actually sign in — a seeder that produces unusable
-	// accounts is worse than none.
-	e.login(e.newClient(), "maman@example.org")
+	// accounts is worse than none. Use the password the endpoint reports rather than
+	// the suite's own: they were equal by coincidence once, and the day they stopped
+	// being equal this test failed for a reason that had nothing to do with seeding.
+	e.request(e.newClient(), http.MethodPost, "/api/v1/auth/login",
+		map[string]string{"email": "mum@example.org", "password": seeded.Password}).
+		expect(http.StatusOK)
 
 	e.get("/dev/notifications").expect(http.StatusOK)
 	e.get("/dev/mail").expect(http.StatusOK)
