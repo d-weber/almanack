@@ -16,6 +16,27 @@ Notable changes to this project. The format follows
 - **[docs/RESTORE.md](docs/RESTORE.md)** — the restore runbook `docs/development.md` had been
   pointing at for some time without it existing.
 
+- **Tests for the four packages that had none**, and for the two subcommands that had
+  almost none. `internal/auth` (0% → 94%) pins the argon2id parameters as literals, so a
+  silent weakening of the memory or time cost fails the build, and asserts tokens are
+  stored as SHA-256 hashes and never in the clear. `internal/config` (0% → 99%) covers the
+  strictness 0.2.0 introduced, and cross-checks the parser's keys against
+  `almanack.conf.example` in both directions so the example cannot drift from the code.
+  `internal/mailer` (0% → 100%) covers the header-injection case 0.2.0 fixed, at both the
+  validation and the encoding layer. `cmd/almanack` (3% → 38%, with `backup.go` at 81%)
+  proves a snapshot is a real database with its rows still in it, and that `--prune` with
+  zero retention deletes nothing — it once deleted everything, including the snapshot it
+  had just reported as a success.
+- **Coverage floors, enforced.** `make check` now ends with `make cover-check`, which fails
+  if a package drops below the floor recorded for it in
+  `.github/scripts/check_coverage.py`, or if a package appears with no entry at all.
+  Coverage that is only reported rots quietly; adding uncovered code now means writing the
+  test or lowering the floor in the same commit, which is a visible decision in a diff.
+- **The browser tests run in CI.** The Playwright suite existed but ran only if someone
+  remembered to, which for the three 0.2.0 bugs that were reachable only through a real
+  browser is the same as not existing. CI now seeds a demo family, starts a server and
+  runs it.
+
 ### Changed
 
 - **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one

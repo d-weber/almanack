@@ -108,6 +108,9 @@ e2e/                    dev-only browser smoke tests
 - Time-dependent tests use `clock.NewFake` — never `time.Sleep` to wait for a scheduler.
 - Crypto is verified against published vectors (RFC 8291 Appendix A), byte for byte.
 - New behavior lands with its test in the same change. Bug fixes land with the failing case first.
+- Every package has a coverage floor in `.github/scripts/check_coverage.py`, enforced by
+  `make check`. Dropping below one, or adding a package with no entry, fails the build. Lowering
+  a floor is allowed and must happen in the same commit as the change that needs it.
 
 ## 8. Migrations
 

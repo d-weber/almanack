@@ -50,7 +50,7 @@ help: ## Show this help
 	@echo "Start here:  make seed && make dev  →  http://localhost:8080"
 
 .PHONY: check
-check: fmt-check vet test ## Everything that must pass before code is done
+check: fmt-check vet test cover-check ## Everything that must pass before code is done
 
 .PHONY: test
 test: ## Run all tests
@@ -65,6 +65,10 @@ cover: ## Run tests with a coverage summary
 	@mkdir -p $(DEVDATA)
 	$(GO) test -coverprofile=$(DEVDATA)/coverage.out ./... && \
 	$(GO) tool cover -func=$(DEVDATA)/coverage.out | tail -30
+
+.PHONY: cover-check
+cover-check: ## Fail if any package has dropped below its coverage floor
+	@PATH="$(dir $(GO)):$$PATH" python3 .github/scripts/check_coverage.py
 
 .PHONY: race
 race: ## Run tests with the race detector (the scheduler shares state with HTTP handlers)

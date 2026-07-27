@@ -37,6 +37,12 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # Coverage that is only reported is coverage that rots. The floors are per
+      # package and dropping below one fails here, so a change that adds code without
+      # tests has to say so in its own diff.
+      - name: Coverage floors
+        run: python3 .github/scripts/check_coverage.py
+
       # The scheduler shares state with HTTP handlers, so the race detector earns its
       # place in CI rather than being something to remember to run.
       - name: Test with the race detector
@@ -56,3 +62,60 @@ jobs:
       # service worker's precache list, and translation keys used but never defined.
       - name: Check imports, precache list and translations
         run: python3 .github/scripts/check_frontend.py
+
+  browser:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # Three of the bugs 0.2.0 fixed were only reachable through a real browser: an
+      # upload the app's own CSP forbade, an invite link that never opened the join
+      # screen, and a new build that could not reach an open tab. None of them could
+      # fail a Go test, so these run here rather than being something to remember.
+      #
+      # npm appears only in this job. The e2e directory is the one place the dependency
+      # policy allows it (internal/deps/deps_test.go), and nothing it installs is
+      # committed or reaches the binary.
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm install --no-save @playwright/test
+          npx playwright install --with-deps chromium
+
+      # The server is started inside this step rather than a previous one, so that it
+      # is still running when the tests execute.
+      - name: Seed a demo family and run the tests
+        run: |
+          make seed
+          make dev > /tmp/almanack-server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8080/healthz > /dev/null; then
+              ready=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "the server never became ready:"; cat /tmp/almanack-server.log; exit 1
+          fi
+          cd e2e && npx playwright test --retries=1
+
+      - name: Server log
+        if: failure()
+        run: cat /tmp/almanack-server.log || true
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-traces
+          path: e2e/test-results/
+          if-no-files-found: ignore

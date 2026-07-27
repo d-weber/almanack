@@ -40,9 +40,28 @@ French, so signing in as **gran@example.org** is the quickest way to check a tra
 | `internal/notify` | The planner and the boot catch-up policy — including the "server was off for a week" case, which is as correctness-critical as the DST tests |
 | `internal/holidays` | Easter from 1900 to 2100, and what happens when the family suppresses a holiday the law removed |
 | `internal/httpapi` | Auth, CSRF, invites, scoped edits, and that a hostile event title comes back escaped |
+| `internal/auth` | That the argon2id parameters really are the RFC 9106 ones — a silent weakening of the memory or time cost fails the build — and that tokens are stored as SHA-256 hashes and never in the clear |
+| `internal/config` | The strictness promised in 0.2.0: an unknown key or an unparseable value is an error that names the setting. Also that `almanack.conf.example` and the parser agree on the set of keys, in both directions, so the example cannot drift out of sync with the code |
+| `internal/mailer` | That a newline in a subject cannot inject a header — the 0.2.0 bug — accented text survives encoding, and an MTA failure is returned rather than swallowed |
+| `cmd/almanack` | That a snapshot is a real database with the rows still in it, that `--prune` with zero retention deletes nothing (it once deleted everything, including the snapshot it had just taken), and that `bootstrap` refuses to run once an account exists |
 | root `deps_test.go` | The dependency allowlist — the build fails if someone adds a module or an npm file |
 
 Useful variants: `make race` (the scheduler shares state with HTTP handlers), `make cover`.
+
+### The coverage floors
+
+`make check` ends with `make cover-check`, which fails if any package has dropped below the
+floor recorded for it in `.github/scripts/check_coverage.py`. Coverage that is only ever
+*reported* rots quietly, and the packages that slide are the ones being changed most.
+
+Two rules, and the second matters more: a package may not fall below its floor, and a package
+must be **in the file at all** — a new package with no entry fails even if it is well tested,
+because otherwise one can be added with no tests and nothing notices. Adding uncovered code
+therefore means writing the test, or lowering the floor in the same commit, which is a visible
+decision in a diff rather than a silent drift.
+
+The floors are set at what the suite achieves today, so they answer "has this got worse",
+not "is this good enough". Raise them when you raise the coverage.
 
 ## Testing notifications without a push service or a mail server
 
@@ -90,12 +109,19 @@ To rehearse a restore: stop the server, copy a snapshot over `devdata/almanack.d
 and confirm your events are there. That is the whole procedure, and it is deliberately the same
 one in `docs/RESTORE.md`.
 
-## Browser smoke tests (optional)
+## Browser smoke tests
 
 `make e2e` runs a small Playwright suite (login, create an event, see it in the month view, an
-XSS-hostile event title, the service-worker update reload). It needs `npx`, which is not
-installed here, so the target skips cleanly rather than failing. These tests are development-only
-and are never part of the production build.
+XSS-hostile event title, the service-worker update reload) against a dev server you have already
+started with `make dev`. Locally it needs `npx`, and the target skips cleanly rather than failing
+when that is absent.
+
+**These run in CI**, in their own job, which seeds a demo family and starts a server first. They
+are not optional there, and that is deliberate: three of the bugs 0.2.0 fixed were reachable only
+through a real browser — an upload the app's own CSP forbade, an invite link that never opened the
+join screen, and a new build that could not reach an open tab. None of them could have failed a Go
+test. npm appears in that job and nowhere else; the `e2e` directory is the one place the dependency
+policy allows it, nothing it installs is committed, and none of it reaches the binary.
 
 ## Layout of `devdata/`
 
