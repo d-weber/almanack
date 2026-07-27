@@ -341,6 +341,22 @@ Notable changes to this project. The format follows
   back to a plain "dialog" from the catalogue, and one with nothing to focus at all keeps the
   keyboard on itself rather than letting it out into a page the reader cannot see.
   ([#17](https://github.com/d-weber/almanack/issues/17))
+- **The agenda and the activity feed left their paging observer behind when you walked
+  away from them.** Both screens load their next page when a sentinel at the foot of the
+  list scrolls into view, and both disconnected the `IntersectionObserver` watching it only
+  once the list was complete — so leaving before that, which is what one does with a list
+  that goes on for a year, left the observer connected to a sentinel that had just been
+  dropped from the page. This is untidiness rather than a leak that grows: the browser
+  holds an observer's targets weakly, so the pair becomes an island the collector takes,
+  and a detached sentinel cannot come into view, so the observer would never have fired
+  again either. It is fixed because it is the kind of thing that stops being harmless the
+  moment a screen holds something the collector cannot reason its way out of — an interval,
+  a listener on `window` — and there was no way for a view to tidy up after itself at all.
+  There is one now: a view hangs a `cleanup` function off the node it returns, and the
+  shell calls it before mounting the next screen. A view cannot do this alone, because
+  nothing tells it that it has been replaced — an observer on a detached target never fires
+  again, so there is no moment at which it could notice.
+  ([#19](https://github.com/d-weber/almanack/issues/19))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

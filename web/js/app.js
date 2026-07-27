@@ -51,6 +51,7 @@ let bannerEl = null;
 let panelEl = null;
 let renderToken = 0;
 let panelToken = 0;
+let currentCleanup = null;
 let lastRefresh = 0;
 let lastConfirm = 0;
 let pendingHash = null;
@@ -240,9 +241,37 @@ function calendarHeader(view, date) {
   return bar;
 }
 
+/**
+ * Release whatever the view being replaced was holding.
+ *
+ * A view is a function that returns a node, and nothing ever tells it that node has
+ * been dropped: `show()` simply mounts the next one over it. So a view that holds
+ * something the browser will not release along with the tree — an IntersectionObserver
+ * watching a sentinel, a timer, a listener on `window` — hangs a `cleanup` function off
+ * the node it returns, and this calls it. Checking from inside the view does not work:
+ * an observer on a detached target never fires again, so it has no moment to notice.
+ *
+ * It is one property and one call by design, not a lifecycle: `show()` is the main
+ * area's only mounting point, and two views use it. Anything with mount and unmount
+ * phases would be more machinery than the problem has. The side panel has no such
+ * hook — what opens there is an event, which holds nothing — and the day to add one
+ * is the day something opened there needs it.
+ */
+function release(cleanup) {
+  if (typeof cleanup !== 'function') return;
+  try {
+    cleanup();
+  } catch (err) {
+    // A view that cannot tidy up must not also block the screen replacing it.
+    console.warn('view cleanup', err);
+  }
+}
+
 /** Swap the main area, discarding results of a navigation that was superseded. */
 async function show(builder, { chrome = null, tabs = true } = {}) {
   const token = ++renderToken;
+  release(currentCleanup);
+  currentCleanup = null;
   closePanel();
   paintBanners();
   clear(chromeEl);
@@ -252,7 +281,13 @@ async function show(builder, { chrome = null, tabs = true } = {}) {
   viewEl.scrollTop = 0;
   try {
     const node = await builder();
-    if (token !== renderToken) return;
+    // A navigation that was overtaken still built its node, and whatever that node
+    // holds is now unreachable — release it too, rather than only what was mounted.
+    if (token !== renderToken) {
+      release(node && node.cleanup);
+      return;
+    }
+    currentCleanup = node ? node.cleanup : null;
     mount(viewEl, node);
   } catch (err) {
     if (token !== renderToken) return;

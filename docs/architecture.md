@@ -276,6 +276,17 @@ catalogue for one built without a heading. That is why the day sheet, the confir
 the recurrence scope question all behave alike; an overlay assembled by hand somewhere else
 would not, so new ones go through this function.
 
+A view is a function that returns a node, and `show()` in `js/app.js` mounts it over
+whatever was there before; nothing tells the outgoing view that it has gone. That is fine
+for a tree of elements, which the collector takes with the tree, and not fine for anything
+holding on from outside it — an `IntersectionObserver` watching a sentinel, an interval, a
+listener on `window`. So a view that holds such a thing hangs a `cleanup` function off the
+node it returns, and `show()` calls it before mounting the next screen. The agenda and the
+activity feed do this for the observer each uses to page. Checking from inside the view
+instead does not work: an observer whose target has been detached never fires again, so it
+has no moment at which to notice it is no longer wanted. One property, called once, is the
+whole of the lifecycle — deliberately, since there is one place a view is mounted.
+
 The service worker precaches the shell keyed by a build hash the server computes from the
 embedded assets, and serves `/api/` network-first with a cache fallback so the last-seen
 calendar is readable offline. Its push handler always displays a notification, including a
