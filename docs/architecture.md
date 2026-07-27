@@ -108,6 +108,15 @@ Editing one occurrence writes an *override*: a standalone event plus a row sayin
 date, use that instead", or "on this date, nothing". The series is untouched, which is what
 makes repeated single-occurrence edits safe.
 
+That standalone event is the id the API then publishes for the occurrence, so the *second*
+thing anyone does to an edited occurrence arrives addressed to the copy rather than to the
+series — and a copy carries no pattern of its own. Every operation therefore resolves an id
+back to the (series, date) pair it stands for before acting, in the server rather than in
+the client: the identity of an occurrence is a fact about the data, and a client that had
+to reconstruct it would be one release away from getting it wrong again. Not doing so is
+how "delete this occurrence" deleted the exception instead of the occurrence, and brought
+it back at its original time.
+
 "This and following" **splits the series**: the original gets an end date the day before,
 a new series starts at the split, overrides at or after the split move across, and every
 member's reminders are copied. Missing any one of those steps has a specific, nasty

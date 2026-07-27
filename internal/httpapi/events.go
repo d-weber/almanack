@@ -346,9 +346,23 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	// The recurrence reported is the *series'*, which for an edited occurrence is not
+	// the one on the event in the path: that id is the standalone copy the edit left
+	// behind, and it has no recurrence of its own. Reading it from there told the
+	// client the occurrence was a plain event, so it stopped asking which occurrences
+	// a further edit should touch and the series became unreachable. The occurrence
+	// knows better — internal/events resolved the copy back to its series to build it.
+	seriesEvent := event
+	if occ.SeriesEventID != nil && *occ.SeriesEventID != event.ID {
+		seriesEvent, err = s.store.EventByID(ctx, *occ.SeriesEventID)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+	}
 	var rec *domain.Recurrence
-	if event.RecurrenceID != nil {
-		loaded, err := s.store.RecurrenceByID(ctx, *event.RecurrenceID)
+	if seriesEvent.RecurrenceID != nil {
+		loaded, err := s.store.RecurrenceByID(ctx, *seriesEvent.RecurrenceID)
 		if err != nil {
 			fail(w, r, err)
 			return

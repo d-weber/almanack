@@ -54,6 +54,17 @@ Notable changes to this project. The format follows
 
 ### Fixed
 
+- **Deleting an occurrence you had already edited brought it back.** Editing a single
+  occurrence stores a separate copy of the event, and from then on the app addressed that
+  occurrence by the copy's own id. Deleting the copy took the exception with it, so the
+  occurrence reappeared at the series' original time and without the edit — "delete this
+  one" was how you made it come back. The same mix-up hid the series from an occurrence
+  that had already been edited: opening it no longer asked *this / this and following /
+  the whole series*, so nothing done to it afterwards could reach the rest of the series,
+  and the reminder stayed queued for the time the occurrence used to be at. Two clicks
+  from the month view, silent, and repeatable. An edited occurrence is now resolved back
+  to the date in the series it stands for before anything is changed.
+  ([#1](https://github.com/d-weber/almanack/issues/1))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
