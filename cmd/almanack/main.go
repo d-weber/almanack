@@ -63,6 +63,19 @@ func run() error {
 		args = args[1:]
 	}
 
+	// flag stops parsing at the first non-flag argument, so `almanack serve --config
+	// /etc/almanack/almanack.conf` — the order an operator naturally writes, and the
+	// one the "pass --config <path>" error message invites — left the flag sitting in
+	// args to be silently ignored. The process then started on whatever configuration
+	// it found elsewhere, or on none. Accept the flag in either position.
+	path, args, err := takeConfigFlag(args)
+	if err != nil {
+		return err
+	}
+	if path != "" {
+		configPath = path
+	}
+
 	if command == "version" {
 		fmt.Println(versionString())
 		return nil
@@ -166,6 +179,32 @@ func versionString() string {
 		}
 	}
 	return "almanack " + v
+}
+
+// takeConfigFlag pulls a --config out of a command's arguments, in either the
+// `--config path` or the `--config=path` spelling, and returns what is left for the
+// command's own parsing.
+func takeConfigFlag(args []string) (string, []string, error) {
+	rest := make([]string, 0, len(args))
+	path := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name, value, hasValue := strings.Cut(a, "=")
+		if name != "--config" && name != "-config" {
+			rest = append(rest, a)
+			continue
+		}
+		if hasValue {
+			path = value
+			continue
+		}
+		if i+1 >= len(args) {
+			return "", nil, fmt.Errorf("%s needs a path", a)
+		}
+		path = args[i+1]
+		i++
+	}
+	return path, rest, nil
 }
 
 func hasFlag(args []string, names ...string) bool {
