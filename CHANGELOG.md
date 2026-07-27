@@ -58,6 +58,24 @@ Notable changes to this project. The format follows
   browser is the same as not existing. CI now seeds a demo family, starts a server and
   runs it.
 
+- **The two hours a year that are not names for moments are now written down, and pinned on
+  both sides.** Twice a year a wall time stops identifying an instant: in autumn 02:30 comes
+  round twice, and in spring it never comes round at all. A recurring event at such a time
+  had to land somewhere, and nothing said where — the recurrence policy table in
+  [docs/architecture.md](docs/architecture.md) was silent on both. It now has a row for each.
+  In the repeated hour an occurrence takes the second pass, and a time typed into the editor
+  resolves to the same instant; in the skipped hour both move forward by the length of the
+  gap, so 02:30 becomes 03:30 rather than 03:00 or 01:30. **Nothing about your calendar has
+  changed**: this is the behaviour every version so far has had, on both sides, and it was
+  measured rather than assumed before being written down. What was missing was the guarantee
+  that it stays that way. The two halves of the application reach the same answer through
+  different code — Go's `time.Date` on the server, a two-pass conversion in the browser — and
+  if one of them ever drifted, nothing would look wrong: both instants read 02:30 on a clock
+  face, so an appointment could move by an hour with nothing on screen to say so. So both
+  rules are now asserted twice, once in `internal/events` and once in a real browser in
+  `e2e/dst-fallback.spec.js`, each test naming the other.
+  ([#51](https://github.com/d-weber/almanack/issues/51))
+
 ### Changed
 
 - **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one

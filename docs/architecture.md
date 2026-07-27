@@ -92,6 +92,17 @@ field and the wall clock wins again, later pass and all. The rule is asserted en
 `e2e/dst-fallback.spec.js`, which is where browser date behaviour gets tested: the frontend
 takes no dependencies, so there is no JavaScript unit runner to put it in.
 
+**And the server answers it the same way.** `internal/events` expands a series through Go's
+`time.Date`, which resolves a broken wall time by reading the fields as though they were UTC,
+taking the zone offset in force at that instant and correcting once — step for step the
+two-pass conversion `wallToInstant()` does. So an occurrence the server generates and a time
+the editor saves land on the same instant, and neither half of the application has a rule of
+its own. That is worth stating because it is an agreement between two implementations rather
+than one piece of code, and it would break quietly: both sides say 02:30 whichever instant
+they pick. The two ambiguity rows below are therefore pinned twice, by
+`TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant` in `internal/events` and by
+`e2e/dst-fallback.spec.js`, each of which names the other.
+
 ### The recurrence policy table
 
 These were decided deliberately, because every one of them has a plausible opposite:
@@ -103,11 +114,15 @@ These were decided deliberately, because every one of them has a plausible oppos
 | `UNTIL` | Inclusive |
 | Interval anchoring | The series start is the anchor, for every frequency |
 | Monthly modes | Exactly one of: day-of-month, nth weekday (`1..5`, `-1` = last), or last calendar day |
+| A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, always** — the server and the browser run the same conversion, so a generated occurrence and a typed time cannot disagree. Which of the two passes it lands on follows the zone: the second in Europe/Paris, the first in a zone whose winter offset is negative |
+| A wall time in the hour the clocks skip (spring) | **Normalised forward** by the length of the gap — 02:30 becomes 03:30, not 03:00 and not 01:30. Both sides again |
 
 `internal/recur` is pure functions over dates with no I/O, which is why it can be tested
 exhaustively. Its test suite includes cases derived from a calendar independently of the
-implementation, and the five policies above were mutation-tested to confirm the suite
-actually catches their opposites.
+implementation, and the first five policies above — the ones that are its own — were
+mutation-tested to confirm the suite actually catches their opposites. The rows below them
+belong to `internal/events`: they are about the instant an occurrence lands on rather than
+the date it falls on.
 
 ### Occurrences are never stored
 
