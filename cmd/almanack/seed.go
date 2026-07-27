@@ -223,7 +223,9 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 		return err
 	}
 
-	saturday := nextWeekday(today, time.Saturday)
+	// A one-off evening out, kept close to today rather than pinned to the month the way
+	// the two series are.
+	saturday := cinemaNight(today)
 	if _, err := svc.Create(ctx, ids["Dad"], events.Input{
 		CalendarID: calIDs[parents], Title: "Cinema",
 		StartsAt: at(saturday, 20, 30), EndsAt: at(saturday, 22, 45),
@@ -233,7 +235,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}
 
 	// Every second Wednesday: interval anchoring, visible over a month.
-	wednesday := nextWeekday(today, time.Wednesday)
+	wednesday := guitarSeries(today)
 	if _, err := svc.Create(ctx, ids["Mum"], events.Input{
 		CalendarID: calIDs[kids], Title: "Guitar lesson",
 		StartsAt: at(wednesday, 14, 0), EndsAt: at(wednesday, 15, 0),
@@ -278,6 +280,49 @@ func swimmingSeries(today domain.Date) (start, moved, cancelled domain.Date) {
 	// The first of any weekday falls on the 1st to the 7th, so this always exists.
 	start, _ = domain.NthWeekdayOfMonth(today.Year, today.Month, time.Tuesday, 1)
 	return start, start.AddDays(7), start.AddDays(21)
+}
+
+// guitarSeries returns the Wednesday the demo's fortnightly series starts on: the first
+// of the seeded month, for the reason swimmingSeries gives above.
+//
+// A series is held to a harder standard than a single event, because one chip on a grid
+// is not a series. What this one is in the seed to show is interval anchoring — that
+// "every second Wednesday" skips the weeks in between — and that needs two occurrences on
+// the month the app opens on. From the first Wednesday they fall on the 7th at the latest
+// and the 21st at the latest, both days of the month and so both on its grid. From the
+// next Wednesday after today, the first could already be in the following month, which
+// near the end of a month is what it was.
+func guitarSeries(today domain.Date) domain.Date {
+	first, _ := domain.NthWeekdayOfMonth(today.Year, today.Month, time.Wednesday, 1)
+	return first
+}
+
+// cinemaNight returns the day the demo's one-off evening out is on: the coming Saturday,
+// counting today, and never the one belonging to the next month.
+//
+// It is deliberately not pinned to a fixed Saturday of the month the way the two series
+// are. A one-off is supposed to sit near the day the demo was made — "what is coming up"
+// is half of what the opening screen is for — and a cinema outing pinned to the first
+// Saturday would be three weeks stale by the end of a month. What it does have to avoid
+// is the far end: nextWeekday() reads "today is already Saturday" as next week, so this
+// was up to seven days out, and seven days out can be past the end of a five-row grid
+// (see swimmingSeries). Counting today is both the realistic answer and the shorter one,
+// and a Saturday that has landed in the next month steps back a week rather than being
+// dropped — on the last days of a month the outing is then a few days behind rather than
+// a few days ahead, which is a thing calendars hold, unlike an event nobody can see.
+//
+// The step back is always inside the seeded month: the coming Saturday only leaves the
+// month when today is within six days of its end, and a week before that is the 15th at
+// the earliest.
+func cinemaNight(today domain.Date) domain.Date {
+	saturday := today
+	if saturday.Weekday() != time.Saturday {
+		saturday = nextWeekday(today, time.Saturday)
+	}
+	if saturday.Year != today.Year || saturday.Month != today.Month {
+		saturday = saturday.AddDays(-7)
+	}
+	return saturday
 }
 
 // nextWeekday returns the next occurrence of wd strictly after d.

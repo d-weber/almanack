@@ -858,6 +858,23 @@ Notable changes to this project. The format follows
   waiting on what should have appeared afterwards, so a 429 fails as a 429, with the reason
   and the remedy in the failure.
   ([#66](https://github.com/d-weber/almanack/issues/66))
+- **Two more of the demo's events could open off the bottom of the calendar.** The cinema
+  outing and the guitar lesson were still counted from the next Saturday and the next
+  Wednesday after the day the seed ran — up to seven days out, and on the last days of a
+  month past the end of the five-row grid the app opens on. It is the same defect as the
+  swimming series above with nothing to go red over it, so it only ever made the demo
+  thinner than the seeder's own summary says it is. They are fixed differently, because
+  they are different things. The guitar lesson is a fortnightly series whose entire point
+  is the week it skips, which a single occurrence cannot show, so like the swimming series
+  it is now counted from the first Wednesday of the month: two occurrences on the opening
+  screen, the 7th and the 21st at the latest. The cinema is a one-off evening out and is
+  meant to sit near the day the demo was made — pinning it to a fixed Saturday would have
+  left it three weeks stale by the end of a month — so it takes the coming Saturday
+  counting today, rather than reading "today is Saturday" as next week, and steps back a
+  week instead of crossing into the next month. Either way it is within six days of the
+  seeded day and on the month the app opens on. Both are pinned in `cmd/almanack` on every
+  date in a decade.
+  ([#67](https://github.com/d-weber/almanack/issues/67))
 
 ## [0.2.0] — 2026-07-27
 
