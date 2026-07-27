@@ -35,7 +35,7 @@ French, so signing in as **gran@example.org** is the quickest way to check a tra
 | Package | What its tests prove |
 |---|---|
 | `internal/recur` | Every policy row in the recurrence policy table in docs/architecture.md: the 31st skips short months, 29 February clamps, `UNTIL` is inclusive, every-2-weeks does not drift across a year, "2nd Tuesday" and "last Friday", Monday-anchored week parity |
-| `internal/store` | Migrations and the newer-schema refusal, the CHECK constraints actually rejecting malformed events, override and series-split plumbing, accent-insensitive search, queue idempotency |
+| `internal/store` | Migrations and the newer-schema refusal, the CHECK constraints actually rejecting malformed events, override and series-split plumbing, accent-insensitive search, queue idempotency. Also that **an existing calendar survives an upgrade**: a database the v0.2.0 binary really wrote, checked in as SQL text under `internal/store/testdata/`, is replayed into a fresh file, opened by the current binary, and read back through the store API with every row still there and still meaning the same thing |
 | `internal/webpush` | RFC 8291 Appendix A encryption vectors byte for byte, VAPID JWTs signed as raw R‖S, the TTL/Urgency/Topic header matrix, 404/410 → prune |
 | `internal/notify` | The planner and the boot catch-up policy — including the "server was off for a week" case, which is as correctness-critical as the DST tests |
 | `internal/holidays` | Easter from 1900 to 2100, and what happens when the family suppresses a holiday the law removed |

@@ -59,7 +59,7 @@ FLOORS: dict[str, float] = {
     "almanack/internal/notify": 74.0,
     # Recurrence is pure functions over dates, so it can be tested exhaustively, and is.
     "almanack/internal/recur": 98.0,
-    "almanack/internal/store": 80.0,
+    "almanack/internal/store": 81.0,
     # Web Push, verified against the RFC 8291 test vectors.
     "almanack/internal/webpush": 85.0,
 }
