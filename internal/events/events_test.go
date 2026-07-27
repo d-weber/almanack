@@ -270,6 +270,68 @@ func TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant(t *testing.T) 
 	}
 }
 
+// TestOccurrenceEndIsStartPlusTheTemplatesExactDuration covers the recurrence policy row
+// that says what happens to the *end* of an occurrence at a daylight-saving change. The
+// start keeps its wall clock, which is the rule the whole expansion is built around; the
+// end is the start plus the template's exact duration, so it is the end whose wall clock
+// moves. One occurrence a year is therefore an hour longer or shorter to read off a clock
+// face than the ones either side of it, while being exactly as long in real time.
+//
+// This is characterisation rather than a fix: it passed the moment it was written, and
+// #25 asked for it because the docs were silent, not because shift() was wrong. RFC 5545
+// treats a time-based duration as exact rather than nominal and Google Calendar agrees,
+// and the alternative is worse than untidy — preserving both wall clocks would make an
+// occurrence's length depend on the date it falls on, and would collapse anything inside
+// the missing spring hour to zero length or less.
+func TestOccurrenceEndIsStartPlusTheTemplatesExactDuration(t *testing.T) {
+	f := newFixture(t)
+
+	// Two hours, 01:30 to 03:30, weekly on Sunday from a week before the spring
+	// changeover. An occurrence that lies *across* a changeover is the only one where
+	// the two candidate rules differ, so the series is placed to produce one of each.
+	if _, err := f.svc.Create(context.Background(), f.maman, Input{
+		CalendarID: f.cal, Title: "Veillée",
+		StartsAt: f.at("2026-03-22", 1, 30), EndsAt: f.at("2026-03-22", 3, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+		},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		date    string
+		wantEnd string // the wall clock the end reads at, in Paris
+	}{
+		{"an ordinary week", "2026-03-22", "03:30"},
+		{"across the spring change, an hour longer on the clock face", "2026-03-29", "04:30"},
+		{"an ordinary week again", "2026-04-05", "03:30"},
+		{"across the autumn change, an hour shorter on the clock face", "2026-10-25", "02:30"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			occ := f.occurrenceOn(t, tc.date)
+
+			// The start keeps its wall clock, always. That is the other rule, and this
+			// test would be meaningless without it holding.
+			if got := occ.StartsAt.In(f.loc).Format("15:04"); got != "01:30" {
+				t.Errorf("%s starts at %s locally, want 01:30", tc.date, got)
+			}
+			// The end does not, and this is the row: it is a fixed distance in real
+			// time from the start, not a fixed reading on the clock face.
+			if got := occ.EndsAt.In(f.loc).Format("15:04"); got != tc.wantEnd {
+				t.Errorf("%s ends at %s locally, want %s", tc.date, got, tc.wantEnd)
+			}
+			if got := occ.EndsAt.Sub(occ.StartsAt); got != 2*time.Hour {
+				t.Errorf("%s lasts %s, want exactly 2h", tc.date, got)
+			}
+		})
+	}
+}
+
 func TestOverrideMovesOneOccurrenceOnly(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

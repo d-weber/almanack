@@ -76,6 +76,21 @@ Notable changes to this project. The format follows
   `e2e/dst-fallback.spec.js`, each test naming the other.
   ([#51](https://github.com/d-weber/almanack/issues/51))
 
+- **What happens to the end of a repeating event at a daylight-saving change is now written
+  down.** A recurring event keeps its start on the clock — a 16:30 swimming lesson is at
+  16:30 all year — and its end is the start plus however long the event actually is. For the
+  one occurrence a year that lies across a changeover, those two facts pull in different
+  directions: a two-hour evening beginning at 01:30 on the night the clocks go forward ends
+  at 04:30 rather than 03:30, and on the night they go back it ends at 02:30. Two hours
+  either way, an hour more or less to read off a clock face. That is what the app has always
+  done, it is what RFC 5545 and Google Calendar do, and it is now a row in the recurrence
+  policy table in [docs/architecture.md](docs/architecture.md) with a test in
+  `internal/events` holding it there. **Nothing has changed**, and the alternative was
+  considered and rejected rather than overlooked: keeping both wall clocks would make an
+  event's length depend on the date it fell on, and would shrink anything inside the hour
+  spring skips to nothing at all.
+  ([#25](https://github.com/d-weber/almanack/issues/25))
+
 ### Changed
 
 - **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one

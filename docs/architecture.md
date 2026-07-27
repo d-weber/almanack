@@ -116,6 +116,7 @@ These were decided deliberately, because every one of them has a plausible oppos
 | Monthly modes | Exactly one of: day-of-month, nth weekday (`1..5`, `-1` = last), or last calendar day |
 | A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, always** — the server and the browser run the same conversion, so a generated occurrence and a typed time cannot disagree. Which of the two passes it lands on follows the zone: the second in Europe/Paris, the first in a zone whose winter offset is negative |
 | A wall time in the hour the clocks skip (spring) | **Normalised forward** by the length of the gap — 02:30 becomes 03:30, not 03:00 and not 01:30. Both sides again |
+| Occurrence end | **Start plus the template's exact duration.** An occurrence spanning a daylight-saving change is therefore an hour longer or shorter in wall-clock terms, while being exactly as long in real time; RFC 5545 and Google Calendar do the same. Keeping both wall clocks instead would make an occurrence's length depend on the date it fell on, and collapse anything inside the missing spring hour to zero length or less |
 
 `internal/recur` is pure functions over dates with no I/O, which is why it can be tested
 exhaustively. Its test suite includes cases derived from a calendar independently of the
