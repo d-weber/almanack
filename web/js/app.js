@@ -311,6 +311,24 @@ function panelDate(ctx) {
   return target;
 }
 
+/**
+ * Turn a screen's leading back arrow into a close button.
+ *
+ * The same view serves both presentations. On a phone it replaces the calendar, so a
+ * back arrow is exactly right. In the panel the calendar is still there beside it and
+ * nothing was navigated away from — "back" describes nothing, and the control people
+ * look for is a cross. The behaviour is unchanged: it returns to the calendar route,
+ * which is what closes the panel.
+ */
+function asCloseButton(node) {
+  const back = node.querySelector('.screen-bar > .icon-btn');
+  if (!back) return;
+  clear(back);
+  back.appendChild(icon('close'));
+  back.setAttribute('aria-label', t('action.close'));
+  back.setAttribute('title', t('action.close'));
+}
+
 // panelScreen renders an event next to the calendar on a wide screen, and full
 // screen on a narrow one. The calendar underneath is re-rendered first, so the panel
 // always opens against the month or week you were actually looking at.
@@ -328,6 +346,7 @@ async function panelScreen(builder, ctx) {
   try {
     const node = await builder();
     if (token !== panelToken) return;
+    asCloseButton(node);
     mount(panelEl, node);
     panelEl.scrollTop = 0;
   } catch (err) {
