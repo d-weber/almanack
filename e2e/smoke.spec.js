@@ -95,6 +95,14 @@ test('the offline banner appears and cached events remain readable', async ({ pa
     })
     .toBe(true);
 
+  // Then reload once while still online. On the very first visit the worker installs
+  // and claims the page *after* the calendar has already fetched its range, so those
+  // responses never passed through it and nothing cached them. What the app promises
+  // is that the last-seen calendar stays readable — which is about a visit whose data
+  // the worker actually saw, i.e. the second one onwards.
+  await page.reload();
+  await expect(page.getByText("Leo's dentist")).toBeVisible();
+
   await context.setOffline(true);
   await page.reload();
 
