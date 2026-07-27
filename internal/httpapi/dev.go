@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/clock"
-	"agenda/internal/domain"
-	"agenda/internal/events"
+	"almanack/internal/auth"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 // The /dev endpoints are how the whole notification pipeline is exercised on a laptop
@@ -82,7 +82,7 @@ func (s *Server) handleDevDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b strings.Builder
-	devHeader(&b, "Agenda — dev")
+	devHeader(&b, "Almanack — dev")
 
 	b.WriteString(`<section class="grid">`)
 
@@ -156,14 +156,14 @@ func devHeader(b *strings.Builder, title string) {
 	b.WriteString(`<meta name="viewport" content="width=device-width, initial-scale=1">`)
 	b.WriteString(`<title>` + html.EscapeString(title) + `</title>`)
 	b.WriteString(`<link rel="stylesheet" href="/dev/dev.css"><script src="/dev/dev.js" defer></script>`)
-	b.WriteString(`</head><body><header class="top"><h1>Agenda <span class="tag">dev</span></h1><nav>`)
+	b.WriteString(`</head><body><header class="top"><h1>Almanack <span class="tag">dev</span></h1><nav>`)
 	b.WriteString(`<a href="/dev/">dashboard</a><a href="/dev/mail">mail</a>` +
 		`<a href="/dev/notifications">notifications</a><a href="/">app</a>`)
 	b.WriteString(`</nav></header><main>`)
 }
 
 func devFooter(b *strings.Builder) {
-	b.WriteString(`</main><footer class="muted">Dev endpoints are never mounted outside AGENDA_DEV=1.</footer>`)
+	b.WriteString(`</main><footer class="muted">Dev endpoints are never mounted outside ALMANACK_DEV=1.</footer>`)
 	b.WriteString(`</body></html>`)
 }
 
@@ -231,7 +231,7 @@ const devJS = `// Dev dashboard. No framework, no inline handlers: the CSP here 
 const post = async (path, body) => {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'X-Requested-With': 'agenda', 'Content-Type': 'application/json' },
+    headers: { 'X-Requested-With': 'almanack', 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -250,7 +250,7 @@ const refresh = async () => {
   set('now', state.now);
   set('clockkind', state.clock === 'fake'
     ? 'controllable clock — time travel works'
-    : 'real clock — set AGENDA_DEV=1 with the fake clock to travel');
+    : 'real clock — set ALMANACK_DEV=1 with the fake clock to travel');
   set('mailcount', state.mail);
   set('queuecount', state.queued);
   set('sentcount', state.sent);
@@ -578,7 +578,7 @@ func (s *Server) mailFiles() []string {
 // and digests all land here, fully rendered, on a laptop with no mail server.
 func (s *Server) handleDevMail(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
-	devHeader(&b, "Agenda — dev mail")
+	devHeader(&b, "Almanack — dev mail")
 	b.WriteString(`<p class="muted">` + html.EscapeString(orUnset(s.cfg.MailDir)) + `</p>`)
 
 	names := s.mailFiles()
@@ -710,7 +710,7 @@ func (s *Server) handleDevNotifications(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var b strings.Builder
-	devHeader(&b, "Agenda — dev notifications")
+	devHeader(&b, "Almanack — dev notifications")
 	if len(rows) == 0 {
 		b.WriteString(`<p class="empty">The outbox is empty. Seed the demo family, advance the clock, then run a pass.</p>`)
 		devFooter(&b)

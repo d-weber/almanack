@@ -86,7 +86,7 @@ surface this project. The name has to change.
 
 Verified against the GitHub API and registry RDAP, July 2026.
 
-### Kalends — recommended
+### Kalends — considered, not chosen
 
 Latin *kalendae*: the first day of the Roman month, and the root the word *calendar* is
 derived from. It was the day the pontifex **called out** (*calare*) the month's schedule
@@ -101,7 +101,7 @@ book, which is how we got "calendar".
 - **Risk:** the K. Mitigated — it makes the term uniquely searchable, and the K *is* the
   hook that makes a developer look it up.
 
-### Almanack — runner-up
+### Almanack — chosen
 
 Poor Richard's Almanack. An almanac is a printed table of what happens when, built to
 stay useful for a whole year with no updates — the longevity thesis in one word. The
@@ -138,23 +138,48 @@ parts, works for millennia. Excellent metaphor, excellent word.
 | **Hearth** | — | Hearthstone owns the space |
 | **Ephemeris** | A table of positions over time — apt | Astronomy and astrology own the term |
 
-## 5. Recommendation
+## 5. Decision
 
-**Kalends**, with `kalends.day` as the domain.
+**Almanack**, with the tagline *a shared calendar with a ten-year shelf life*
+(FR: *un calendrier partagé qui se garde dix ans*).
 
-It is the etymological root of the thing the project is, the namespace is clean, the
-domain is excellent, and it is a nerd-snipe: a developer either already knows where
-"calendar" comes from and enjoys the reference, or looks it up and learns something.
-Both are small gifts, and small gifts get upvoted.
+An almanac is a printed annual: a table of what happens when, built to stay useful for
+a whole year with nobody touching it. That is this project's thesis in one word, and it
+is the rare name that reads as warmly to a family member as it does to a developer. The
+`-ck` keeps it searchable.
+
+Kalends was the runner-up and is the better pure nerd-snipe, but Almanack wins on the
+thing that matters more here: it means something to the people who will actually use the
+app, not only to the people who will star it.
 
 One caveat worth stating plainly: **the name is maybe a tenth of the stars.** The pitch
 does the rest, and this project's pitch is unusually strong. Lead with it:
 
-> **Kalends** — the Roman day for announcing the month's schedule.
-> A self-hosted shared calendar in one Go binary. Two dependencies, zero JavaScript
-> dependencies, no build step, no Docker required. SQLite on disk. Designed to still be
-> running in ten years.
+> **Almanack** — a shared calendar with a ten-year shelf life.
+> Self-hosted, one Go binary, two dependencies, zero JavaScript dependencies, no build
+> step, no Docker required. SQLite on disk.
+
+Suggested GitHub repo description:
+
+> Self-hosted shared calendar built to keep working untouched. One Go binary, one SQLite
+> file, two dependencies, no build step.
 
 Suggested HN / r/selfhosted title:
 
-> Kalends: a self-hosted shared calendar in one Go binary, two dependencies, no build step
+> Almanack: a self-hosted shared calendar in one Go binary, two dependencies, no build step
+
+## 6. What the rename touched
+
+`agenda` meant two things in this codebase and only one of them changed.
+
+**Renamed to Almanack:** Go module path and all imports, `cmd/almanack/`, the binary,
+27 `ALMANACK_*` environment variables, `/etc/almanack/almanack.conf`, the
+`almanack_session` cookie, the `X-Requested-With: almanack` CSRF value (four call sites
+plus the server constant), the service-worker cache prefix, `localStorage` key prefix,
+backup filename prefix `almanack-<stamp>.db`, PWA manifest and icons, and all prose.
+
+**Deliberately unchanged:** the **agenda view** — `web/js/views/agenda.js`,
+`renderAgenda`, the `['month','week','agenda']` enums, the `/agenda` route, the
+`view.agenda` label (still "Agenda" in both locales), the `.agenda-*` CSS classes, and
+`docs/screenshots/agenda-mobile.png`. "Agenda" remains the correct English and French
+word for that view.

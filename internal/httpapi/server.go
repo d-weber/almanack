@@ -7,7 +7,7 @@
 // Two rules run through the whole package and are enforced centrally rather than per
 // handler, because a handler that forgets is a security hole:
 //
-//   - every non-GET/HEAD/OPTIONS request must carry "X-Requested-With: agenda"
+//   - every non-GET/HEAD/OPTIONS request must carry "X-Requested-With: almanack"
 //     (with SameSite=Lax this is the entire CSRF defense — there is no token);
 //   - mutations are never GET. The route table records which routes mutate, and a test
 //     walks it.
@@ -21,12 +21,12 @@ import (
 	"net/http"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/events"
-	"agenda/internal/i18n"
-	"agenda/internal/mailer"
-	"agenda/internal/store"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/events"
+	"almanack/internal/i18n"
+	"almanack/internal/mailer"
+	"almanack/internal/store"
 )
 
 // Notifier is the part of internal/notify this package needs: one pass of the planner

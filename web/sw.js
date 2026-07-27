@@ -10,7 +10,7 @@
 //    silent pushes — a silent push is a bug, never an optimisation.
 
 const APP_VERSION = "__APP_VERSION__";
-const CACHE = `agenda-${APP_VERSION}`;
+const CACHE = `almanack-${APP_VERSION}`;
 const API_PREFIX = '/api/';
 
 const SHELL = [
@@ -68,7 +68,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const names = await caches.keys();
-    const stale = names.filter((n) => n.startsWith('agenda-') && n !== CACHE);
+    const stale = names.filter((n) => n.startsWith('almanack-') && n !== CACHE);
     await Promise.all(stale.map((n) => caches.delete(n)));
     await self.clients.claim();
     // Only an *upgrade* reloads open tabs; a first install has nothing to replace.
@@ -203,13 +203,13 @@ async function showPush(event) {
   let title = payload && payload.title ? String(payload.title) : '';
   let body = payload && payload.body ? String(payload.body) : '';
   const url = payload && payload.url ? String(payload.url) : '/';
-  const tag = payload && payload.tag ? String(payload.tag) : `agenda-${Date.now()}`;
+  const tag = payload && payload.tag ? String(payload.tag) : `almanack-${Date.now()}`;
 
   if (!title) {
     const dict = await catalog(payload && payload.lang);
-    // 'Agenda' is the product name, identical in both catalogs; it is the last
+    // 'Almanack' is the product name, identical in both catalogs; it is the last
     // resort if even the catalog is unreachable.
-    title = dict['notify.fallback.title'] || 'Agenda';
+    title = dict['notify.fallback.title'] || 'Almanack';
     if (!body) body = dict['notify.fallback.body'] || '';
   }
 
@@ -274,7 +274,7 @@ async function postSubscription(sub) {
   await fetch('/api/v1/push/subscription', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'agenda' },
+    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'almanack' },
     body: JSON.stringify({
       endpoint: sub.endpoint,
       p256dh: json.keys && json.keys.p256dh,

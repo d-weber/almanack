@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/events"
+	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 // TestPlanIsIdempotent is the property the whole design rests on: the planner may

@@ -49,8 +49,8 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
 
 	sqlitedrv "modernc.org/sqlite"
 )

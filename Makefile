@@ -1,4 +1,4 @@
-# Agenda — build, test and run everything locally.
+# Almanack — build, test and run everything locally.
 #
 # There is exactly one build tool in this project: the Go compiler. No npm, no
 # bundler, no code generation. `make check` is the gate everything must pass.
@@ -20,16 +20,16 @@ DEVDATA := devdata
 # Local development environment. Dev mode gives you: the /dev endpoints (mail sink,
 # notification inbox, time travel), cookies without Secure so http://localhost works,
 # and emails written to files instead of sent.
-DEV_ENV := AGENDA_DEV=1 \
-	AGENDA_LISTEN=127.0.0.1:8080 \
-	AGENDA_DATA=$(DEVDATA)/agenda.db \
-	AGENDA_TZ=Europe/Paris
+DEV_ENV := ALMANACK_DEV=1 \
+	ALMANACK_LISTEN=127.0.0.1:8080 \
+	ALMANACK_DATA=$(DEVDATA)/almanack.db \
+	ALMANACK_TZ=Europe/Paris
 
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help: ## Show this help
-	@echo "Agenda — the family calendar"
+	@echo "Almanack — a shared calendar with a ten-year shelf life"
 	@echo
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -74,37 +74,37 @@ vet: ## Run go vet
 
 .PHONY: build
 build: ## Build the static binary for this machine
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o agenda ./cmd/agenda
-	@echo "built ./agenda ($(VERSION))"
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o almanack ./cmd/almanack
+	@echo "built ./almanack ($(VERSION))"
 
 .PHONY: build-all
 build-all: ## Build release binaries for amd64 and arm64 (hardware changes over 20 years)
 	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/agenda-$(VERSION)-linux-amd64 ./cmd/agenda
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/agenda-$(VERSION)-linux-arm64 ./cmd/agenda
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/almanack-$(VERSION)-linux-amd64 ./cmd/almanack
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/almanack-$(VERSION)-linux-arm64 ./cmd/almanack
 	@ls -lh dist/
 
 .PHONY: dev
 dev: ## Run the server locally (http://localhost:8080)
 	@mkdir -p $(DEVDATA)
-	$(DEV_ENV) $(GO) run ./cmd/agenda serve
+	$(DEV_ENV) $(GO) run ./cmd/almanack serve
 
 .PHONY: seed
 seed: ## Reset the local database and fill it with a demo family
 	@mkdir -p $(DEVDATA)
-	@rm -f $(DEVDATA)/agenda.db $(DEVDATA)/agenda.db-wal $(DEVDATA)/agenda.db-shm
+	@rm -f $(DEVDATA)/almanack.db $(DEVDATA)/almanack.db-wal $(DEVDATA)/almanack.db-shm
 	@rm -rf $(DEVDATA)/mail
-	$(DEV_ENV) $(GO) run ./cmd/agenda seed
+	$(DEV_ENV) $(GO) run ./cmd/almanack seed
 	@echo
 	@echo "Sign in at http://localhost:8080 with  maman@example.org / motdepasse"
 
 .PHONY: backup
 backup: ## Take a verified snapshot of the local database
-	$(DEV_ENV) $(GO) run ./cmd/agenda backup $(DEVDATA)/backups
+	$(DEV_ENV) $(GO) run ./cmd/almanack backup $(DEVDATA)/backups
 
 .PHONY: gen-vapid
 gen-vapid: ## Generate a VAPID keypair (do this ONCE per deployment, then store it in Vault)
-	$(GO) run ./cmd/agenda gen-vapid
+	$(GO) run ./cmd/almanack gen-vapid
 
 .PHONY: vendor
 vendor: ## Vendor and pin every dependency (run before tagging a release)
@@ -122,4 +122,4 @@ e2e: ## Browser smoke tests (dev-only; needs npx playwright)
 
 .PHONY: clean
 clean: ## Remove build output and local dev state
-	rm -rf agenda dist $(DEVDATA)
+	rm -rf almanack dist $(DEVDATA)

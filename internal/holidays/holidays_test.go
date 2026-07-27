@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/i18n"
+	"almanack/internal/domain"
+	"almanack/internal/i18n"
 )
 
 func TestEaster(t *testing.T) {

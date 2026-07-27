@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // The wire shapes of docs/api.md. They are written out here rather than

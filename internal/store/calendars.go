@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 const (

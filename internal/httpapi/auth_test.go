@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/config"
-	"agenda/internal/domain"
+	"almanack/internal/auth"
+	"almanack/internal/config"
+	"almanack/internal/domain"
 )
 
 // ---------------------------------------------------------------------------

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/events"
+	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 // Plan materializes everything that comes due between now and the horizon.

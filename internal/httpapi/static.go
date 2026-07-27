@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // appVersionPlaceholder is substituted in sw.js as it is served. The service worker

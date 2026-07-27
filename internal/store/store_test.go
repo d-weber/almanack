@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
 )
 
 // baseTime is the instant every test starts from: a Wednesday morning, safely inside
@@ -32,7 +32,7 @@ func testLocation(t *testing.T) *time.Location {
 // test can close the store and reopen the same file.
 func newStore(t *testing.T) (*Store, *clock.Fake, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "agenda.db")
+	path := filepath.Join(t.TempDir(), "almanack.db")
 	clk := clock.NewFake(baseTime)
 	s, err := Open(path, testLocation(t), clk)
 	if err != nil {
@@ -1747,7 +1747,7 @@ func TestOpenWithAwkwardPath(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	path := filepath.Join(dir, "agenda.db")
+	path := filepath.Join(dir, "almanack.db")
 
 	s, err := Open(path, testLocation(t), clock.NewFake(baseTime))
 	if err != nil {

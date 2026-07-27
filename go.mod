@@ -1,4 +1,4 @@
-module agenda
+module almanack
 
 // 1.25 is the floor. crypto/hkdf entering the standard library in 1.24 is what
 // removes one of the two reasons this project would otherwise need x/crypto; the

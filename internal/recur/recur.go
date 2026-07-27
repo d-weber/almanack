@@ -34,7 +34,7 @@ import (
 	"slices"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // searchHorizonYears bounds the search Next performs when a rule has no Until. Some

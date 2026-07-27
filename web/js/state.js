@@ -6,13 +6,13 @@ import { api } from './api.js';
 import { setTimezone, setTimeFormat, todayISO, compareOccurrences, occDays } from './dates.js';
 
 const LS = {
-  hidden: 'agenda.hiddenCalendars',
-  colorBy: 'agenda.colorBy',
-  theme: 'agenda.theme',
-  collapsed: 'agenda.sidebarCollapsed',
-  view: 'agenda.view',
-  lang: 'agenda.lang',
-  iosDismissed: 'agenda.iosInstallDismissed',
+  hidden: 'almanack.hiddenCalendars',
+  colorBy: 'almanack.colorBy',
+  theme: 'almanack.theme',
+  collapsed: 'almanack.sidebarCollapsed',
+  view: 'almanack.view',
+  lang: 'almanack.lang',
+  iosDismissed: 'almanack.iosInstallDismissed',
 };
 
 function lsGet(key, fallback) {

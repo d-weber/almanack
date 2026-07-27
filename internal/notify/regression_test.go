@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Regressions found by an adversarial review of the built system. Each of these

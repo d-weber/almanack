@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/domain"
-	"agenda/internal/imgproc"
+	"almanack/internal/auth"
+	"almanack/internal/domain"
+	"almanack/internal/imgproc"
 )
 
 type meResponse struct {

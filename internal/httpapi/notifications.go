@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 func (s *Server) handleGetPrefs(w http.ResponseWriter, r *http.Request) {

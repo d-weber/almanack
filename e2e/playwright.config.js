@@ -16,7 +16,7 @@ export default {
   retries: 0,
   reporter: [['list']],
   use: {
-    baseURL: process.env.AGENDA_URL || 'http://localhost:8080',
+    baseURL: process.env.ALMANACK_URL || 'http://localhost:8080',
     locale: 'fr-FR',
     timezoneId: 'Europe/Paris',
     trace: 'retain-on-failure',

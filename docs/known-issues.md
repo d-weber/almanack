@@ -127,10 +127,10 @@ scheme test.
 - A recurring event that spans a daylight-saving change keeps its start's wall clock but
   not its end's, so one occurrence a year is an hour longer or shorter. Defensible, but
   the docs assert the opposite.
-- Two concurrent `agenda backup` runs: the second deletes the first's in-progress file.
+- Two concurrent `almanack backup` runs: the second deletes the first's in-progress file.
 - Accent folding covers `æ`/`œ` but not `ø`/`ß`.
 - `SQLITE_BUSY` is not mapped to a retryable status; it surfaces as a 500.
-- The watchdog is fed once per scheduler tick, so `WatchdogSec` below `2 × AGENDA_TICK`
+- The watchdog is fed once per scheduler tick, so `WatchdogSec` below `2 × ALMANACK_TICK`
   causes a restart loop. Needs documenting and a startup warning.
 - `READY=1` is sent before the listener is bound, so a port clash marks the unit active
   and then exits.

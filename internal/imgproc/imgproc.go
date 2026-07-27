@@ -19,7 +19,7 @@ import (
 	"image/jpeg"
 	_ "image/png" // avatars from Android and from screenshots are usually PNG
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 const (

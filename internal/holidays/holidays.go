@@ -12,7 +12,7 @@ import (
 	"slices"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Catalog keys for the computed holidays. The names themselves live in

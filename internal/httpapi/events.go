@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/holidays"
-	"agenda/internal/recur"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/holidays"
+	"almanack/internal/recur"
 )
 
 // maxRangeDays bounds a single read of the calendar. The client fetches a month at a

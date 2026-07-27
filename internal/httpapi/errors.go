@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Error codes on the wire. The client shows localized text keyed by the code, so these

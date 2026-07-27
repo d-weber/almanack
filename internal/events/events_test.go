@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
-	"agenda/internal/store"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
+	"almanack/internal/store"
 
 	_ "modernc.org/sqlite"
 )

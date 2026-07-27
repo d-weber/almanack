@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/mailer"
-	"agenda/internal/webpush"
+	"almanack/internal/domain"
+	"almanack/internal/mailer"
+	"almanack/internal/webpush"
 )
 
 // Dispatch delivers every queued notification that has come due.

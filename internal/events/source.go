@@ -3,7 +3,7 @@ package events
 import (
 	"fmt"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Source references identify what a queued notification was created for. They are a

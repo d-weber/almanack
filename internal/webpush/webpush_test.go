@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
 )
 
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ func newTestSender(t *testing.T, hc *http.Client) (*Sender, Key) {
 	if err != nil {
 		t.Fatalf("GenerateKeys: %v", err)
 	}
-	s, err := NewSender(pub, priv, "mailto:agenda@example.org", hc)
+	s, err := NewSender(pub, priv, "mailto:almanack@example.org", hc)
 	if err != nil {
 		t.Fatalf("NewSender: %v", err)
 	}
@@ -498,8 +498,8 @@ func TestVAPIDAuthorization(t *testing.T) {
 	if want := "https://updates.push.services.mozilla.com"; claims.Aud != want {
 		t.Errorf("aud = %q, want %q (the origin, not the endpoint)", claims.Aud, want)
 	}
-	if claims.Sub != "mailto:agenda@example.org" {
-		t.Errorf("sub = %q, want mailto:agenda@example.org", claims.Sub)
+	if claims.Sub != "mailto:almanack@example.org" {
+		t.Errorf("sub = %q, want mailto:almanack@example.org", claims.Sub)
 	}
 	if want := now.Add(TokenTTL).Unix(); claims.Exp != want {
 		t.Errorf("exp = %d, want %d", claims.Exp, want)

@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/i18n"
-	"agenda/internal/mailer"
-	"agenda/internal/store"
-	"agenda/internal/webpush"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/i18n"
+	"almanack/internal/mailer"
+	"almanack/internal/store"
+	"almanack/internal/webpush"
 )
 
 // paris is the family timezone for every test here. The DST cases are the reason
@@ -161,7 +161,7 @@ type env struct {
 func newEnv(t *testing.T, now time.Time) *env {
 	t.Helper()
 	clk := clock.NewFake(now)
-	st, err := store.Open(filepath.Join(t.TempDir(), "agenda.db"), paris, clk)
+	st, err := store.Open(filepath.Join(t.TempDir(), "almanack.db"), paris, clk)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -172,7 +172,7 @@ func newEnv(t *testing.T, now time.Time) *env {
 	if err != nil {
 		t.Fatalf("generate vapid keys: %v", err)
 	}
-	sender, err := webpush.NewSender(pub, priv, "mailto:agenda@example.org", fp.srv.Client())
+	sender, err := webpush.NewSender(pub, priv, "mailto:almanack@example.org", fp.srv.Client())
 	if err != nil {
 		t.Fatalf("new sender: %v", err)
 	}
@@ -188,7 +188,7 @@ func newEnv(t *testing.T, now time.Time) *env {
 		Catalog:  i18n.MustLoad(),
 		Clock:    clk,
 		Location: paris,
-		BaseURL:  "https://agenda.example.org",
+		BaseURL:  "https://almanack.example.org",
 	})
 	if err != nil {
 		t.Fatalf("new notifier: %v", err)

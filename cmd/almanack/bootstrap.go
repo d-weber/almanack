@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/domain"
-	"agenda/internal/store"
+	"almanack/internal/auth"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/domain"
+	"almanack/internal/store"
 )
 
 // Signing up requires a valid invite — there is no open registration, which is what

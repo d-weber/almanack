@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/i18n"
-	"agenda/internal/webpush"
+	"almanack/internal/domain"
+	"almanack/internal/i18n"
+	"almanack/internal/webpush"
 )
 
 // payload is what a queued row carries: the *data* of a notification, never its

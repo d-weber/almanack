@@ -12,7 +12,7 @@ import (
 	"image/png"
 	"testing"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // bands paints the centre third-ish of the width red and the sides blue, so that a

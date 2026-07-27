@@ -1,13 +1,13 @@
 # Architecture
 
-How Agenda is built, and why it is built that way. If you are here to change something,
+How Almanack is built, and why it is built that way. If you are here to change something,
 read [CONVENTIONS.md](../CONVENTIONS.md) as well — it is the binding version of the rules
 this document explains.
 
 ## The shape of it
 
 ```
-[phones and browsers] ──HTTPS──> [your reverse proxy] ──localhost──> [agenda] ──> [agenda.db]
+[phones and browsers] ──HTTPS──> [your reverse proxy] ──localhost──> [almanack] ──> [almanack.db]
                                                                         │
                                                                         ├──> push services (FCM/Apple/Mozilla)
                                                                         └──> local MTA ──> your mail provider
@@ -17,7 +17,7 @@ One process, one file of state. The PWA is compiled into the binary with `go:emb
 there is nothing to serve separately and nothing to keep in sync with the server.
 
 ```
-cmd/agenda           the binary: subcommands, server wiring, seed, bootstrap, backup
+cmd/almanack           the binary: subcommands, server wiring, seed, bootstrap, backup
 internal/domain      core types, and the Date type that makes the all-day bug unrepresentable
 internal/store       SQLite: schema, migrations, and every SQL query in the app
 internal/recur       recurrence expansion — pure functions, no I/O
@@ -161,7 +161,7 @@ stays readable by the previous binary for one version — which is what makes a 
 against a schema newer than it knows, so a mistaken downgrade fails loudly instead of
 corrupting data.
 
-Backups are `agenda backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
+Backups are `almanack backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
 **on the output**, fsync, then rename atomically. Checking the copy rather than the source
 is the point — a backup that faithfully preserves a corrupt page is not a backup — and a
 non-zero exit is the signal your monitoring should act on.

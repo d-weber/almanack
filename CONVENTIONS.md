@@ -18,7 +18,7 @@ for the reasoning.
 ## 2. Layout
 
 ```
-cmd/agenda              the binary: subcommand dispatch, server wiring, seed, bootstrap, backup
+cmd/almanack              the binary: subcommand dispatch, server wiring, seed, bootstrap, backup
 internal/domain         core types shared by everything; depends on nothing but stdlib
 internal/clock          Clock interface (real + fake); ALL time reads go through it
 internal/config         env → Config
@@ -74,7 +74,7 @@ e2e/                    dev-only browser smoke tests
 
 - JSON REST under `/api/v1/`. Changes within `v1` are additive only.
 - **Mutations are never GET.** Logout is POST. A single state-changing GET reopens CSRF.
-- Every non-GET/HEAD/OPTIONS request must carry `X-Requested-With: agenda`; middleware rejects
+- Every non-GET/HEAD/OPTIONS request must carry `X-Requested-With: almanack`; middleware rejects
   those that don't (this plus `SameSite=Lax` is the CSRF defense — there is no token).
 - Every response carries `X-App-Version`; the client hard-refreshes on mismatch.
 - Session cookie: `HttpOnly`, `SameSite=Lax`, `Secure` (except dev mode on localhost).

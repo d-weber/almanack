@@ -1,9 +1,11 @@
-# Agenda
+# Almanack
 
-A shared calendar you can host yourself, for a family, a five-a-side team, a book club —
-any small group that needs to agree on when things happen. Inspired by
-[TimeTree](https://timetreeapp.com), built to run on a cheap box in a cupboard and keep
-working there for years without attention.
+**A shared calendar with a ten-year shelf life.**
+
+Host it yourself, for a family, a five-a-side team, a book club — any small group that
+needs to agree on when things happen. Inspired by [TimeTree](https://timetreeapp.com),
+built to run on a cheap box in a cupboard and keep working there for years without
+attention.
 
 One static Go binary. One SQLite file. A hand-written PWA with no build step.
 
@@ -66,10 +68,10 @@ Those are deliberate omissions rather than a roadmap — see the architecture do
 
 ```sh
 make build                                        # a single static binary, ~13 MB
-./agenda gen-vapid                                # push keys: once per deployment, never rotated
-cp agenda.conf.example /etc/agenda/agenda.conf    # every setting lives in this one file
-./agenda --config /etc/agenda/agenda.conf bootstrap --email you@example.org --name "Your name"
-./agenda --config /etc/agenda/agenda.conf serve
+./almanack gen-vapid                                # push keys: once per deployment, never rotated
+cp almanack.conf.example /etc/almanack/almanack.conf    # every setting lives in this one file
+./almanack --config /etc/almanack/almanack.conf bootstrap --email you@example.org --name "Your name"
+./almanack --config /etc/almanack/almanack.conf serve
 ```
 
 You supply a reverse proxy with TLS (HTTPS is not optional — Web Push and PWA install

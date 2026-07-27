@@ -1,4 +1,4 @@
-// Command agenda is the whole application: an HTTP server, its scheduler, and the
+// Command almanack is the whole application: an HTTP server, its scheduler, and the
 // handful of operational subcommands a deployment needs. One binary, one database
 // file, no runtime to install.
 package main
@@ -15,9 +15,9 @@ import (
 	"strings"
 	"syscall"
 
-	"agenda/internal/config"
-	"agenda/internal/webpush"
-	"agenda/web"
+	"almanack/internal/config"
+	"almanack/internal/webpush"
+	"almanack/web"
 
 	_ "modernc.org/sqlite" // the pure-Go driver: no CGO, so the binary stays static
 
@@ -34,7 +34,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "agenda: "+err.Error())
+		fmt.Fprintln(os.Stderr, "almanack: "+err.Error())
 		os.Exit(1)
 	}
 }
@@ -44,8 +44,8 @@ func run() error {
 		configPath string
 		showHelp   bool
 	)
-	fs := flag.NewFlagSet("agenda", flag.ContinueOnError)
-	fs.StringVar(&configPath, "config", "", "path to the configuration file (default: $AGENDA_CONFIG, then "+config.DefaultPath+")")
+	fs := flag.NewFlagSet("almanack", flag.ContinueOnError)
+	fs.StringVar(&configPath, "config", "", "path to the configuration file (default: $ALMANACK_CONFIG, then "+config.DefaultPath+")")
 	fs.BoolVar(&showHelp, "help", false, "show usage")
 	fs.Usage = usage
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -122,8 +122,8 @@ func runGenVAPID() error {
 	fmt.Printf(`A new VAPID keypair. Put both values in your configuration file and store
 them in your secret manager.
 
-AGENDA_VAPID_PUBLIC=%s
-AGENDA_VAPID_PRIVATE=%s
+ALMANACK_VAPID_PUBLIC=%s
+ALMANACK_VAPID_PRIVATE=%s
 
 Generate this ONCE for a deployment and never rotate it. Every push subscription
 in every family member's browser is bound to this public key: changing it silently
@@ -165,7 +165,7 @@ func versionString() string {
 			}
 		}
 	}
-	return "agenda " + v
+	return "almanack " + v
 }
 
 func hasFlag(args []string, names ...string) bool {
@@ -193,10 +193,10 @@ func humanBytes(n int64) string {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `agenda — the family calendar
+	fmt.Fprint(os.Stderr, `almanack — a shared calendar with a ten-year shelf life
 
 Usage:
-  agenda [--config <path>] <command>
+  almanack [--config <path>] <command>
 
 Commands:
   serve                 Run the server (the default)
@@ -212,8 +212,8 @@ Commands:
   gen-vapid             Generate a VAPID keypair. Run once per deployment.
   version               Print the version
 
-Configuration is read from --config, then $AGENDA_CONFIG, then `+config.DefaultPath+`,
-with environment variables overriding the file. See agenda.conf.example for every
+Configuration is read from --config, then $ALMANACK_CONFIG, then `+config.DefaultPath+`,
+with environment variables overriding the file. See almanack.conf.example for every
 setting.
 `)
 }

@@ -20,7 +20,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: The output of `agenda version`, or the commit you built.
+      description: The output of `almanack version`, or the commit you built.
     validations:
       required: true
 

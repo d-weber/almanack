@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"agenda/internal/domain"
-	"agenda/internal/recur"
+	"almanack/internal/domain"
+	"almanack/internal/recur"
 )
 
 // Input is the whole editable state of an event. Handlers fill it from JSON; the

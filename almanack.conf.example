@@ -1,4 +1,4 @@
-# Agenda — complete configuration reference.
+# Almanack — complete configuration reference.
 #
 # Copy this file, fill it in, and template it from your configuration management.
 # Every setting the application has is listed here; there is nothing configurable
@@ -8,17 +8,17 @@
 # quotes), deliberately, so ONE templated file works either way:
 #
 #   [Service]
-#   EnvironmentFile=/etc/agenda/agenda.conf
+#   EnvironmentFile=/etc/almanack/almanack.conf
 #
 # or:
 #
-#   agenda --config /etc/agenda/agenda.conf serve
+#   almanack --config /etc/almanack/almanack.conf serve
 #
 # Precedence: environment variable > this file > built-in default.
 # Values shown are the defaults unless marked REQUIRED.
 #
 # Secrets live in this file (VAPID private key). Deploy it 0640, owned by
-# root:agenda, and keep the source in an encrypted store such as Ansible Vault.
+# root:almanack, and keep the source in an encrypted store such as Ansible Vault.
 
 
 # ---------------------------------------------------------------------------
@@ -26,34 +26,34 @@
 # ---------------------------------------------------------------------------
 
 # Where the app listens. Keep it on localhost and put a TLS reverse proxy in front.
-AGENDA_LISTEN=127.0.0.1:8080
+ALMANACK_LISTEN=127.0.0.1:8080
 
 # REQUIRED. The public origin, no trailing slash. Appears in invite links and
 # emails. Must be https:// outside dev mode — PWA installation and Web Push both
 # refuse to work on an insecure origin, so the app rejects http:// at startup.
-AGENDA_BASE_URL=https://agenda.example.org
+ALMANACK_BASE_URL=https://almanack.example.org
 
 # REQUIRED. The SQLite database file. Its directory must be writable by the service
 # user; the -wal and -shm siblings are created next to it.
-AGENDA_DATA=/var/lib/agenda/agenda.db
+ALMANACK_DATA=/var/lib/almanack/almanack.db
 
-# Where `agenda backup` writes snapshots. Defaults to <dir of AGENDA_DATA>/backups.
-AGENDA_BACKUP_DIR=/var/lib/agenda/backups
+# Where `almanack backup` writes snapshots. Defaults to <dir of ALMANACK_DATA>/backups.
+ALMANACK_BACKUP_DIR=/var/lib/almanack/backups
 
 # The family's timezone. All recurrence expansion and all "what day is it" bucketing
 # happens in this zone, so that a weekly 16:30 event stays at 16:30 across DST.
-AGENDA_TZ=Europe/Paris
+ALMANACK_TZ=Europe/Paris
 
 # Add the two extra public holidays observed in Alsace-Moselle (Good Friday and
 # St Stephen's Day).
-AGENDA_ALSACE_MOSELLE=false
+ALMANACK_ALSACE_MOSELLE=false
 
-# Where the source of THIS build can be obtained. Agenda is AGPL-3.0: if you modify it
+# Where the source of THIS build can be obtained. Almanack is AGPL-3.0: if you modify it
 # and let other people use it over a network, section 13 entitles them to your source,
 # not upstream's. Setting this puts a link in the app's About screen, which is the
 # simplest way to comply. Leave it empty only if you are running an unmodified build
 # privately.
-AGENDA_SOURCE_URL=
+ALMANACK_SOURCE_URL=
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ AGENDA_SOURCE_URL=
 # Behind a proxy every request appears to come from the proxy: without this, the
 # login rate limiter would share a single bucket for the whole family, so one
 # attacker hammering the login page would lock everybody out.
-AGENDA_TRUSTED_PROXIES=127.0.0.1,::1
+ALMANACK_TRUSTED_PROXIES=127.0.0.1,::1
 
 
 # ---------------------------------------------------------------------------
@@ -76,26 +76,26 @@ AGENDA_TRUSTED_PROXIES=127.0.0.1,::1
 # way that change is an OS config edit rather than an application rebuild. Do not
 # point this at a remote server.
 
-AGENDA_SMTP=127.0.0.1:25
+ALMANACK_SMTP=127.0.0.1:25
 
 # REQUIRED outside dev. Envelope sender for reminders, digests and password resets.
-AGENDA_MAIL_FROM=agenda@example.org
+ALMANACK_MAIL_FROM=almanack@example.org
 
 # REQUIRED outside dev. Receives the daily operations heartbeat and failure alerts.
 # A family server has no pager: this address, and the absence of its daily mail, is
 # the monitoring. Use an address someone actually reads.
-AGENDA_OWNER_EMAIL=you@example.org
+ALMANACK_OWNER_EMAIL=you@example.org
 
 # When the daily heartbeat is sent (HH:MM, family time). Empty disables it — which
 # means no one finds out when backups stop working, so leave it on.
-AGENDA_HEARTBEAT_TIME=08:00
+ALMANACK_HEARTBEAT_TIME=08:00
 
 
 # ---------------------------------------------------------------------------
 # Web Push (VAPID)
 # ---------------------------------------------------------------------------
 #
-# Generate ONCE with `agenda gen-vapid` and store the pair in your secret manager.
+# Generate ONCE with `almanack gen-vapid` and store the pair in your secret manager.
 #
 #   *** NEVER ROTATE THESE KEYS. ***
 #
@@ -103,12 +103,12 @@ AGENDA_HEARTBEAT_TIME=08:00
 # key. Changing it silently breaks notifications on every device until each person
 # reinstalls the app. There is no migration path.
 
-AGENDA_VAPID_PUBLIC=
-AGENDA_VAPID_PRIVATE=
+ALMANACK_VAPID_PUBLIC=
+ALMANACK_VAPID_PRIVATE=
 
 # REQUIRED outside dev: a mailto: contact, per RFC 8292. Push services use it to
 # reach you if your sender misbehaves.
-AGENDA_VAPID_SUBJECT=mailto:you@example.org
+ALMANACK_VAPID_SUBJECT=mailto:you@example.org
 
 
 # ---------------------------------------------------------------------------
@@ -118,23 +118,23 @@ AGENDA_VAPID_SUBJECT=mailto:you@example.org
 # How far ahead reminders and digests are materialized into the durable outbox.
 # Longer means more resilience to a long outage; shorter means edits are reflected
 # sooner. The catch-up logic on boot backfills whatever a downtime skipped.
-AGENDA_PLAN_HORIZON=48h
+ALMANACK_PLAN_HORIZON=48h
 
 # How often the outbox is drained.
-AGENDA_TICK=30s
+ALMANACK_TICK=30s
 
 
 # ---------------------------------------------------------------------------
 # Backup retention
 # ---------------------------------------------------------------------------
 #
-# Applied by `agenda backup --prune`. Generational rather than "keep N days", so
+# Applied by `almanack backup --prune`. Generational rather than "keep N days", so
 # that corruption discovered late is still recoverable from an older generation.
 
-AGENDA_BACKUP_KEEP_HOURLY=48
-AGENDA_BACKUP_KEEP_DAILY=14
-AGENDA_BACKUP_KEEP_WEEKLY=8
-AGENDA_BACKUP_KEEP_MONTHLY=24
+ALMANACK_BACKUP_KEEP_HOURLY=48
+ALMANACK_BACKUP_KEEP_DAILY=14
+ALMANACK_BACKUP_KEEP_WEEKLY=8
+ALMANACK_BACKUP_KEEP_MONTHLY=24
 
 
 # ---------------------------------------------------------------------------
@@ -144,9 +144,9 @@ AGENDA_BACKUP_KEEP_MONTHLY=24
 # Logs go to stdout; under systemd that means journald, with no files to rotate.
 
 # One of: debug, info, warn, error
-AGENDA_LOG_LEVEL=info
+ALMANACK_LOG_LEVEL=info
 # One of: text, json
-AGENDA_LOG_FORMAT=text
+ALMANACK_LOG_FORMAT=text
 
 
 # ---------------------------------------------------------------------------
@@ -157,5 +157,5 @@ AGENDA_LOG_FORMAT=text
 # notification inbox, a controllable clock), writes mail to files instead of
 # sending it, and drops the Secure flag from the session cookie.
 
-# AGENDA_DEV=true
-# AGENDA_MAIL_DIR=devdata/mail
+# ALMANACK_DEV=true
+# ALMANACK_MAIL_DIR=devdata/mail

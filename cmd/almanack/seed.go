@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/store"
+	"almanack/internal/auth"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/store"
 )
 
 // The seeder builds a plausible family week so that `make seed && make dev` lands on

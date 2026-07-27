@@ -13,7 +13,7 @@ reply. You should get an acknowledgement within a week and an assessment within 
 
 ## Scope
 
-Agenda is designed to be reachable from the public internet, so anything that lets someone
+Almanack is designed to be reachable from the public internet, so anything that lets someone
 read or change a group's calendar without being invited to it is in scope. In particular:
 
 - authentication, session handling, invite and password-reset tokens

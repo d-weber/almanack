@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/i18n"
-	"agenda/internal/webpush"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/i18n"
+	"almanack/internal/webpush"
 )
 
 // decodePush reads the JSON the notifier handed to webpush.Send. It is reached
@@ -109,7 +109,7 @@ func TestEmailIsAParallelChannel(t *testing.T) {
 	if !strings.Contains(msgs[0].Subject, "Dentiste Léo") {
 		t.Errorf("email subject = %q, want it to name the event", msgs[0].Subject)
 	}
-	if !strings.Contains(msgs[0].Text, "https://agenda.example.org/#/event/") {
+	if !strings.Contains(msgs[0].Text, "https://almanack.example.org/#/event/") {
 		t.Errorf("email body = %q, want an absolute link back to the app", msgs[0].Text)
 	}
 }
@@ -400,7 +400,7 @@ func TestDegradesToEmailWithoutVAPID(t *testing.T) {
 	n, err := New(Options{
 		Store: e.st, Events: e.ev, Push: nil, Mailer: e.mail,
 		Catalog: i18n.MustLoad(), Clock: e.clk, Location: paris,
-		BaseURL: "https://agenda.example.org",
+		BaseURL: "https://almanack.example.org",
 	})
 	if err != nil {
 		t.Fatalf("new notifier without VAPID: %v", err)

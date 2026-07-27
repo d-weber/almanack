@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/domain"
-	"agenda/internal/mailer"
+	"almanack/internal/auth"
+	"almanack/internal/domain"
+	"almanack/internal/mailer"
 )
 
-const sessionCookie = "agenda_session"
+const sessionCookie = "almanack_session"
 
 // decoyHash is a real argon2id hash of a value nobody knows. The login handler verifies
 // against it when an address is unknown, so that "no such account" costs the same

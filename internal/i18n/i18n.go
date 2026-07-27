@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 //go:embed locales/*.json

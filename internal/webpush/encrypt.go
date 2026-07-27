@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Wire shape of the aes128gcm content coding (RFC 8188, section 2.1):

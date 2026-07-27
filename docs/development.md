@@ -66,8 +66,8 @@ real deployment is for.
 until 07:30 tomorrow to test the digest. Dev mode exposes a controllable clock:
 
 ```sh
-curl -X POST localhost:8080/dev/clock -H 'X-Requested-With: agenda' -d '{"advance":"26h"}'
-curl -X POST localhost:8080/dev/tick  -H 'X-Requested-With: agenda'
+curl -X POST localhost:8080/dev/clock -H 'X-Requested-With: almanack' -d '{"advance":"26h"}'
+curl -X POST localhost:8080/dev/tick  -H 'X-Requested-With: almanack'
 ```
 
 Advance the clock, force a planner and scheduler pass, then look at `/dev/notifications` and
@@ -85,7 +85,7 @@ The subcommand does what the server does nightly: `VACUUM INTO` a temporary file
 `PRAGMA integrity_check` on the *output*, fsync, then atomically rename. A failed integrity
 check exits non-zero — which on the real server sends the owner an email.
 
-To rehearse a restore: stop the server, copy a snapshot over `devdata/agenda.db`, start again,
+To rehearse a restore: stop the server, copy a snapshot over `devdata/almanack.db`, start again,
 and confirm your events are there. That is the whole procedure, and it is deliberately the same
 one in `docs/RESTORE.md`.
 
@@ -99,7 +99,7 @@ and are never part of the production build.
 ## Layout of `devdata/`
 
 ```
-devdata/agenda.db        the SQLite database (plus -wal and -shm while running)
+devdata/almanack.db        the SQLite database (plus -wal and -shm while running)
 devdata/mail/            .eml files the dev mailer wrote
 devdata/backups/         snapshots from `make backup`
 ```

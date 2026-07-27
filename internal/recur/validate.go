@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Validate reports why r cannot be expanded, or nil when it is well formed. Every

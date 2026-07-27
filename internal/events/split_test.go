@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Regressions from an adversarial review of the split logic. Each of these was a

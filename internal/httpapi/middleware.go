@@ -19,7 +19,7 @@ const maxRequestBytes = 2 << 20
 // which is why this design needs no token. See CONVENTIONS.md §5.
 const (
 	csrfHeader = "X-Requested-With"
-	csrfValue  = "agenda"
+	csrfValue  = "almanack"
 )
 
 type ctxKey int

@@ -8,15 +8,15 @@ import (
 	"net/http"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/events"
-	"agenda/internal/httpapi"
-	"agenda/internal/i18n"
-	"agenda/internal/mailer"
-	"agenda/internal/notify"
-	"agenda/internal/store"
-	"agenda/internal/webpush"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/events"
+	"almanack/internal/httpapi"
+	"almanack/internal/i18n"
+	"almanack/internal/mailer"
+	"almanack/internal/notify"
+	"almanack/internal/store"
+	"almanack/internal/webpush"
 )
 
 // runServe wires everything together and runs until the context is cancelled.
@@ -57,7 +57,7 @@ func runServe(ctx context.Context, cfg config.Config) error {
 			return fmt.Errorf("web push keys: %w", err)
 		}
 	} else {
-		slog.Warn("no VAPID keys configured: push notifications are disabled, email only (run `agenda gen-vapid`)")
+		slog.Warn("no VAPID keys configured: push notifications are disabled, email only (run `almanack gen-vapid`)")
 	}
 
 	eventSvc := events.New(st, cfg.FamilyTZ, clk)

@@ -1,7 +1,7 @@
 // Fetch wrapper for /api/v1 (docs/api-contract.md is normative).
 //
 // Responsibilities beyond fetch():
-//   - X-Requested-With: agenda on every mutation (the CSRF defense; there is no token);
+//   - X-Requested-With: almanack on every mutation (the CSRF defense; there is no token);
 //   - same-origin credentials, so the session cookie rides along;
 //   - {"error":{"code":…}} -> ApiError, which views map to error.<code> catalog keys;
 //   - X-App-Version handshake: one hard reload when the server has moved on;
@@ -58,7 +58,7 @@ function checkVersion(res) {
   if (v === bootVersion) return;
   // One reload, ever, per version: a mismatch that survives it is a server bug and
   // must not become a refresh loop.
-  const guard = `agenda.reloaded.${v}`;
+  const guard = `almanack.reloaded.${v}`;
   try {
     if (sessionStorage.getItem(guard)) return;
     sessionStorage.setItem(guard, '1');
@@ -107,7 +107,7 @@ async function parseError(res) {
 async function request(method, path, { body, raw, contentType, signal } = {}) {
   const headers = { Accept: 'application/json' };
   const mutation = method !== 'GET' && method !== 'HEAD';
-  if (mutation) headers['X-Requested-With'] = 'agenda';
+  if (mutation) headers['X-Requested-With'] = 'almanack';
 
   let payload;
   if (raw !== undefined) {

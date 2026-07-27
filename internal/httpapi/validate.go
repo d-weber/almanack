@@ -4,9 +4,9 @@ import (
 	"strings"
 	"unicode"
 
-	"agenda/internal/auth"
-	"agenda/internal/domain"
-	"agenda/internal/i18n"
+	"almanack/internal/auth"
+	"almanack/internal/domain"
+	"almanack/internal/i18n"
 )
 
 // defaultLang is what a client that states no preference gets. The family is French.

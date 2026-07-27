@@ -13,7 +13,7 @@ import (
 	// zoneinfo database would otherwise fail for reasons unrelated to this package.
 	_ "time/tzdata"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 func paris(t *testing.T) *time.Location {

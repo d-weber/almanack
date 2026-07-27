@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"agenda/internal/clock"
+	"almanack/internal/clock"
 )
 
 // Rate limits for the three unauthenticated endpoints that are worth guessing at. The

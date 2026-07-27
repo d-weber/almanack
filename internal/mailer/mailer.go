@@ -115,7 +115,7 @@ func (m *FileMailer) Send(_ context.Context, msg Message) error {
 	seq := m.n.Add(1)
 	name := fmt.Sprintf("%s-%03d-%s.eml", time.Now().UTC().Format("20060102-150405"), seq, safeName(msg.To))
 	path := filepath.Join(m.dir, name)
-	if err := os.WriteFile(path, build("agenda@localhost", msg), 0o640); err != nil {
+	if err := os.WriteFile(path, build("almanack@localhost", msg), 0o640); err != nil {
 		return fmt.Errorf("write dev mail %s: %w", path, err)
 	}
 	slog.Info("dev mail written", "path", path, "to", msg.To, "subject", msg.Subject)
@@ -144,7 +144,7 @@ func validate(m Message) error {
 // accents in "Rappel : Dentiste Léo" are not ASCII.
 func build(from string, m Message) []byte {
 	var b strings.Builder
-	boundary := "agenda-boundary-x7f3a9"
+	boundary := "almanack-boundary-x7f3a9"
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + m.To + "\r\n")
 	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", m.Subject) + "\r\n")

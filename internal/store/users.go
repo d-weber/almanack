@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // users.avatar is a BLOB and is never selected alongside the rest of a user: an avatar

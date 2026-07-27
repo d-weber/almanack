@@ -55,7 +55,7 @@ func GenerateKey() (Key, error) {
 }
 
 // GenerateKeys returns a fresh VAPID key pair as two base64url strings, in the
-// shape the `agenda gen-vapid` subcommand prints for the operator to paste into
+// shape the `almanack gen-vapid` subcommand prints for the operator to paste into
 // the environment file. A deployment generates these once and never rotates them
 // casually: changing them invalidates every existing subscription.
 func GenerateKeys() (publicB64, privateB64 string, err error) {

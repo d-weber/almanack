@@ -7,7 +7,7 @@
 //
 // The file format is deliberately systemd's EnvironmentFile format — KEY=VALUE, #
 // comments, optional quotes — so a single templated file can be used either as
-// `EnvironmentFile=` in a unit or passed as `agenda --config <path>`, with no
+// `EnvironmentFile=` in a unit or passed as `almanack --config <path>`, with no
 // translation step and no second format to maintain.
 //
 // Precedence: environment variable > config file > built-in default.
@@ -25,25 +25,25 @@ import (
 )
 
 // DefaultPath is consulted when no config path is given and the file exists.
-const DefaultPath = "/etc/agenda/agenda.conf"
+const DefaultPath = "/etc/almanack/almanack.conf"
 
 // known is every setting this binary reads, so a misspelling can be reported rather
-// than ignored. Keep it in step with agenda.conf.example.
+// than ignored. Keep it in step with almanack.conf.example.
 var known = map[string]bool{
-	"AGENDA_CONFIG": true, "AGENDA_DEV": true, "AGENDA_LISTEN": true,
-	"AGENDA_BASE_URL": true, "AGENDA_DATA": true, "AGENDA_BACKUP_DIR": true,
-	"AGENDA_TZ": true, "AGENDA_ALSACE_MOSELLE": true, "AGENDA_SOURCE_URL": true,
-	"AGENDA_TRUSTED_PROXIES": true, "AGENDA_SMTP": true, "AGENDA_MAIL_FROM": true,
-	"AGENDA_OWNER_EMAIL": true, "AGENDA_MAIL_DIR": true, "AGENDA_HEARTBEAT_TIME": true,
-	"AGENDA_VAPID_PUBLIC": true, "AGENDA_VAPID_PRIVATE": true, "AGENDA_VAPID_SUBJECT": true,
-	"AGENDA_PLAN_HORIZON": true, "AGENDA_TICK": true,
-	"AGENDA_BACKUP_KEEP_HOURLY": true, "AGENDA_BACKUP_KEEP_DAILY": true,
-	"AGENDA_BACKUP_KEEP_WEEKLY": true, "AGENDA_BACKUP_KEEP_MONTHLY": true,
-	"AGENDA_LOG_LEVEL": true, "AGENDA_LOG_FORMAT": true,
+	"ALMANACK_CONFIG": true, "ALMANACK_DEV": true, "ALMANACK_LISTEN": true,
+	"ALMANACK_BASE_URL": true, "ALMANACK_DATA": true, "ALMANACK_BACKUP_DIR": true,
+	"ALMANACK_TZ": true, "ALMANACK_ALSACE_MOSELLE": true, "ALMANACK_SOURCE_URL": true,
+	"ALMANACK_TRUSTED_PROXIES": true, "ALMANACK_SMTP": true, "ALMANACK_MAIL_FROM": true,
+	"ALMANACK_OWNER_EMAIL": true, "ALMANACK_MAIL_DIR": true, "ALMANACK_HEARTBEAT_TIME": true,
+	"ALMANACK_VAPID_PUBLIC": true, "ALMANACK_VAPID_PRIVATE": true, "ALMANACK_VAPID_SUBJECT": true,
+	"ALMANACK_PLAN_HORIZON": true, "ALMANACK_TICK": true,
+	"ALMANACK_BACKUP_KEEP_HOURLY": true, "ALMANACK_BACKUP_KEEP_DAILY": true,
+	"ALMANACK_BACKUP_KEEP_WEEKLY": true, "ALMANACK_BACKUP_KEEP_MONTHLY": true,
+	"ALMANACK_LOG_LEVEL": true, "ALMANACK_LOG_FORMAT": true,
 }
 
 // DefaultSourceURL is deliberately empty: only whoever publishes a build knows where
-// its source lives. Set AGENDA_SOURCE_URL and the About screen links to it — which is
+// its source lives. Set ALMANACK_SOURCE_URL and the About screen links to it — which is
 // how an AGPL-3.0 network service offers its source to the people using it (section
 // 13). If you deploy a modified version, point it at *your* source, not upstream's.
 const DefaultSourceURL = ""
@@ -55,67 +55,67 @@ type Config struct {
 	// http://localhost works. It must never be set on the family server.
 	Dev bool
 
-	ListenAddr string // AGENDA_LISTEN
-	BaseURL    string // AGENDA_BASE_URL — public origin, used in invite links and emails
-	DataPath   string // AGENDA_DATA — the SQLite file
-	BackupDir  string // AGENDA_BACKUP_DIR
+	ListenAddr string // ALMANACK_LISTEN
+	BaseURL    string // ALMANACK_BASE_URL — public origin, used in invite links and emails
+	DataPath   string // ALMANACK_DATA — the SQLite file
+	BackupDir  string // ALMANACK_BACKUP_DIR
 
-	TZName   string // AGENDA_TZ
+	TZName   string // ALMANACK_TZ
 	FamilyTZ *time.Location
 
 	// TrustedProxies are the peers whose X-Forwarded-For header may be believed.
 	// Behind a reverse proxy every request appears to come from the proxy, so
 	// without this the login rate limiter would share one bucket for the whole
 	// family — lock one person out and you lock out everyone.
-	TrustedProxies []string // AGENDA_TRUSTED_PROXIES, CSV
+	TrustedProxies []string // ALMANACK_TRUSTED_PROXIES, CSV
 
 	// Mail. The binary only ever talks to a local MTA: when the family's provider
 	// next changes its authentication rules, that is an OS config edit, not an
 	// application rebuild.
-	SMTPAddr   string // AGENDA_SMTP
-	MailFrom   string // AGENDA_MAIL_FROM
-	OwnerEmail string // AGENDA_OWNER_EMAIL — receives failure alerts and the ops heartbeat
-	MailDir    string // AGENDA_MAIL_DIR — dev only: where the file sink writes .eml files
+	SMTPAddr   string // ALMANACK_SMTP
+	MailFrom   string // ALMANACK_MAIL_FROM
+	OwnerEmail string // ALMANACK_OWNER_EMAIL — receives failure alerts and the ops heartbeat
+	MailDir    string // ALMANACK_MAIL_DIR — dev only: where the file sink writes .eml files
 
-	VAPIDPublic  string // AGENDA_VAPID_PUBLIC
-	VAPIDPrivate string // AGENDA_VAPID_PRIVATE
-	VAPIDSubject string // AGENDA_VAPID_SUBJECT — mailto: contact, required by RFC 8292
+	VAPIDPublic  string // ALMANACK_VAPID_PUBLIC
+	VAPIDPrivate string // ALMANACK_VAPID_PRIVATE
+	VAPIDSubject string // ALMANACK_VAPID_SUBJECT — mailto: contact, required by RFC 8292
 
-	AlsaceMoselle bool // AGENDA_ALSACE_MOSELLE — the two extra public holidays
+	AlsaceMoselle bool // ALMANACK_ALSACE_MOSELLE — the two extra public holidays
 
-	// SourceURL is where this build's source can be obtained. Agenda is AGPL-3.0:
+	// SourceURL is where this build's source can be obtained. Almanack is AGPL-3.0:
 	// if you modify it and let other people use it over a network, section 13
 	// obliges you to offer them the source of *your* version. The app shows this
 	// link in its About screen, which is the simplest way to comply.
-	SourceURL string // AGENDA_SOURCE_URL
+	SourceURL string // ALMANACK_SOURCE_URL
 
-	PlanHorizon   time.Duration // AGENDA_PLAN_HORIZON — how far ahead notifications are materialized
-	SchedulerTick time.Duration // AGENDA_TICK — how often the outbox is drained
+	PlanHorizon   time.Duration // ALMANACK_PLAN_HORIZON — how far ahead notifications are materialized
+	SchedulerTick time.Duration // ALMANACK_TICK — how often the outbox is drained
 
 	// HeartbeatTime is when the daily ops summary is mailed to OwnerEmail (HH:MM,
 	// family time). A family server has no pager, so this mail — and its absence —
 	// is the monitoring. Empty disables it.
-	HeartbeatTime string // AGENDA_HEARTBEAT_TIME
+	HeartbeatTime string // ALMANACK_HEARTBEAT_TIME
 
-	// Backup retention, applied by `agenda backup --prune`. Generational rather than
+	// Backup retention, applied by `almanack backup --prune`. Generational rather than
 	// "last N days", so that corruption discovered late is still recoverable.
-	KeepHourly  int // AGENDA_BACKUP_KEEP_HOURLY
-	KeepDaily   int // AGENDA_BACKUP_KEEP_DAILY
-	KeepWeekly  int // AGENDA_BACKUP_KEEP_WEEKLY
-	KeepMonthly int // AGENDA_BACKUP_KEEP_MONTHLY
+	KeepHourly  int // ALMANACK_BACKUP_KEEP_HOURLY
+	KeepDaily   int // ALMANACK_BACKUP_KEEP_DAILY
+	KeepWeekly  int // ALMANACK_BACKUP_KEEP_WEEKLY
+	KeepMonthly int // ALMANACK_BACKUP_KEEP_MONTHLY
 
-	LogLevel  string // AGENDA_LOG_LEVEL — debug|info|warn|error
-	LogFormat string // AGENDA_LOG_FORMAT — text|json
+	LogLevel  string // ALMANACK_LOG_LEVEL — debug|info|warn|error
+	LogFormat string // ALMANACK_LOG_FORMAT — text|json
 
 	// ConfigPath records where settings were read from, for logging and /healthz.
 	ConfigPath string
 }
 
 // Load reads the config file (if any) and the environment, then validates. Pass an
-// empty path to use AGENDA_CONFIG, or DefaultPath when that exists.
+// empty path to use ALMANACK_CONFIG, or DefaultPath when that exists.
 func Load(path string) (Config, error) {
 	if path == "" {
-		path = os.Getenv("AGENDA_CONFIG")
+		path = os.Getenv("ALMANACK_CONFIG")
 	}
 	if path == "" {
 		if _, err := os.Stat(DefaultPath); err == nil {
@@ -142,7 +142,7 @@ func Load(path string) (Config, error) {
 		return def
 	}
 	// A misspelt value used to fall back to the default in silence, so
-	// AGENDA_ALSACE_MOSELLE=yes — the natural spelling — quietly switched the two
+	// ALMANACK_ALSACE_MOSELLE=yes — the natural spelling — quietly switched the two
 	// extra public holidays back off. Collect the complaint instead; the reporting
 	// at the end of Load already knows how to present it.
 	var bad []string
@@ -185,42 +185,42 @@ func Load(path string) (Config, error) {
 
 	c := Config{
 		ConfigPath:     path,
-		Dev:            getBool("AGENDA_DEV", false),
-		ListenAddr:     get("AGENDA_LISTEN", "127.0.0.1:8080"),
-		BaseURL:        strings.TrimRight(get("AGENDA_BASE_URL", ""), "/"),
-		DataPath:       get("AGENDA_DATA", ""),
-		BackupDir:      get("AGENDA_BACKUP_DIR", ""),
-		TZName:         get("AGENDA_TZ", "Europe/Paris"),
-		TrustedProxies: splitCSV(get("AGENDA_TRUSTED_PROXIES", "127.0.0.1,::1")),
-		SMTPAddr:       get("AGENDA_SMTP", "127.0.0.1:25"),
-		MailFrom:       get("AGENDA_MAIL_FROM", ""),
-		OwnerEmail:     get("AGENDA_OWNER_EMAIL", ""),
-		MailDir:        get("AGENDA_MAIL_DIR", ""),
-		VAPIDPublic:    get("AGENDA_VAPID_PUBLIC", ""),
-		VAPIDPrivate:   get("AGENDA_VAPID_PRIVATE", ""),
-		VAPIDSubject:   get("AGENDA_VAPID_SUBJECT", ""),
-		AlsaceMoselle:  getBool("AGENDA_ALSACE_MOSELLE", false),
-		SourceURL:      get("AGENDA_SOURCE_URL", DefaultSourceURL),
-		PlanHorizon:    getDur("AGENDA_PLAN_HORIZON", 48*time.Hour),
-		SchedulerTick:  getDur("AGENDA_TICK", 30*time.Second),
-		HeartbeatTime:  get("AGENDA_HEARTBEAT_TIME", "08:00"),
-		KeepHourly:     getInt("AGENDA_BACKUP_KEEP_HOURLY", 48),
-		KeepDaily:      getInt("AGENDA_BACKUP_KEEP_DAILY", 14),
-		KeepWeekly:     getInt("AGENDA_BACKUP_KEEP_WEEKLY", 8),
-		KeepMonthly:    getInt("AGENDA_BACKUP_KEEP_MONTHLY", 24),
-		LogLevel:       get("AGENDA_LOG_LEVEL", "info"),
-		LogFormat:      get("AGENDA_LOG_FORMAT", "text"),
+		Dev:            getBool("ALMANACK_DEV", false),
+		ListenAddr:     get("ALMANACK_LISTEN", "127.0.0.1:8080"),
+		BaseURL:        strings.TrimRight(get("ALMANACK_BASE_URL", ""), "/"),
+		DataPath:       get("ALMANACK_DATA", ""),
+		BackupDir:      get("ALMANACK_BACKUP_DIR", ""),
+		TZName:         get("ALMANACK_TZ", "Europe/Paris"),
+		TrustedProxies: splitCSV(get("ALMANACK_TRUSTED_PROXIES", "127.0.0.1,::1")),
+		SMTPAddr:       get("ALMANACK_SMTP", "127.0.0.1:25"),
+		MailFrom:       get("ALMANACK_MAIL_FROM", ""),
+		OwnerEmail:     get("ALMANACK_OWNER_EMAIL", ""),
+		MailDir:        get("ALMANACK_MAIL_DIR", ""),
+		VAPIDPublic:    get("ALMANACK_VAPID_PUBLIC", ""),
+		VAPIDPrivate:   get("ALMANACK_VAPID_PRIVATE", ""),
+		VAPIDSubject:   get("ALMANACK_VAPID_SUBJECT", ""),
+		AlsaceMoselle:  getBool("ALMANACK_ALSACE_MOSELLE", false),
+		SourceURL:      get("ALMANACK_SOURCE_URL", DefaultSourceURL),
+		PlanHorizon:    getDur("ALMANACK_PLAN_HORIZON", 48*time.Hour),
+		SchedulerTick:  getDur("ALMANACK_TICK", 30*time.Second),
+		HeartbeatTime:  get("ALMANACK_HEARTBEAT_TIME", "08:00"),
+		KeepHourly:     getInt("ALMANACK_BACKUP_KEEP_HOURLY", 48),
+		KeepDaily:      getInt("ALMANACK_BACKUP_KEEP_DAILY", 14),
+		KeepWeekly:     getInt("ALMANACK_BACKUP_KEEP_WEEKLY", 8),
+		KeepMonthly:    getInt("ALMANACK_BACKUP_KEEP_MONTHLY", 24),
+		LogLevel:       get("ALMANACK_LOG_LEVEL", "info"),
+		LogFormat:      get("ALMANACK_LOG_FORMAT", "text"),
 	}
 
 	loc, err := time.LoadLocation(c.TZName)
 	if err != nil {
-		return Config{}, fmt.Errorf("AGENDA_TZ %q: %w", c.TZName, err)
+		return Config{}, fmt.Errorf("ALMANACK_TZ %q: %w", c.TZName, err)
 	}
 	c.FamilyTZ = loc
 
 	if c.Dev {
 		if c.DataPath == "" {
-			c.DataPath = filepath.Join("devdata", "agenda.db")
+			c.DataPath = filepath.Join("devdata", "almanack.db")
 		}
 		if c.BaseURL == "" {
 			c.BaseURL = "http://" + strings.Replace(c.ListenAddr, "127.0.0.1", "localhost", 1)
@@ -229,7 +229,7 @@ func Load(path string) (Config, error) {
 			c.MailDir = filepath.Join(filepath.Dir(c.DataPath), "mail")
 		}
 		if c.MailFrom == "" {
-			c.MailFrom = "agenda@localhost"
+			c.MailFrom = "almanack@localhost"
 		}
 		if c.OwnerEmail == "" {
 			c.OwnerEmail = "owner@localhost"
@@ -243,13 +243,13 @@ func Load(path string) (Config, error) {
 	}
 
 	// An unrecognised key is almost always a typo, and the settings are a closed set
-	// — silently ignoring AGENDA_TZZ books every event in the wrong timezone.
+	// — silently ignoring ALMANACK_TZZ books every event in the wrong timezone.
 	for key := range file {
-		if !strings.HasPrefix(key, "AGENDA_") {
+		if !strings.HasPrefix(key, "ALMANACK_") {
 			continue
 		}
 		if !known[key] {
-			bad = append(bad, fmt.Sprintf("%s is not a setting this version understands (check the spelling against agenda.conf.example)", key))
+			bad = append(bad, fmt.Sprintf("%s is not a setting this version understands (check the spelling against almanack.conf.example)", key))
 		}
 	}
 
@@ -261,51 +261,51 @@ func Load(path string) (Config, error) {
 
 func (c Config) validate(problems []string) error {
 	if c.DataPath == "" {
-		problems = append(problems, "AGENDA_DATA is required (path to the SQLite file)")
+		problems = append(problems, "ALMANACK_DATA is required (path to the SQLite file)")
 	}
 	if c.BaseURL == "" {
-		problems = append(problems, "AGENDA_BASE_URL is required (used in invite links and emails)")
+		problems = append(problems, "ALMANACK_BASE_URL is required (used in invite links and emails)")
 	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
-		problems = append(problems, fmt.Sprintf("AGENDA_LOG_LEVEL=%q must be debug, info, warn or error", c.LogLevel))
+		problems = append(problems, fmt.Sprintf("ALMANACK_LOG_LEVEL=%q must be debug, info, warn or error", c.LogLevel))
 	}
 	switch strings.ToLower(c.LogFormat) {
 	case "text", "json":
 	default:
-		problems = append(problems, fmt.Sprintf("AGENDA_LOG_FORMAT=%q must be text or json", c.LogFormat))
+		problems = append(problems, fmt.Sprintf("ALMANACK_LOG_FORMAT=%q must be text or json", c.LogFormat))
 	}
 	if c.PlanHorizon <= 0 {
-		problems = append(problems, "AGENDA_PLAN_HORIZON must be positive")
+		problems = append(problems, "ALMANACK_PLAN_HORIZON must be positive")
 	}
 	if c.SchedulerTick <= 0 {
-		problems = append(problems, "AGENDA_TICK must be positive")
+		problems = append(problems, "ALMANACK_TICK must be positive")
 	}
 	if c.HeartbeatTime != "" && !validHHMM(c.HeartbeatTime) {
-		problems = append(problems, "AGENDA_HEARTBEAT_TIME must be HH:MM (or empty to disable)")
+		problems = append(problems, "ALMANACK_HEARTBEAT_TIME must be HH:MM (or empty to disable)")
 	}
 	if !c.Dev {
 		if !strings.HasPrefix(c.BaseURL, "https://") {
-			problems = append(problems, "AGENDA_BASE_URL must be https outside dev mode: PWA installation and Web Push both require a secure origin")
+			problems = append(problems, "ALMANACK_BASE_URL must be https outside dev mode: PWA installation and Web Push both require a secure origin")
 		}
 		if c.MailFrom == "" {
-			problems = append(problems, "AGENDA_MAIL_FROM is required")
+			problems = append(problems, "ALMANACK_MAIL_FROM is required")
 		}
 		if c.OwnerEmail == "" {
-			problems = append(problems, "AGENDA_OWNER_EMAIL is required: it receives failure alerts, and without it nothing on this server fails loudly")
+			problems = append(problems, "ALMANACK_OWNER_EMAIL is required: it receives failure alerts, and without it nothing on this server fails loudly")
 		}
 		if c.VAPIDPublic == "" || c.VAPIDPrivate == "" {
-			problems = append(problems, "AGENDA_VAPID_PUBLIC and AGENDA_VAPID_PRIVATE are required (generate once with `agenda gen-vapid`; never rotate them, as that invalidates every push subscription)")
+			problems = append(problems, "ALMANACK_VAPID_PUBLIC and ALMANACK_VAPID_PRIVATE are required (generate once with `almanack gen-vapid`; never rotate them, as that invalidates every push subscription)")
 		}
 		if c.VAPIDSubject == "" {
-			problems = append(problems, "AGENDA_VAPID_SUBJECT is required, e.g. mailto:you@example.org")
+			problems = append(problems, "ALMANACK_VAPID_SUBJECT is required, e.g. mailto:you@example.org")
 		}
 	}
 	if len(problems) > 0 {
 		hint := ""
 		if c.ConfigPath == "" {
-			hint = "\n\nNo configuration file was read. Pass --config <path>, set AGENDA_CONFIG, or place one at " + DefaultPath + ".\nSee agenda.conf.example for a complete annotated file."
+			hint = "\n\nNo configuration file was read. Pass --config <path>, set ALMANACK_CONFIG, or place one at " + DefaultPath + ".\nSee almanack.conf.example for a complete annotated file."
 		} else {
 			hint = "\n\nConfiguration file: " + c.ConfigPath
 		}

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // ---------------------------------------------------------------------------

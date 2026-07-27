@@ -23,11 +23,11 @@ being fixed, and each has a regression test.
 - **The outbox is now reconciled on every planning pass.** Changing a reminder, muting a
   calendar, switching the daily digest off or moving its time all used to leave the old
   notification queued, so it fired anyway.
-- **The daily operations heartbeat now exists.** `AGENDA_OWNER_EMAIL` and
-  `AGENDA_HEARTBEAT_TIME` were required settings that nothing read.
+- **The daily operations heartbeat now exists.** `ALMANACK_OWNER_EMAIL` and
+  `ALMANACK_HEARTBEAT_TIME` were required settings that nothing read.
 - **`/healthz` now reports backup age and result.** The metadata it reads was never
   written, so a server that had never once been backed up reported itself healthy.
-- **`agenda backup --prune` no longer deletes every snapshot** when all retention
+- **`almanack backup --prune` no longer deletes every snapshot** when all retention
   settings are zero — including the one it had just written and reported as a success.
   Snapshots are also verified for referential integrity, named to the second, and refuse
   to run against a missing database.
@@ -37,7 +37,7 @@ being fixed, and each has a regression test.
   participant.
 - **Cancelling a date that is not an occurrence is refused** instead of writing an
   exception that would spring to life later.
-- Configuration is now strict: an unparseable value or an unknown `AGENDA_*` key is a
+- Configuration is now strict: an unparseable value or an unknown `ALMANACK_*` key is a
   startup error naming the problem, rather than a silent fall back to the default.
 - The Go version floor, `make e2e`, `make cover`, the dependency allowlist (which was
   checking an empty list), and several broken documentation links were all corrected.
@@ -83,8 +83,8 @@ First working version: in use by one household, not yet by anyone else.
 - Colouring events by label or by participant; cover pictures for calendars.
 - Invite-only signup by shareable link; argon2id passwords; password reset by email.
 - French public holidays, computed rather than tabulated.
-- `agenda backup`, taking integrity-checked snapshots with generational retention.
-- `agenda bootstrap`, creating the first account on an empty database.
+- `almanack backup`, taking integrity-checked snapshots with generational retention.
+- `almanack bootstrap`, creating the first account on an empty database.
 - `/healthz`, systemd readiness and watchdog support.
 
 ### Known limitations

@@ -1,5 +1,5 @@
 # Build output
-/agenda
+/almanack
 /dist/
 
 # Local development state (DB, dev mail sink, dev push sink, backups)

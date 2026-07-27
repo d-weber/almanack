@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/events"
+	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 // TestOutageCatchUp is the boot policy of the notification rules in docs/architecture.md, end to end, and it

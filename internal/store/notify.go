@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // ---------------------------------------------------------------------------

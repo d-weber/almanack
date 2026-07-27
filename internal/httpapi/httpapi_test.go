@@ -15,14 +15,14 @@ import (
 	"testing/fstest"
 	"time"
 
-	"agenda/internal/auth"
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/i18n"
-	"agenda/internal/mailer"
-	"agenda/internal/store"
+	"almanack/internal/auth"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/i18n"
+	"almanack/internal/mailer"
+	"almanack/internal/store"
 )
 
 // The tests run against a real temp SQLite store and a real http.Server, because the
@@ -33,7 +33,7 @@ const testPassword = "motdepasse"
 
 // Fixture accounts are hashed by internal/auth, exactly as the seeder does. That is
 // deliberate: if the HTTP layer ever grew a password format of its own, the accounts
-// `agenda seed` creates would stop being able to log in, and this is where that shows up.
+// `almanack seed` creates would stop being able to log in, and this is where that shows up.
 //
 // The hash is computed once for the whole binary, since RFC 9106 parameters cost ~100 ms
 // a time by design.
@@ -59,8 +59,8 @@ type env struct {
 
 func testWebFS() fstest.MapFS {
 	return fstest.MapFS{
-		"index.html":  &fstest.MapFile{Data: []byte("<!doctype html><title>Agenda</title><div id=app></div>")},
-		"sw.js":       &fstest.MapFile{Data: []byte("const CACHE = 'agenda-__APP_VERSION__';\n")},
+		"index.html":  &fstest.MapFile{Data: []byte("<!doctype html><title>Almanack</title><div id=app></div>")},
+		"sw.js":       &fstest.MapFile{Data: []byte("const CACHE = 'almanack-__APP_VERSION__';\n")},
 		"js/app.js":   &fstest.MapFile{Data: []byte("export const boot = () => {};\n")},
 		"css/app.css": &fstest.MapFile{Data: []byte(":root{--c:#3b7ddd}\n")},
 	}
@@ -78,7 +78,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 		Dev:            true,
 		ListenAddr:     "127.0.0.1:0",
 		BaseURL:        "http://localhost:8080",
-		DataPath:       filepath.Join(dir, "agenda.db"),
+		DataPath:       filepath.Join(dir, "almanack.db"),
 		BackupDir:      filepath.Join(dir, "backups"),
 		MailDir:        filepath.Join(dir, "mail"),
 		TZName:         "Europe/Paris",

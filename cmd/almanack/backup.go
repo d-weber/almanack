@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/config"
-	"agenda/internal/httpapi"
-	"agenda/internal/store"
+	"almanack/internal/clock"
+	"almanack/internal/config"
+	"almanack/internal/httpapi"
+	"almanack/internal/store"
 )
 
 // Backups are the last line of defence for a family's calendar, so this command is
@@ -84,7 +84,7 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 		dir = cfg.BackupDir
 	}
 	if dir == "" {
-		return backupResult{}, fmt.Errorf("no backup directory: pass one as an argument or set AGENDA_BACKUP_DIR")
+		return backupResult{}, fmt.Errorf("no backup directory: pass one as an argument or set ALMANACK_BACKUP_DIR")
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return backupResult{}, fmt.Errorf("create backup directory %s: %w", dir, err)
@@ -94,7 +94,7 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 	}
 
 	stamp := time.Now().UTC().Format(backupTimeLayout)
-	final := filepath.Join(dir, "agenda-"+stamp+".db")
+	final := filepath.Join(dir, "almanack-"+stamp+".db")
 	tmp := final + ".tmp"
 	// VACUUM INTO refuses to overwrite, and a same-minute rerun would otherwise fail
 	// on the leftover from the previous attempt.
@@ -242,10 +242,10 @@ func pruneBackups(dir string, cfg config.Config, keepAlways string) (int, error)
 	}
 	var snaps []snap
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "agenda-") || !strings.HasSuffix(e.Name(), ".db") {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "almanack-") || !strings.HasSuffix(e.Name(), ".db") {
 			continue
 		}
-		stamp := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "agenda-"), ".db")
+		stamp := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "almanack-"), ".db")
 		when, err := time.Parse(backupTimeLayout, stamp)
 		if err != nil {
 			continue // not ours; leave it alone

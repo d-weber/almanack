@@ -44,8 +44,8 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
 )
 
 // Sentinel errors. Callers use errors.Is on these; the concrete error returned by

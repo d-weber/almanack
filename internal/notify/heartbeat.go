@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"agenda/internal/domain"
-	"agenda/internal/mailer"
+	"almanack/internal/domain"
+	"almanack/internal/mailer"
 )
 
 // MetaHeartbeatSent records the last day the operator's summary went out, so a
@@ -69,7 +69,7 @@ func (n *Notifier) heartbeatBody(ctx context.Context, day domain.Date) (string, 
 	h := n.Health(ctx)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Agenda — %s\n\n", day)
+	fmt.Fprintf(&b, "Almanack — %s\n\n", day)
 
 	status := "everything looks fine"
 	var problems []string

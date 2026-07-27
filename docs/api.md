@@ -6,9 +6,9 @@ so it is normative: if code and contract disagree, that is a bug in the code.
 ## Conventions
 
 - Base path `/api/v1`. JSON in, JSON out, UTF-8. Changes within v1 are **additive only**.
-- Every non-GET request must send `X-Requested-With: agenda` (CSRF defense) and
+- Every non-GET request must send `X-Requested-With: almanack` (CSRF defense) and
   `Content-Type: application/json` unless stated otherwise. **Mutations are never GET.**
-- Auth is the `agenda_session` cookie (HttpOnly, SameSite=Lax, Secure outside dev).
+- Auth is the `almanack_session` cookie (HttpOnly, SameSite=Lax, Secure outside dev).
 - Every response carries `X-App-Version`. The client compares it with its own build hash and
   hard-reloads on mismatch.
 - Errors: HTTP status + `{"error":{"code":"...","message":"..."}}`.
@@ -203,7 +203,7 @@ for notification text. `fr` and `en`; anything else is a 404.
 ## Operational
 
 - `GET /healthz` — no auth. `{"status":"ok|degraded", "checks":{…}}`, 200 or 503.
-- Dev mode only (`AGENDA_DEV=1`), never mounted in production:
+- Dev mode only (`ALMANACK_DEV=1`), never mounted in production:
   `GET /dev/` (dashboard), `GET /dev/mail`, `GET /dev/notifications`,
   `POST /dev/clock {"advance":"26h"}` or `{"set":"2026-08-04T06:00:00Z"}`,
   `POST /dev/tick` (run planner + scheduler immediately), `POST /dev/seed`.

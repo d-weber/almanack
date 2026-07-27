@@ -8,7 +8,7 @@ Migration is two independent jobs, and they should stay independent:
 
 1. **Get the data out**, verbatim and completely, while the account still exists.
    `tools/timetree-export/export.py` does this. **Done — see below.**
-2. **Turn it into Agenda rows.** Not built. This document is its specification.
+2. **Turn it into Almanack rows.** Not built. This document is its specification.
 
 Step 1 had the deadline: it depends on an undocumented API belonging to someone else,
 which can change without notice. Step 2 reads files on your disk and can be redone as
@@ -26,7 +26,7 @@ you should re-check against your own export rather than assume:
 
 - **Attachments and photos may not exist at all.** Every event had an empty `files`
   array, `media_content_count: 0`, and `attachment` as the stub
-  `{"virtual_user_attendees": []}`. If that holds for you, Agenda's decision to leave
+  `{"virtual_user_attendees": []}`. If that holds for you, Almanack's decision to leave
   photos out costs nothing in migration.
 - **No tombstones.** No event carried a `deactivated_at`, so there was nothing to
   filter out.
@@ -41,7 +41,7 @@ you should re-check against your own export rather than assume:
 The community tool [TimeTree-Exporter](https://github.com/eoleedi/TimeTree-Exporter)
 converts TimeTree to `.ics`, which is the right answer for moving to Google Calendar.
 It is the wrong intermediate format here, because the fields it must drop are the ones
-Agenda most wants: **labels** and **participants**, and in practice nearly every event
+Almanack most wants: **labels** and **participants**, and in practice nearly every event
 carries attendees. Raw JSON keeps them.
 
 It remains useful as a cross-check: exporting the same calendar both ways and
@@ -76,20 +76,20 @@ timetree-raw/
     events.json               every event, all pages merged
 ```
 
-## Mapping to Agenda
+## Mapping to Almanack
 
-The two models line up unusually well — Agenda was designed after TimeTree's mechanics,
+The two models line up unusually well — Almanack was designed after TimeTree's mechanics,
 and the ten-labels-per-calendar rule ([`domain.LabelsPerCalendar`](../internal/domain/domain.go))
 came from there. The export confirms it: both calendars have exactly ten labels, ids
 `1`–`10`.
 
-| TimeTree | Agenda | Notes |
+| TimeTree | Almanack | Notes |
 |---|---|---|
 | calendar | `Calendar` | name, colour |
 | `calendar_users` | `Member` + `User` | 7 distinct people; needs an identity map |
 | `calendar_labels` | `Label` | ids 1–10 → positions 1–10; colour is an **int**, format as `#%06x` |
 | `title` / `note` / `location` / `url` | `Title` / `Notes` / `Location` / `URL` | direct |
-| `location_lat` / `location_lon` | — | dropped; Agenda stores no geography |
+| `location_lat` / `location_lon` | — | dropped; Almanack stores no geography |
 | `start_at` / `end_at` | `StartsAt`/`EndsAt` or `StartDate`/`EndDate` | epoch **milliseconds**; see below |
 | `all_day` | `AllDay` | selects which pair above is populated |
 | `label_id` | `LabelID` | per-calendar remap |
@@ -99,7 +99,7 @@ came from there. The export confirms it: both calendars have exactly ten labels,
 | `recurrences` | `Recurrence` | RRULE strings; see below |
 | `created_at` / `updated_at` | `CreatedAt` / `UpdatedAt` | preserve the audit trail |
 | `uuid` | — | keep as the import key, for idempotent re-runs |
-| `type: 1` (birthday) | yearly all-day event | 3 events; Agenda has no birthday type |
+| `type: 1` (birthday) | yearly all-day event | 3 events; Almanack has no birthday type |
 | `category: 2` (memo) | — | exactly 1 event; see below |
 | `attachment`, `files`, `lunar`, `pinned_at`, `like_count`, `row_order` | — | unused or empty throughout |
 
@@ -113,7 +113,7 @@ all-day events, 103 UTC events). So the "all-day event authored in another timez
 hazard is **zero occurrences**; no heuristic needed.
 
 `end_at` is **exclusive**: a single-day all-day event has `end_at - start_at` of
-exactly one day. Agenda's `EndDate` is **inclusive**, so:
+exactly one day. Almanack's `EndDate` is **inclusive**, so:
 
 ```
 StartDate = utc_date(start_at)
@@ -139,7 +139,7 @@ RRULE:FREQ=YEARLY  +  EXDATE:20240705T000000Z
 ```
 
 All yearly, i.e. birthdays and anniversaries. `WKST` is meaningless for a yearly rule
-and can be ignored. So Agenda needs no general RRULE parser (technical plan §5 says it
+and can be ignored. So Almanack needs no general RRULE parser (technical plan §5 says it
 ships none): handle `FREQ=YEARLY` and reject everything else loudly. The single
 `EXDATE` maps to deleting that one occurrence with `ScopeThis` after the series is
 created — one manual step, not a feature.
@@ -156,7 +156,7 @@ Which is exactly why [`domain.Reminder`](../internal/domain/domain.go) splits in
 `OffsetMinutes` for timed events and `DaysBefore` + `AtTimeLocal` for all-day ones.
 Timed events use the first form directly (`10` → 10 minutes before).
 
-The remaining mismatch is ownership: a TimeTree alert belongs to the *event*, an Agenda
+The remaining mismatch is ownership: a TimeTree alert belongs to the *event*, an Almanack
 reminder belongs to *one person*. Fanning 345 alerts out to every member would produce
 a wall of notifications on first boot — import alerts only for events in the future.
 
@@ -164,8 +164,8 @@ a wall of notifications on first boot — import alerts only for events in the f
 renamed one) and the colours are TimeTree's stock palette. Map `label_id` 1–10 to
 positions 1–10, carry the colours across as `#%06x`, done.
 
-**Identity is the one real prerequisite.** TimeTree user ids mean nothing to Agenda,
-and Agenda accounts are created only through invites. Order of operations: create the
+**Identity is the one real prerequisite.** TimeTree user ids mean nothing to Almanack,
+and Almanack accounts are created only through invites. Order of operations: create the
 calendars, invite the family, let everyone sign up, *then* run the importer with a
 hand-written map of the seven ids. `CreatedBy` and `Participants` both depend on it.
 
@@ -175,14 +175,14 @@ will be wrong in some small way.
 
 ### Open decisions
 
-- **Memos** (`category: 2`). TimeTree's undated notes have no equivalent in Agenda. If
+- **Memos** (`category: 2`). TimeTree's undated notes have no equivalent in Almanack. If
   there are only a handful, retyping them by hand beats writing code for them.
 - **How far back to import.** Exports often reach surprisingly far into the past,
   usually because a recurring birthday is anchored at someone's actual birth year
   rather than because there is decades of real history. At a few hundred events the
   volume is irrelevant either way; a cutoff mainly saves you mapping identities for
   members who have since left the calendar.
-- **Comments.** TimeTree's per-event chat is out of scope for Agenda (see
+- **Comments.** TimeTree's per-event chat is out of scope for Almanack (see
   [architecture.md](architecture.md)) and the export tool does not fetch it. Keeping
   any would need a separate pass — one request per event — and they would have to land
   in an event's notes.

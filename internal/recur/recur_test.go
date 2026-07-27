@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"agenda/internal/domain"
+	"almanack/internal/domain"
 )
 
 // Every expected date in this file was derived from the calendar, not from the code

@@ -14,10 +14,10 @@ import (
 	"sort"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
-	"agenda/internal/recur"
-	"agenda/internal/store"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
+	"almanack/internal/recur"
+	"almanack/internal/store"
 )
 
 // Service reads and writes events. It owns the rules that involve more than one

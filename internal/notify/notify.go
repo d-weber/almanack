@@ -44,16 +44,16 @@ import (
 	"sync"
 	"time"
 
-	"agenda/internal/clock"
-	"agenda/internal/domain"
-	"agenda/internal/events"
-	"agenda/internal/i18n"
-	"agenda/internal/mailer"
-	"agenda/internal/store"
-	"agenda/internal/webpush"
+	"almanack/internal/clock"
+	"almanack/internal/domain"
+	"almanack/internal/events"
+	"almanack/internal/i18n"
+	"almanack/internal/mailer"
+	"almanack/internal/store"
+	"almanack/internal/webpush"
 )
 
-// Defaults for the two knobs the operator can turn (AGENDA_PLAN_HORIZON, AGENDA_TICK).
+// Defaults for the two knobs the operator can turn (ALMANACK_PLAN_HORIZON, ALMANACK_TICK).
 const (
 	// DefaultHorizon is how far ahead the planner materializes the outbox.
 	DefaultHorizon = 48 * time.Hour
