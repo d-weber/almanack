@@ -586,6 +586,12 @@ const seriesTailDays = 31
 //
 // Participants are loaded for every event returned, templates and override copies
 // included.
+//
+// All five statements run inside one read transaction, so what comes back is the
+// database at a single instant rather than at five of them. Without it, an edit
+// committing between the singles query and the overrides query is observed half-applied:
+// the same occurrence drawn twice, once as itself and once inside its series. See
+// Store.readTx for why that transaction costs no write lock.
 func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to domain.Date) (RangeResult, error) {
 	var res RangeResult
 	if len(calendarIDs) == 0 {
@@ -605,121 +611,127 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	calArgs := idArgs(calendarIDs)
 	calIn := placeholders(len(calendarIDs))
 
-	// Singles. The NOT EXISTS keeps override copies out: they are ordinary rows with a
-	// NULL recurrence_id, and without it every edited occurrence would be drawn twice,
-	// once as itself and once inside its series.
-	singleArgs := append(append([]any{}, calArgs...), to, from, toTS, fromTS, fromTS)
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+eventColsE+`
-		  FROM events e
-		 WHERE e.calendar_id IN (`+calIn+`)
-		   AND e.recurrence_id IS NULL
-		   AND NOT EXISTS (SELECT 1 FROM event_overrides o WHERE o.override_event_id = e.id)
-		   AND ( (e.all_day = 1 AND e.start_date <= ? AND e.end_date >= ?)
-		      OR (e.all_day = 0 AND e.starts_at < ? AND (e.ends_at > ? OR e.starts_at >= ?)) )
-		 ORDER BY COALESCE(e.start_date, e.starts_at), e.id`, singleArgs...)
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", mapErr(err))
-	}
-	singles, err := collectEvents(rows)
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", err)
-	}
-
-	// Series templates joined to their pattern.
-	//
-	// The EXISTS is not an optimisation: an override can move an occurrence outside the
-	// series' own dtstart..until envelope, in either direction, and the copy carrying it
-	// is kept out of the singles query above by design. A series dropped here therefore
-	// takes that occurrence with it — the last lesson of term, dragged into the
-	// following month, simply stops existing. Only a copy can do that; a cancellation
-	// removes an occurrence and can never make one appear, so it does not widen
-	// anything.
-	seriesArgs := append(append([]any{}, calArgs...), to, from.AddDays(-seriesTailDays))
-	rows, err = s.q.QueryContext(ctx, `
-		SELECT `+eventColsE+`, `+prefixedRecurrenceCols+`
-		  FROM events e
-		  JOIN recurrences r ON r.id = e.recurrence_id
-		 WHERE e.calendar_id IN (`+calIn+`)
-		   AND ( (r.dtstart <= ? AND (r.until IS NULL OR r.until >= ?))
-		      OR EXISTS (SELECT 1 FROM event_overrides o
-		                  WHERE o.recurrence_id = r.id AND o.override_event_id IS NOT NULL) )
-		 ORDER BY r.dtstart, e.id`, seriesArgs...)
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", mapErr(err))
-	}
-	series, err := collectSeries(rows)
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", err)
-	}
-
-	recurrenceIDs := make([]int64, 0, len(series))
-	for i := range series {
-		recurrenceIDs = append(recurrenceIDs, series[i].Recurrence.ID)
-	}
-	overrides, err := overridesFor(ctx, s.q, recurrenceIDs)
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", err)
-	}
-
-	var overrideIDs []int64
-	for i := range series {
-		m := overrides[series[i].Recurrence.ID]
-		if m == nil {
-			m = map[domain.Date]*int64{}
+	err := s.readTx(ctx, func(q querier) error {
+		// Singles. The NOT EXISTS keeps override copies out: they are ordinary rows with
+		// a NULL recurrence_id, and without it every edited occurrence would be drawn
+		// twice, once as itself and once inside its series.
+		singleArgs := append(append([]any{}, calArgs...), to, from, toTS, fromTS, fromTS)
+		rows, err := q.QueryContext(ctx, `
+			SELECT `+eventColsE+`
+			  FROM events e
+			 WHERE e.calendar_id IN (`+calIn+`)
+			   AND e.recurrence_id IS NULL
+			   AND NOT EXISTS (SELECT 1 FROM event_overrides o WHERE o.override_event_id = e.id)
+			   AND ( (e.all_day = 1 AND e.start_date <= ? AND e.end_date >= ?)
+			      OR (e.all_day = 0 AND e.starts_at < ? AND (e.ends_at > ? OR e.starts_at >= ?)) )
+			 ORDER BY COALESCE(e.start_date, e.starts_at), e.id`, singleArgs...)
+		if err != nil {
+			return mapErr(err)
 		}
-		series[i].Overrides = m
-		for _, id := range m {
-			if id != nil {
-				overrideIDs = append(overrideIDs, *id)
+		singles, err := collectEvents(rows)
+		if err != nil {
+			return err
+		}
+
+		// Series templates joined to their pattern.
+		//
+		// The EXISTS is not an optimisation: an override can move an occurrence outside
+		// the series' own dtstart..until envelope, in either direction, and the copy
+		// carrying it is kept out of the singles query above by design. A series dropped
+		// here therefore takes that occurrence with it — the last lesson of term, dragged
+		// into the following month, simply stops existing. Only a copy can do that; a
+		// cancellation removes an occurrence and can never make one appear, so it does
+		// not widen anything.
+		seriesArgs := append(append([]any{}, calArgs...), to, from.AddDays(-seriesTailDays))
+		rows, err = q.QueryContext(ctx, `
+			SELECT `+eventColsE+`, `+prefixedRecurrenceCols+`
+			  FROM events e
+			  JOIN recurrences r ON r.id = e.recurrence_id
+			 WHERE e.calendar_id IN (`+calIn+`)
+			   AND ( (r.dtstart <= ? AND (r.until IS NULL OR r.until >= ?))
+			      OR EXISTS (SELECT 1 FROM event_overrides o
+			                  WHERE o.recurrence_id = r.id AND o.override_event_id IS NOT NULL) )
+			 ORDER BY r.dtstart, e.id`, seriesArgs...)
+		if err != nil {
+			return mapErr(err)
+		}
+		series, err := collectSeries(rows)
+		if err != nil {
+			return err
+		}
+
+		recurrenceIDs := make([]int64, 0, len(series))
+		for i := range series {
+			recurrenceIDs = append(recurrenceIDs, series[i].Recurrence.ID)
+		}
+		overrides, err := overridesFor(ctx, q, recurrenceIDs)
+		if err != nil {
+			return err
+		}
+
+		var overrideIDs []int64
+		for i := range series {
+			m := overrides[series[i].Recurrence.ID]
+			if m == nil {
+				m = map[domain.Date]*int64{}
+			}
+			series[i].Overrides = m
+			for _, id := range m {
+				if id != nil {
+					overrideIDs = append(overrideIDs, *id)
+				}
 			}
 		}
-	}
 
-	overrideEvents, err := s.eventsByID(ctx, dedupeIDs(overrideIDs))
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", err)
-	}
-	for i := range series {
-		series[i].OverrideEvents = map[int64]domain.Event{}
-		for _, id := range series[i].Overrides {
-			if id == nil {
-				continue
-			}
-			if ev, ok := overrideEvents[*id]; ok {
-				series[i].OverrideEvents[*id] = ev
+		overrideEvents, err := eventsByID(ctx, q, dedupeIDs(overrideIDs))
+		if err != nil {
+			return err
+		}
+		for i := range series {
+			series[i].OverrideEvents = map[int64]domain.Event{}
+			for _, id := range series[i].Overrides {
+				if id == nil {
+					continue
+				}
+				if ev, ok := overrideEvents[*id]; ok {
+					series[i].OverrideEvents[*id] = ev
+				}
 			}
 		}
-	}
 
-	// One participant query for the whole result.
-	allIDs := make([]int64, 0, len(singles)+len(series)+len(overrideEvents))
-	for i := range singles {
-		allIDs = append(allIDs, singles[i].ID)
-	}
-	for i := range series {
-		allIDs = append(allIDs, series[i].Event.ID)
-	}
-	for id := range overrideEvents {
-		allIDs = append(allIDs, id)
-	}
-	parts, err := participantsFor(ctx, s.q, dedupeIDs(allIDs))
-	if err != nil {
-		return res, fmt.Errorf("events in range: %w", err)
-	}
-	for i := range singles {
-		singles[i].Participants = parts[singles[i].ID]
-	}
-	for i := range series {
-		series[i].Event.Participants = parts[series[i].Event.ID]
-		for id, ev := range series[i].OverrideEvents {
-			ev.Participants = parts[id]
-			series[i].OverrideEvents[id] = ev
+		// One participant query for the whole result.
+		allIDs := make([]int64, 0, len(singles)+len(series)+len(overrideEvents))
+		for i := range singles {
+			allIDs = append(allIDs, singles[i].ID)
 		}
-	}
+		for i := range series {
+			allIDs = append(allIDs, series[i].Event.ID)
+		}
+		for id := range overrideEvents {
+			allIDs = append(allIDs, id)
+		}
+		parts, err := participantsFor(ctx, q, dedupeIDs(allIDs))
+		if err != nil {
+			return err
+		}
+		for i := range singles {
+			singles[i].Participants = parts[singles[i].ID]
+		}
+		for i := range series {
+			series[i].Event.Participants = parts[series[i].Event.ID]
+			for id, ev := range series[i].OverrideEvents {
+				ev.Participants = parts[id]
+				series[i].OverrideEvents[id] = ev
+			}
+		}
 
-	res.Singles = singles
-	res.Series = series
+		res.Singles = singles
+		res.Series = series
+		return nil
+	})
+	if err != nil {
+		return RangeResult{}, fmt.Errorf("events in range: %w", err)
+	}
 	return res, nil
 }
 
@@ -771,12 +783,15 @@ func collectSeries(rows *sql.Rows) ([]SeriesRow, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) eventsByID(ctx context.Context, ids []int64) (map[int64]domain.Event, error) {
+// eventsByID loads a set of events in one query, keyed by id. Like overridesFor and
+// participantsFor it takes the querier rather than reading s.q, so that EventsInRange can
+// run it inside its read transaction.
+func eventsByID(ctx context.Context, q querier, ids []int64) (map[int64]domain.Event, error) {
 	out := map[int64]domain.Event{}
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.q.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT `+eventColsBare+` FROM events WHERE id IN (`+placeholders(len(ids))+`)`, idArgs(ids)...)
 	if err != nil {
 		return nil, mapErr(err)
