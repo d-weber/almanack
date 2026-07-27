@@ -45,9 +45,9 @@ type payload struct {
 	Calendar   string                `json:"calendar,omitempty"`
 }
 
-// digestItem is one line of a digest. Titles are truncated when the row is
-// planned, so the stored payload is bounded too and an oversized digest cannot be
-// created by someone with a talent for long event names.
+// digestItem is one line of a digest. Titles are truncated as the digest is
+// built, which is at delivery, so someone with a talent for long event names
+// cannot produce a message no push service will take.
 type digestItem struct {
 	Title    string    `json:"title"`
 	AllDay   bool      `json:"all_day,omitempty"`

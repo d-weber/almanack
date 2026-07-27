@@ -127,7 +127,23 @@ func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) out
 	}
 	to := recipient{user: user, prefs: prefs}
 
-	if q.Kind == domain.KindSummary {
+	switch q.Kind {
+	case domain.KindDigest:
+		// A digest's content is read now rather than when the row was planned,
+		// because the day it describes goes on changing until it is announced.
+		// The "even on a quiet day" preference is answered here too, for the same
+		// reason: whether the day is empty is not known until it is looked at.
+		filled, err := n.fillDigest(ctx, q.UserID, p)
+		if err != nil {
+			slog.Error("build digest", "user", q.UserID, "day", p.Day, "error", err)
+			return outcomeDeferred
+		}
+		if filled.Total == 0 && !prefs.DigestOnEmpty {
+			n.skip(ctx, q, "nothing on the day's agenda", now)
+			return outcomeSkipped
+		}
+		p = filled
+	case domain.KindSummary:
 		// A summary's content does not exist when its row is planned, so it is
 		// resolved now. A day with nothing to report is skipped rather than
 		// pushed: "0 changements aujourd'hui" is not worth a notification.
@@ -317,6 +333,38 @@ func (n *Notifier) skip(ctx context.Context, q domain.QueuedNotification, reason
 	}
 	slog.Info("notification skipped", "id", q.ID, "kind", q.Kind, "source", q.SourceRef,
 		"user", q.UserID, "due", q.DueAt.Format(time.RFC3339), "reason", reason)
+}
+
+// fillDigest reads the day's agenda through the same visibility rules the rest of
+// the app uses — muted calendars, participating-only — and turns it into the
+// payload the wording is composed from.
+func (n *Notifier) fillDigest(ctx context.Context, userID int64, p payload) (payload, error) {
+	if p.Day.IsZero() {
+		return p, nil
+	}
+	occs, err := n.ev.UserOccurrences(ctx, userID, p.Day, p.Day)
+	if err != nil {
+		return p, fmt.Errorf("digest for user %d on %s: %w", userID, p.Day, err)
+	}
+	return digestPayload(p.Day, occs), nil
+}
+
+// digestPayload keeps a count and the first few truncated titles. The client
+// fetches the rest on notificationclick, which is what keeps the encrypted body
+// under the aes128gcm ceiling on a busy Saturday.
+func digestPayload(day domain.Date, occs []domain.Occurrence) payload {
+	p := payload{Kind: domain.KindDigest, Day: day, Total: len(occs)}
+	for i, occ := range occs {
+		if i >= maxDigestItems {
+			break
+		}
+		it := digestItem{Title: truncateRunes(occ.Title, maxTitleRunes), AllDay: occ.AllDay}
+		if !occ.AllDay {
+			it.StartsAt = occ.StartsAt.UTC()
+		}
+		p.Items = append(p.Items, it)
+	}
+	return p
 }
 
 // fillSummary counts the day's changes across the calendars this user can see,

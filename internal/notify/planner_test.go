@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +232,10 @@ func TestAllDayReminderDueTime(t *testing.T) {
 // TestDigestAcrossDSTTransitions: 07:30 is 07:30 all year. A digest computed by
 // adding a fixed number of hours to midnight UTC would arrive at 08:30 for half
 // the year, which is exactly the bug the family-timezone rule exists to prevent.
+//
+// The slot is decided when the row is planned and the agenda when it is
+// delivered, so the claim about the slot is checked on the queued row and the
+// claim about the day it describes on what actually went out.
 func TestDigestAcrossDSTTransitions(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -250,7 +255,7 @@ func TestDigestAcrossDSTTransitions(t *testing.T) {
 			e.timedEvent(cal, u.ID, "Marché", tc.day.Year, tc.day.Month, tc.day.Day, 10, 0, time.Hour, nil)
 			e.setPrefs(domain.NotificationPrefs{
 				UserID: u.ID, DigestEnabled: true, DigestTime: "07:30", SummaryTime: "20:00",
-				EmailReminders: true,
+				EmailReminders: true, EmailDigest: true,
 			})
 			e.plan()
 
@@ -265,14 +270,31 @@ func TestDigestAcrossDSTTransitions(t *testing.T) {
 			if got := wall(row.DueAt); got != tc.wantLoc {
 				t.Errorf("digest due_at in Paris = %s, want %s", got, tc.wantLoc)
 			}
-			if p := e.payloadOf(row); p.Total != 1 || p.Day != tc.day {
-				t.Errorf("digest payload = %+v, want one event on %s", p, tc.day)
+
+			e.clk.Set(row.DueAt)
+			e.dispatch()
+
+			sent, ok := findRow(e.queueOfKind(domain.KindDigest), ref)
+			if !ok || sent.SentAt.IsZero() {
+				t.Fatalf("the digest for %s was not delivered: %+v", tc.day, sent)
+			}
+			msgs := e.mail.messages()
+			if len(msgs) != 1 {
+				t.Fatalf("digest emails = %d, want exactly the one for %s", len(msgs), tc.day)
+			}
+			if !strings.Contains(msgs[0].Text, "1 événement") || !strings.Contains(msgs[0].Text, "Marché") {
+				t.Errorf("the digest delivered at the slot reads:\n%s\nwant the single event on %s", msgs[0].Text, tc.day)
+			}
+			if want := fmt.Sprintf("/#/day/%s", tc.day); !strings.Contains(msgs[0].Text, want) {
+				t.Errorf("the digest links to somewhere other than %s:\n%s", want, msgs[0].Text)
 			}
 		})
 	}
 }
 
-// TestDigestOnEmpty: the setting decides whether a quiet day is worth a push.
+// TestDigestOnEmpty: the setting decides whether a quiet day is worth a push. The
+// question is answered when the digest goes out, because whether the day turns out
+// to be empty is not known when the row is written up to two days earlier.
 func TestDigestOnEmpty(t *testing.T) {
 	for _, onEmpty := range []bool{false, true} {
 		name := "off"
@@ -283,18 +305,41 @@ func TestDigestOnEmpty(t *testing.T) {
 			e := newEnv(t, time.Date(2027, 6, 1, 4, 0, 0, 0, time.UTC))
 			u := e.user("alice")
 			e.calendar("Famille", u.ID)
+			e.subscribe(u.ID, "iphone")
 			e.setPrefs(domain.NotificationPrefs{
 				UserID: u.ID, DigestEnabled: true, DigestTime: "07:30",
-				DigestOnEmpty: onEmpty, SummaryTime: "20:00", EmailReminders: true,
+				DigestOnEmpty: onEmpty, SummaryTime: "20:00", EmailReminders: true, EmailDigest: true,
 			})
 			e.plan()
 
-			got := len(e.queueOfKind(domain.KindDigest))
-			if onEmpty && got == 0 {
-				t.Error("digest_on_empty is set but no digest was queued for an empty day")
+			e.clk.Set(time.Date(2027, 6, 1, 5, 30, 0, 0, time.UTC)) // 07:30 Paris
+			e.dispatch()
+
+			row, ok := findRow(e.queueOfKind(domain.KindDigest), events.DigestSourceRef(date(2027, 6, 1)))
+			if !ok {
+				t.Fatal("no digest row for today at all")
 			}
-			if !onEmpty && got != 0 {
-				t.Errorf("digest_on_empty is off but %d digests were queued for empty days", got)
+			pushes, mails := len(e.push.received()), e.mail.messages()
+			if onEmpty {
+				if row.SentAt.IsZero() || row.Skipped != "" {
+					t.Fatalf("digest_on_empty is set but the digest for a quiet day did not go out: %+v", row)
+				}
+				if pushes != 1 || len(mails) != 1 {
+					t.Fatalf("a quiet day produced %d pushes and %d emails, want 1 and 1", pushes, len(mails))
+				}
+				if !strings.Contains(mails[0].Text, "Rien de prévu") {
+					t.Errorf("the digest for a quiet day reads:\n%s\nwant it to say the day is free", mails[0].Text)
+				}
+				return
+			}
+			if !row.SentAt.IsZero() {
+				t.Errorf("digest_on_empty is off but a digest for an empty day was delivered: %+v", row)
+			}
+			if row.Skipped == "" {
+				t.Error("the digest for an empty day was neither delivered nor skipped: a silently dropped row leaves no evidence it was a decision")
+			}
+			if pushes != 0 || len(mails) != 0 {
+				t.Errorf("digest_on_empty is off but %d pushes and %d emails went out for an empty day", pushes, len(mails))
 			}
 		})
 	}
