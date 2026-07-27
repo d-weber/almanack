@@ -78,6 +78,16 @@ func mustCalendar(t *testing.T, s *Store, creator int64, name string) domain.Cal
 	return c
 }
 
+// idsOf is the ids of a slice of events, in the order they came back, for the assertions
+// that care about which events a query returned and in what order.
+func idsOf(events []domain.Event) []int64 {
+	out := make([]int64, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
 // firstLabel returns a calendar's first seeded label, which every test event is filed
 // under.
 func firstLabel(t *testing.T, s *Store, calID int64) domain.Label {
@@ -135,6 +145,249 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if _, err := s2.UserByID(ctx(), u.ID); err != nil {
 		t.Fatalf("user lost across reopen: %v", err)
 	}
+}
+
+// TestReminderDetachmentIsRecordedWhereItIsMeant covers what 0004 creates: the record of
+// which members have set the reminders for an edited occurrence on the occurrence
+// itself. It is a record and not an inference because the list a member sets there may
+// be empty — "no reminder, just for this one" — and an empty list is otherwise
+// indistinguishable from never having said anything about it.
+func TestReminderDetachmentIsRecordedWhereItIsMeant(t *testing.T) {
+	s, _, _ := newStore(t)
+	dad := mustUser(t, s, "dad@example.test", "Dad")
+	mum := mustUser(t, s, "mum@example.test", "Mum")
+	cal := mustCalendar(t, s, dad.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	recID := *series.RecurrenceID
+
+	moved := time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)
+	copyEv, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (plus tard)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the override: %v", err)
+	}
+	if err := s.SetOverride(ctx(), recID, domain.MustParseDate("2026-08-11"), &copyEv.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+	plain, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the plain event: %v", err)
+	}
+
+	detached := func(eventID, userID int64) bool {
+		t.Helper()
+		got, err := s.RemindersDetached(ctx(), eventID, userID)
+		if err != nil {
+			t.Fatalf("RemindersDetached(%d, %d): %v", eventID, userID, err)
+		}
+		return got
+	}
+
+	// Reminders on the series say nothing about any one occurrence.
+	if err := s.ReplaceReminders(ctx(), nil, &recID, dad.ID, []domain.Reminder{
+		{OffsetMinutes: ptrTo(30)},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(series, Dad): %v", err)
+	}
+	if detached(copyEv.ID, dad.ID) {
+		t.Error("setting a reminder on the series detached the edited occurrence from it")
+	}
+
+	// Dad clears his reminders on the moved lesson. There is nothing to see in the
+	// reminders table afterwards, which is exactly why the choice is recorded.
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, dad.ID, nil); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Dad): %v", err)
+	}
+	if !detached(copyEv.ID, dad.ID) {
+		t.Error("clearing the reminders on one occurrence was not recorded, so it would be" +
+			" read back as never having been said and the series' would fire anyway")
+	}
+	if left, err := s.ListReminders(ctx(), &copyEv.ID, nil, dad.ID); err != nil {
+		t.Fatalf("ListReminders(copy, Dad): %v", err)
+	} else if len(left) != 0 {
+		t.Errorf("clearing left %d rows behind", len(left))
+	}
+	if detached(copyEv.ID, mum.ID) {
+		t.Error("Dad's choice for this occurrence detached Mum as well; reminders are per person")
+	}
+	if series, err := s.ListReminders(ctx(), nil, &recID, dad.ID); err != nil {
+		t.Fatalf("ListReminders(series, Dad): %v", err)
+	} else if len(series) != 1 {
+		t.Errorf("the series has %d of Dad's reminders, want 1: the rest of the lessons are untouched", len(series))
+	}
+
+	// Mum sets one of her own there, which detaches her the same way.
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, mum.ID, []domain.Reminder{
+		{DaysBefore: ptrTo(1), AtTimeLocal: "09:00"},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Mum): %v", err)
+	}
+	if !detached(copyEv.ID, mum.ID) {
+		t.Error("setting a reminder on one occurrence was not recorded")
+	}
+
+	// A plain event is nobody's edited occurrence, so nothing is recorded about it.
+	if err := s.ReplaceReminders(ctx(), &plain.ID, nil, dad.ID, []domain.Reminder{
+		{OffsetMinutes: ptrTo(10)},
+	}); err != nil {
+		t.Fatalf("ReplaceReminders(plain, Dad): %v", err)
+	}
+	if n := countRows(t, s, "reminder_detachments"); n != 2 {
+		t.Errorf("reminder_detachments holds %d rows, want 2: an ordinary event's reminders"+
+			" are simply its own and have nothing to detach from", n)
+	}
+
+	// Deleting the copy takes the record with it rather than leaving it pointing at
+	// nothing, which is what the foreign key is for.
+	if err := s.DeleteEvent(ctx(), copyEv.ID); err != nil {
+		t.Fatalf("DeleteEvent(copy): %v", err)
+	}
+	if n := countRows(t, s, "reminder_detachments"); n != 0 {
+		t.Errorf("%d detachment rows survived the event they are about", n)
+	}
+}
+
+// TestDetachmentReadsAgreeInBulkAndOneAtATime holds together the two ways the same
+// question is asked: the planner reads every pair in one query, the event detail view
+// asks about one. They are one predicate written twice, and the failure if they drift is
+// that the editor shows a list the planner will not use.
+func TestDetachmentReadsAgreeInBulkAndOneAtATime(t *testing.T) {
+	s, _, _ := newStore(t)
+	dad := mustUser(t, s, "dad@example.test", "Dad")
+	mum := mustUser(t, s, "mum@example.test", "Mum")
+	cal := mustCalendar(t, s, dad.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-08-04")})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	moved := time.Date(2026, 8, 11, 16, 0, 0, 0, time.UTC)
+	copyEv, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine (plus tard)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: dad.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent for the override: %v", err)
+	}
+	if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate("2026-08-11"), &copyEv.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	// Dad's is the shape a release before this table wrote: reminders sitting on the
+	// copy with nothing to say they were deliberate. They were — the editor wrote them
+	// there — so both reads must count them, or upgrading a calendar that has them
+	// would overrule somebody's choice with the series'.
+	if _, err := s.DB().Exec(
+		`INSERT INTO reminders (event_id, recurrence_id, user_id, offset_minutes) VALUES (?, NULL, ?, 15)`,
+		copyEv.ID, dad.ID); err != nil {
+		t.Fatalf("write a pre-0004 reminder on the copy: %v", err)
+	}
+	// Mum's is the shape this release writes: a cleared list, recorded.
+	if err := s.ReplaceReminders(ctx(), &copyEv.ID, nil, mum.ID, nil); err != nil {
+		t.Fatalf("ReplaceReminders(copy, Mum): %v", err)
+	}
+
+	bulk, err := s.ListReminderDetachments(ctx())
+	if err != nil {
+		t.Fatalf("ListReminderDetachments: %v", err)
+	}
+	inBulk := map[ReminderDetachment]bool{}
+	for _, d := range bulk {
+		inBulk[d] = true
+	}
+	for _, u := range []domain.User{dad, mum} {
+		one, err := s.RemindersDetached(ctx(), copyEv.ID, u.ID)
+		if err != nil {
+			t.Fatalf("RemindersDetached(%s): %v", u.DisplayName, err)
+		}
+		pair := ReminderDetachment{EventID: copyEv.ID, UserID: u.ID}
+		if !one || !inBulk[pair] {
+			t.Errorf("%s: RemindersDetached = %v, in ListReminderDetachments = %v; want both true",
+				u.DisplayName, one, inBulk[pair])
+		}
+	}
+	if len(bulk) != 2 {
+		t.Errorf("ListReminderDetachments returned %d pairs, want 2: %+v", len(bulk), bulk)
+	}
+	// And the series template is nobody's edited occurrence.
+	if one, err := s.RemindersDetached(ctx(), series.ID, dad.ID); err != nil || one {
+		t.Errorf("RemindersDetached(series) = %v, %v; want false", one, err)
+	}
+}
+
+// TestMigration0004AddsSchemaAndNothingElse is the property that makes 0004 safe to run
+// on a database a family has been using for a year, and it is worth stating separately
+// from the fixture: the fixture proves it for one household's rows, this proves there
+// are no rows it could go wrong on. A migration that only creates a table either
+// succeeds or does not run — it cannot half-write anybody's data, cannot trip over a row
+// somebody's older release left in an unexpected state, and leaves the previous binary
+// reading and writing every table it knows exactly as before.
+func TestMigration0004AddsSchemaAndNothingElse(t *testing.T) {
+	var code []string
+	for _, line := range strings.Split(migrationSQL(t, 4), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
+		}
+		code = append(code, line)
+	}
+	body := strings.ToUpper(strings.Join(code, " "))
+	// Every statement creates something. INSERT, UPDATE, DELETE, DROP and ALTER all
+	// fail this by not starting with CREATE; the two ways a CREATE can still write or
+	// destroy rows — a table defined AS SELECT, and a trigger — are named as well.
+	// (DELETE and UPDATE do appear inside the statement, in the foreign keys' ON
+	// DELETE CASCADE, which is why this looks at how statements begin.)
+	for _, stmt := range strings.Split(body, ";") {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if !strings.HasPrefix(stmt, "CREATE ") || strings.Contains(stmt, "SELECT") ||
+			strings.Contains(stmt, "TRIGGER") {
+			t.Errorf("0004 runs %q. Writing rows in a migration is what this one exists"+
+				" *instead of*: a backfill onto every existing edited occurrence would mark"+
+				" each of them as having had its reminders set by hand, which is precisely"+
+				" the bug, applied to every household at once.", stmt)
+		}
+	}
+}
+
+// migrationSQL returns the body of one embedded migration, so that a test can read it or
+// replay it over rows written the way an older release left them.
+func migrationSQL(t *testing.T, version int) string {
+	t.Helper()
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	for _, m := range ms {
+		if m.version == version {
+			return m.sql
+		}
+	}
+	t.Fatalf("no migration %04d is embedded", version)
+	return ""
 }
 
 func TestMigrateRefusesNewerSchema(t *testing.T) {
@@ -370,13 +623,30 @@ type releaseFixture struct {
 	// that has already shipped, not a number anyone should keep current. Pinning it
 	// here is what stops this test going quietly vacuous; see the guard below.
 	version int
+	// backfilled is how many rows each table is expected to *gain* during the upgrade,
+	// and it is normally empty. Migrations add columns and tables; they do not touch
+	// the family's rows, and the row counts below say so. A migration that backfills
+	// data is the exception that has to be argued for out loud, which is what an entry
+	// here is: the number, and the reason, written down beside the release it applies
+	// to rather than quietly tolerated by a loosened assertion.
+	backfilled map[string]int
 	// check reads the fixture's data back through the store API. Each fixture knows
 	// its own family, so each brings its own.
 	check func(t *testing.T, s *Store)
 }
 
 var releaseFixtures = []releaseFixture{
-	{release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2, check: checkV020Family},
+	{
+		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
+		// Nothing: no migration between 0002 and head writes a row of this
+		// household's data. 0004 creates a table and 0005 rewrites a derived
+		// search column in place, neither of which changes a count. The swimming
+		// lesson this family moved to the evening of 4 August keeps being announced
+		// because the occurrence goes on inheriting the series' reminder, not
+		// because anything was copied onto it — see checkV020Family.
+		backfilled: nil,
+		check:      checkV020Family,
+	},
 }
 
 // upgradedAt is when the upgrade is pretended to happen: after the v0.2.0 fixture was
@@ -487,19 +757,20 @@ func TestUpgradeFromReleasedDatabase(t *testing.T) {
 
 			// --- nothing was lost ------------------------------------------------
 			//
-			// schema_migrations is the one table expected to grow. Every other table
-			// must come out of the upgrade with exactly the rows it went in with:
-			// expand/contract migrations add columns and tables, they do not touch
-			// the family's rows. A migration that legitimately backfills data will
-			// fail here, which is the right moment to argue for it out loud.
+			// schema_migrations is the one table expected to grow of its own accord.
+			// Every other table must come out of the upgrade with exactly the rows it
+			// went in with, unless a migration deliberately backfills — in which case
+			// the exact number of rows it adds is named in the fixture above, so a
+			// backfill that reaches further than its author meant it to still fails
+			// here. Anything else is a migration touching the family's data.
 			after := rowCounts(t, s.DB(), tables)
 			for _, tbl := range tables {
 				if tbl == "schema_migrations" {
 					continue
 				}
-				if after[tbl] != before[tbl] {
-					t.Errorf("table %s has %d rows after the upgrade, had %d before",
-						tbl, after[tbl], before[tbl])
+				if want := before[tbl] + fx.backfilled[tbl]; after[tbl] != want {
+					t.Errorf("table %s has %d rows after the upgrade, want %d (%d before, %d backfilled)",
+						tbl, after[tbl], want, before[tbl], fx.backfilled[tbl])
 				}
 			}
 
@@ -676,6 +947,25 @@ func checkV020Family(t *testing.T, s *Store) {
 		t.Errorf("searching for \"dentist\" found %d events, want just the dentist", len(found))
 	}
 
+	// And on rows a v0.2.0 binary wrote, the renamed occurrence is findable by the
+	// words only it carries. The fixture's "Swimming (later than usual)" is the copy
+	// standing in for one occurrence of the Swimming series, with a search_norm the old
+	// binary computed; searching for the series' own word must still answer with the
+	// series, once, rather than with both.
+	allCals := []int64{familyCal, parentsCal, kidsCal}
+	if found, err = s.SearchEvents(ctx(), allCals, "later than usual", nil, nil); err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	} else if len(found) != 1 || found[0].ID != movedSwimID {
+		t.Errorf("searching for \"later than usual\" found %v, want just the moved occurrence %d",
+			idsOf(found), movedSwimID)
+	}
+	if found, err = s.SearchEvents(ctx(), allCals, "swimming", nil, nil); err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	} else if len(found) != 1 || found[0].ID != swimmingID {
+		t.Errorf("searching for \"swimming\" found %v, want just the series template %d",
+			idsOf(found), swimmingID)
+	}
+
 	// --- the series, its override and its cancellation -------------------------
 	from, to := domain.NewDate(2026, time.August, 1), domain.NewDate(2026, time.August, 31)
 	res, err := s.EventsInRange(ctx(), []int64{kidsCal}, from, to)
@@ -757,8 +1047,10 @@ func checkV020Family(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatalf("ListAllReminders: %v", err)
 	}
+	// The three 0.2.0 wrote, and only those: no migration since has added, moved or
+	// rewritten a reminder.
 	if len(all) != 3 {
-		t.Errorf("ListAllReminders returned %d, want 3", len(all))
+		t.Errorf("ListAllReminders returned %d, want the 3 rows v0.2.0 wrote", len(all))
 	}
 	timed, err := s.ListReminders(ctx(), ptrTo(int64(dentistID)), nil, mumID)
 	if err != nil {
@@ -783,6 +1075,31 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if len(series) != 1 || series[0].OffsetMinutes == nil || *series[0].OffsetMinutes != 30 {
 		t.Errorf("Dad's swimming reminder = %+v; want one at 30 minutes before", series)
+	}
+	// The lesson Dad moved to the evening has no reminders of its own, before the
+	// upgrade or after it, and nobody has said anything about its reminders in
+	// particular — so it goes on being announced by the series' reminder above, which
+	// is what this household has been receiving all along. An upgrade that wrote a
+	// copy of that reminder onto the lesson would look the same today and go silent
+	// the moment Dad changed the series, which is why nothing is written here.
+	movedLesson, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, dadID)
+	if err != nil {
+		t.Fatalf("ListReminders(moved lesson): %v", err)
+	}
+	if len(movedLesson) != 0 {
+		t.Errorf("Dad's reminders on the moved lesson = %+v; want none of its own", movedLesson)
+	}
+	if detached, err := s.RemindersDetached(ctx(), movedSwimID, dadID); err != nil {
+		t.Fatalf("RemindersDetached(moved lesson, Dad): %v", err)
+	} else if detached {
+		t.Error("the upgrade decided Dad had set the reminders for the moved lesson himself;" +
+			" he never did, and reading it that way is how a household stops being reminded" +
+			" about one lesson for good")
+	}
+	if mums, err := s.ListReminders(ctx(), ptrTo(int64(movedSwimID)), nil, mumID); err != nil {
+		t.Fatalf("ListReminders(moved lesson, Mum): %v", err)
+	} else if len(mums) != 0 {
+		t.Errorf("Mum has %d reminders on the moved lesson, want 0", len(mums))
 	}
 
 	// --- the outbox, the log and the small tables ------------------------------
@@ -2792,6 +3109,101 @@ func TestSearchIsAccentInsensitive(t *testing.T) {
 	}
 }
 
+// TestSearchFindsARenamedOccurrence pins the rule SearchEvents settles on: a search
+// answers "find the thing I typed", so the copy carrying a renamed occurrence has to be
+// findable by its own title — without a series turning into one hit per exception.
+func TestSearchFindsARenamedOccurrence(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	mk := func(title string, at time.Time) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: at, EndsAt: at.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("create event %q: %v", title, err)
+		}
+		return e
+	}
+	mkSeries := func(title string, at time.Time) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: at, EndsAt: at.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+			ByWeekday: []time.Weekday{at.Weekday()}, DTStart: domain.DateIn(at, s.loc)})
+		if err != nil {
+			t.Fatalf("create series %q: %v", title, err)
+		}
+		return e
+	}
+	find := func(q string, participant, label *int64) []domain.Event {
+		t.Helper()
+		events, err := s.SearchEvents(ctx(), []int64{cal.ID}, q, participant, label)
+		if err != nil {
+			t.Fatalf("SearchEvents(%q): %v", q, err)
+		}
+		return events
+	}
+
+	// A piano lesson that has run every Thursday since 2019, with next week's
+	// occurrence renamed — the copy is the only row carrying the new words.
+	piano := mkSeries("Cours de piano", time.Date(2019, 9, 12, 17, 0, 0, 0, time.UTC))
+	audition := mk("Cours de piano — audition", time.Date(2026, 8, 6, 17, 0, 0, 0, time.UTC))
+	if err := s.SetOverride(ctx(), *piano.RecurrenceID, domain.MustParseDate("2026-08-06"), &audition.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	// The words only the copy has: the copy, once, and not its template.
+	if got := idsOf(find("audition", nil, nil)); len(got) != 1 || got[0] != audition.ID {
+		t.Errorf("SearchEvents(%q) = %v; want the renamed occurrence [%d]", "audition", got, audition.ID)
+	}
+	// Words both of them have: the series, once. The copy is an occurrence-level edit
+	// of an event that is already a hit, so returning it too would say "twice".
+	if got := idsOf(find("piano", nil, nil)); len(got) != 1 || got[0] != piano.ID {
+		t.Errorf("SearchEvents(%q) = %v; want just the template [%d]", "piano", got, piano.ID)
+	}
+
+	// An ordinary series with several exceptions that kept the title stays one hit,
+	// however many of them there are: this is the trap in including copies at all.
+	judo := mkSeries("Judo", time.Date(2026, 1, 5, 18, 0, 0, 0, time.UTC))
+	for _, d := range []domain.Date{
+		domain.MustParseDate("2026-02-02"),
+		domain.MustParseDate("2026-03-02"),
+		domain.MustParseDate("2026-04-06"),
+	} {
+		moved := mk("Judo", d.At(19, 30, time.UTC))
+		if err := s.SetOverride(ctx(), *judo.RecurrenceID, d, &moved.ID); err != nil {
+			t.Fatalf("SetOverride %s: %v", d, err)
+		}
+	}
+	if got := idsOf(find("judo", nil, nil)); len(got) != 1 || got[0] != judo.ID {
+		t.Errorf("SearchEvents(%q) = %v; want just the template [%d]", "judo", got, judo.ID)
+	}
+
+	// A copy sorts on the date it actually happens, not on the date its series began.
+	// The template would put next week's lesson under 2019 and behind this.
+	old := mk("Audition de fin d'année", time.Date(2020, 6, 20, 15, 0, 0, 0, time.UTC))
+	got := find("audition", nil, nil)
+	if want := []int64{audition.ID, old.ID}; !slices.Equal(idsOf(got), want) {
+		t.Fatalf("SearchEvents(%q) = %v; want %v, newest occurrence first", "audition", idsOf(got), want)
+	}
+	if y := got[0].StartsAt.Year(); y != 2026 {
+		t.Errorf("the renamed occurrence came back dated %d; want the date it happens, 2026", y)
+	}
+
+	// With nothing typed there is no text a copy could carry that its template does
+	// not, so a filter on its own still sees a series as its template, once: the two
+	// templates and the one-off, and none of the four copies.
+	if want := []int64{judo.ID, old.ID, piano.ID}; !slices.Equal(idsOf(find("", nil, &label.ID)), want) {
+		t.Errorf("label filter = %v; want the templates and the one-off %v", idsOf(find("", nil, &label.ID)), want)
+	}
+}
+
 func TestFoldAccents(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"École", "ecole"},
@@ -2800,14 +3212,143 @@ func TestFoldAccents(t *testing.T) {
 		{"Ça où ?", "ca ou ?"},
 		{"plain ascii", "plain ascii"},
 		{"", ""},
+		// The letters the neighbours use. A family address book collects them from
+		// one Danish friend and one Icelandic pen pal, and typing the ASCII spelling
+		// is the only way most keyboards can reach them.
+		{"Søren Kjærgård", "soren kjaergard"},
+		{"Straße", "strasse"},
+		{"Þorbjörg Eiðsdóttir", "thorbjorg eidsdottir"},
+		{"Đorđe", "dorde"},
 	}
 	for _, tc := range cases {
 		if got := foldSearch(tc.in); got != tc.want {
 			t.Errorf("foldSearch(%q) = %q; want %q", tc.in, got, tc.want)
 		}
 	}
+	// foldAccents is documented as correct without a caller having lowercased first,
+	// so the uppercase half of the table is checked on its own — it folds to the
+	// lowercase spelling, like every other entry. strings.ToLower maps most of these
+	// away before foldSearch ever sees them.
+	if got := foldAccents("ØÆŒÇÐÞĐẞ"); got != "oaeoecdthdss" {
+		t.Errorf("foldAccents(uppercase) = %q; want %q", got, "oaeoecdthdss")
+	}
 	if got := searchNorm("Réunion", "École", "Gâteau"); got != "reunion ecole gateau" {
 		t.Errorf("searchNorm = %q", got)
+	}
+}
+
+// TestBackfillMatchesSearchNorm holds the shortcut 0005_refold_search_norm.sql takes.
+//
+// That migration rewrites the stored index by substituting five letters, rather than
+// re-deriving it from title, location and notes — which it is only allowed to do
+// because every fold involved is exact and callers lowercase first. This asserts the
+// two agree on the awkward cases: a rune whose fold is two letters, one that follows
+// another folded rune, uppercase forms, and text with none of them in it. If someone
+// adds a rune whose fold is context-dependent, this is what should stop them.
+func TestBackfillMatchesSearchNorm(t *testing.T) {
+	// The table as it stood before ø ß ð þ đ were added — what a 0.2.0 binary used to
+	// write into search_norm.
+	previous := make(map[rune]string, len(foldRunes))
+	for r, v := range foldRunes {
+		previous[r] = v
+	}
+	for _, r := range []rune{'ø', 'ß', 'ð', 'þ', 'đ', 'Ø', 'ẞ', 'Ð', 'Þ', 'Đ'} {
+		delete(previous, r)
+	}
+	storedBy020 := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if rep, ok := previous[r]; ok {
+				b.WriteString(rep)
+				continue
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
+	}
+	// The five replace() calls of the migration, in the order it applies them.
+	backfill := func(s string) string {
+		for _, pair := range [][2]string{
+			{"ø", "o"}, {"ß", "ss"}, {"ð", "d"}, {"þ", "th"}, {"đ", "d"},
+		} {
+			s = strings.ReplaceAll(s, pair[0], pair[1])
+		}
+		return s
+	}
+
+	for _, title := range []string{
+		"Søren Kjærgård", "Straße", "STRASSE", "Þorbjörg Eiðsdóttir", "Đorđe",
+		"Blåbærsyltetøj", "Ærø", "Œuf à Ålesund", "ØßðÞĐ run together",
+		"École", "plain ascii", "",
+	} {
+		want := searchNorm(title, "Ólafsvík", "café")
+		got := backfill(storedBy020(title + " " + "Ólafsvík" + " " + "café"))
+		if got != want {
+			t.Errorf("%q:\n backfilled = %q\n searchNorm = %q", title, got, want)
+		}
+	}
+}
+
+// TestAddingAFoldRuneKeepsOldEventsFindable is the reason 0005 exists.
+//
+// Adding a rune to foldRunes changes the query side at once and the stored side never,
+// so without a backfill an event written before the change stops matching *both*
+// spellings: the folded query no longer contains the letter, and the stored row still
+// does. This walks that whole path — a row holding what 0.2.0 wrote, the migrations
+// applied over it, and then the searches a family would actually type.
+func TestAddingAFoldRuneKeepsOldEventsFindable(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	find := func(q string) []domain.Event {
+		t.Helper()
+		events, err := s.SearchEvents(ctx(), []int64{cal.ID}, q, nil, nil)
+		if err != nil {
+			t.Fatalf("SearchEvents(%q): %v", q, err)
+		}
+		return events
+	}
+
+	ev, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Søren's Straße party",
+		StartsAt: baseTime, EndsAt: baseTime.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Put the row back the way 0.2.0 would have left it: folded by a table that had
+	// never heard of ø or ß.
+	const old = "søren's straße party  "
+	if _, err := s.db.ExecContext(ctx(),
+		`UPDATE events SET search_norm = ? WHERE id = ?`, old, ev.ID); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	// Before the backfill, neither spelling finds it — which is the regression.
+	for _, q := range []string{"Søren", "soren"} {
+		if got := find(q); len(got) != 0 {
+			t.Fatalf("pre-backfill search %q found %d rows; the row should be stranded", q, len(got))
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx(), `UPDATE events
+	   SET search_norm = replace(replace(replace(replace(replace(
+	         search_norm, 'ø', 'o'), 'ß', 'ss'), 'ð', 'd'), 'þ', 'th'), 'đ', 'd')
+	 WHERE search_norm <> replace(replace(replace(replace(replace(
+	         search_norm, 'ø', 'o'), 'ß', 'ss'), 'ð', 'd'), 'þ', 'th'), 'đ', 'd')`); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	// Afterwards both spellings find it, which is more than 0.2.0 managed: it answered
+	// the accented spelling only.
+	for _, q := range []string{"Søren", "soren", "Straße", "strasse"} {
+		got := find(q)
+		if len(got) != 1 || got[0].ID != ev.ID {
+			t.Errorf("search %q found %d rows; want just event %d", q, len(got), ev.ID)
+		}
 	}
 }
 
@@ -3295,6 +3836,79 @@ func TestActivityLog(t *testing.T) {
 	}
 	if day[0].Title != "Piscine" {
 		t.Fatalf("ListActivityBetween is not newest-first: %+v", day)
+	}
+}
+
+// TestActivityByIDSeesAReusedID: activity_log.id is INTEGER PRIMARY KEY with no
+// AUTOINCREMENT, so the ids of deleted rows are handed out again and the planner's
+// cursor — a copy of an id kept outside the table — can end up naming a row that has
+// gone or a different row that has taken its place. Magnitude cannot tell: the reused
+// ids climb back towards the cursor and reach it. Reading the row back can.
+func TestActivityByIDSeesAReusedID(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	gone := mustCalendar(t, s, u.ID, "Vacances")
+
+	log := func(calendarID int64, title string) {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: calendarID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity: %v", err)
+		}
+	}
+	newestOf := func(calendarID int64) domain.Activity {
+		t.Helper()
+		rows, err := s.ListActivity(ctx(), []int64{calendarID}, 1, 0)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("ListActivity = %+v, %v; want 1", rows, err)
+		}
+		return rows[0]
+	}
+
+	// The clock does not move, which is not a shortcut: dev mode runs on a stopped
+	// one, so every entry sharing an instant is a state the app really reaches — and
+	// the state an instant-only check of the cursor would be blind in.
+	clk.Set(baseTime)
+	log(cal.ID, "Dentiste")
+	log(gone.ID, "Ferry")
+	cursor := newestOf(gone.ID)
+
+	got, err := s.ActivityByID(ctx(), []int64{cal.ID, gone.ID}, cursor.ID)
+	if err != nil || got.CalendarID != gone.ID || got.Title != "Ferry" || !got.At.Equal(cursor.At) {
+		t.Fatalf("ActivityByID on a sound cursor = %+v, %v; want the entry it names", got, err)
+	}
+
+	// The calendar holding the newest entry goes, and the next change takes its id.
+	if err := s.DeleteCalendar(ctx(), gone.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+	if _, err := s.ActivityByID(ctx(), []int64{cal.ID}, cursor.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ActivityByID for a deleted entry = %v; want ErrNotFound", err)
+	}
+	log(cal.ID, "Piscine")
+	reused := newestOf(cal.ID)
+	if reused.ID > cursor.ID {
+		t.Skipf("the new entry took id %d, above the cursor at %d: this SQLite is not reusing the "+
+			"ids of deleted rows, so there is nothing here to find", reused.ID, cursor.ID)
+	}
+	got, err = s.ActivityByID(ctx(), []int64{cal.ID}, cursor.ID)
+	if err != nil {
+		t.Fatalf("ActivityByID over a reused id: %v", err)
+	}
+	if got.CalendarID == gone.ID || got.Title != "Piscine" {
+		t.Fatalf("ActivityByID over a reused id = %+v; want the entry that took it", got)
+	}
+	if !got.At.Equal(cursor.At) {
+		t.Fatalf("the reused entry is at %s and the one it replaced at %s: this test no longer "+
+			"covers a reuse the instant alone cannot see", got.At, cursor.At)
+	}
+
+	// Scoping is the same as every other activity read: an entry in a calendar the
+	// caller did not ask about is not there.
+	if _, err := s.ActivityByID(ctx(), nil, reused.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("ActivityByID with no calendars = %v; want ErrNotFound", err)
 	}
 }
 

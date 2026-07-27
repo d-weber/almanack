@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -21,12 +22,13 @@ import (
 
 // runServe wires everything together and runs until the context is cancelled.
 //
-// The ordering here is deliberate. Migrations finish before READY is signalled, so a
-// deployment health check can tell "still migrating" from "dead". The scheduler's
-// catch-up runs before the first tick, so an outage cannot leave a hole in the
-// reminders. And the watchdog is fed by the scheduler rather than by a timer of its
-// own, so a wedged scheduler restarts the process instead of leaving a server that
-// answers HTTP cheerfully while sending nothing.
+// The ordering here is deliberate. Migrations finish and the listener is bound before
+// READY is signalled, so a deployment health check can tell "still migrating" from
+// "dead", and a unit systemd has marked active is one that is answering rather than one
+// about to exit on a busy port. The scheduler's catch-up runs before the first tick, so
+// an outage cannot leave a hole in the reminders. And the watchdog is fed by the
+// scheduler rather than by a timer of its own, so a wedged scheduler restarts the
+// process instead of leaving a server that answers HTTP cheerfully while sending nothing.
 func runServe(ctx context.Context, cfg config.Config) error {
 	slog.Info("starting", "version", version, "config", cfg.Redacted())
 
@@ -86,7 +88,6 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	}
 
 	httpServer := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
@@ -94,10 +95,21 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Migrations are done and the router is built: the service is genuinely ready.
+	// Bind before announcing readiness. systemd marks the unit active on READY=1 and
+	// `systemctl restart` returns there, so a bind failure discovered afterwards — a
+	// second copy of the unit, a proxy holding the port — reported success on a service
+	// that was already dying, which is the one distinction Type=notify exists to make.
+	// Connections arriving between here and Serve wait in the accept backlog.
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
+	}
+
+	// Migrations are done, the router is built and the port is bound: the service is
+	// genuinely ready.
 	sdReady()
-	sdStatus("serving on " + cfg.ListenAddr)
-	slog.Info("ready", "listen", cfg.ListenAddr, "base_url", cfg.BaseURL,
+	sdStatus("serving on " + ln.Addr().String())
+	slog.Info("ready", "listen", ln.Addr().String(), "base_url", cfg.BaseURL,
 		"timezone", cfg.TZName, "app_version", srv.AppVersion(), "dev_mode", cfg.Dev)
 	if cfg.Dev {
 		slog.Info("development mode", "url", cfg.BaseURL, "dev_tools", cfg.BaseURL+"/dev/", "mail", cfg.MailDir)
@@ -106,14 +118,14 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	errs := make(chan error, 2)
 
 	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("http server: %w", err)
 		}
 	}()
 
 	go func() {
 		// Run performs the boot catch-up before its first tick.
-		if err := notifier.Run(ctx, watchdog()); err != nil {
+		if err := notifier.Run(ctx, watchdog(cfg.SchedulerTick)); err != nil {
 			errs <- fmt.Errorf("scheduler: %w", err)
 		}
 	}()
@@ -165,20 +177,34 @@ func buildMailer(cfg config.Config) (mailer.Mailer, error) {
 
 // watchdog returns the callback the scheduler invokes each completed tick, or nil
 // when the process is not running under a systemd unit with WatchdogSec.
-func watchdog() func() {
+//
+// It pings every tick, with no throttle. There used to be one — suppress the ping until
+// half of WatchdogSec had passed, which is what systemd's own convention suggests — but
+// the callback is only ever reached when a tick completes, so the real spacing was that
+// half plus a whole tick, against a deadline of the whole WatchdogSec. The shipped
+// defaults left 30 seconds of margin, and an operator who raised ALMANACK_TICK to reduce
+// load on a small box got a healthy server restarted every two minutes. A datagram costs
+// nothing, so spacing the pings a tick apart is both simpler and four times safer.
+func watchdog(tick time.Duration) func() {
 	interval := sdWatchdogInterval()
 	if interval <= 0 {
 		return nil
 	}
-	slog.Info("systemd watchdog active", "ping_interval", interval)
-
-	var last time.Time
-	return func() {
-		// The scheduler ticks more often than the watchdog needs feeding.
-		if time.Since(last) < interval {
-			return
-		}
-		last = time.Now()
-		sdWatchdogPing()
+	// sdWatchdogInterval halves WATCHDOG_USEC by convention; the deadline systemd
+	// actually enforces is the whole of it.
+	deadline := 2 * interval
+	// The warning is at half the deadline, not at the whole of it. Pinging once per
+	// tick makes the spacing one tick only if ticks are instant; a tick that takes a
+	// while pushes the next ping out by however long it took, and ticks are not
+	// instant — holding an exclusive lock on the database stretched a one-second tick
+	// to five. So the margin worth having is the one systemd itself assumes, which is
+	// why sdWatchdogInterval halves WATCHDOG_USEC in the first place. Warning only at
+	// the full deadline let ALMANACK_TICK=119s against the shipped WatchdogSec=120s
+	// pass in silence and then restart-loop on the first slow tick.
+	if tick > interval {
+		slog.Warn("ALMANACK_TICK leaves too little room under WatchdogSec: a tick that runs long will miss the deadline and systemd will restart this service",
+			"tick", tick, "watchdog_sec", deadline, "keep_tick_under", interval)
 	}
+	slog.Info("systemd watchdog active", "ping_every", tick, "watchdog_sec", deadline)
+	return sdWatchdogPing
 }

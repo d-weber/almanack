@@ -47,8 +47,15 @@ func newFixture(t *testing.T) *fixture {
 // what lets the interruption tests in atomic_test.go fail an edit part-way through
 // without a seam of their own.
 func newFixtureClock(t *testing.T, wrap func(*clock.Fake) clock.Clock) *fixture {
+	return newFixtureIn(t, paris(t), wrap)
+}
+
+// newFixtureIn is newFixtureClock in a family timezone other than Paris. Almost every
+// test here wants Paris, because that is the household this is built for — but two of
+// the daylight-saving policies read differently in a zone whose offset is negative, and a
+// suite that only ever runs in one zone cannot tell a rule from a coincidence.
+func newFixtureIn(t *testing.T, loc *time.Location, wrap func(*clock.Fake) clock.Clock) *fixture {
 	t.Helper()
-	loc := paris(t)
 	fake := clock.NewFake(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
 	var clk clock.Clock = fake
 	if wrap != nil {
@@ -183,6 +190,209 @@ func TestWeeklySeriesKeepsWallClockAcrossDST(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// occurrenceOn returns the single occurrence of a series on one date, or fails.
+func (f *fixture) occurrenceOn(t *testing.T, date string) domain.Occurrence {
+	t.Helper()
+	for _, o := range f.occurrences(t, date, date) {
+		if o.OccurrenceDate.String() == date {
+			return o
+		}
+	}
+	t.Fatalf("no occurrence on %s", date)
+	return domain.Occurrence{}
+}
+
+// TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant covers the two rows of
+// the recurrence policy table that say what happens when a series' wall time falls in an
+// hour a daylight-saving change breaks: the one that runs twice in autumn, and the one
+// that never runs at all in spring. Neither hour names a moment on its own, so the
+// instant an occurrence lands on is a policy rather than a calculation.
+//
+// The instants below are the ones the browser's wallToInstant() produces too — Go's
+// time.Date and that function turn out to be the same two-step conversion, which is why
+// the disagreement reported in #51 was not there to find. Both rules are asserted from
+// the browser's side as well, in e2e/dst-fallback.spec.js. Neither test is any use
+// without the other: the point of the pair is that the server that expands a series and
+// the editor that saves one cannot drift apart in silence, and they would, because every
+// candidate instant reads the same on a clock face. Change one side and the other's test
+// must be changed with it, deliberately.
+func TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant(t *testing.T) {
+	f := newFixture(t)
+
+	// One weekly Sunday series at 02:30 covers both changeovers: 22 and 29 March and
+	// 25 October 2026 are all Sundays, and Europe/Paris springs forward on the second
+	// of those and falls back on the third.
+	f.timed(t, "Nuit blanche", "2026-03-22", 2, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+	})
+
+	cases := []struct {
+		name     string
+		date     string
+		wantUTC  string // the instant the occurrence starts at
+		wantWall string // how that instant reads back on a Paris clock
+		rejected string // the answers this row rules out
+	}{
+		{
+			// 02:00–02:59 runs once on CEST and again on CET, so 02:30 is two instants
+			// an hour apart. Both sides take the second of them.
+			name:     "the hour that happens twice takes the second pass",
+			date:     "2026-10-25",
+			wantUTC:  "2026-10-25T01:30:00Z",
+			wantWall: "02:30 CET",
+			rejected: "the first pass, 02:30 CEST, is 2026-10-25T00:30:00Z",
+		},
+		{
+			// The clock goes 01:59 CET → 03:00 CEST, so 02:30 is a time that never
+			// happens. It is normalised forward by the length of the gap.
+			name:     "the hour that never happens moves forward",
+			date:     "2026-03-29",
+			wantUTC:  "2026-03-29T01:30:00Z",
+			wantWall: "03:30 CEST",
+			rejected: "clamping to the jump would be 01:00:00Z (03:00) and moving back 00:30:00Z (01:30 CET)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			occ := f.occurrenceOn(t, tc.date)
+			if got := occ.StartsAt.UTC().Format(time.RFC3339); got != tc.wantUTC {
+				t.Errorf("%s starts at %s, want %s (%s)", tc.date, got, tc.wantUTC, tc.rejected)
+			}
+			if got := occ.StartsAt.In(f.loc).Format("15:04 MST"); got != tc.wantWall {
+				t.Errorf("%s reads back as %s locally, want %s", tc.date, got, tc.wantWall)
+			}
+		})
+	}
+
+	// And the ordinary Sundays either side are untouched: 02:30 is 02:30, and this test
+	// would otherwise pass against an expansion that had stopped keeping wall clock.
+	for _, date := range []string{"2026-03-22", "2026-04-05", "2026-11-01"} {
+		if got := f.occurrenceOn(t, date).StartsAt.In(f.loc).Format("15:04"); got != "02:30" {
+			t.Errorf("%s reads back as %s locally, want 02:30", date, got)
+		}
+	}
+}
+
+// TestBrokenHoursFollowTheZoneRatherThanAPolicy is the same two rows read in a zone whose
+// offset is negative, and it exists because the pair above cannot tell a rule from a
+// coincidence: run only in Paris, "the second pass" and "moves forward" both look like
+// decisions somebody made, and the policy table said so. They are not. They fall out of
+// the conversion — the wall fields are read as though they were UTC, the offset in force
+// at that reading is applied, and the result is corrected once — and in a zone west of
+// Greenwich that arithmetic runs the other way. New York takes the *first* pass through
+// the repeated hour and moves a skipped 02:30 *back* to 01:30, which is the answer the
+// Paris row explicitly rules out. Both are still what the browser produces.
+func TestBrokenHoursFollowTheZoneRatherThanAPolicy(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("no tzdata available: %v", err)
+	}
+	// New York breaks a different hour from Paris in each direction: it springs forward
+	// 02:00 → 03:00, so 02:30 is the skipped one, and falls back 02:00 → 01:00, so 01:30
+	// is the repeated one. Each case therefore needs its own series and its own fixture,
+	// rather than the single 02:30 series Paris can use for both.
+	cases := []struct {
+		name, seriesDay, date, wantUTC, wantWall, note string
+		hour, min                                      int
+	}{
+		{
+			name:      "the repeated hour takes the first pass here, not the second",
+			seriesDay: "2026-10-04", hour: 1, min: 30,
+			date:     "2026-11-01",
+			wantUTC:  "2026-11-01T05:30:00Z",
+			wantWall: "01:30 EDT",
+			note:     "the second pass, 01:30 EST, would be 2026-11-01T06:30:00Z — the answer Paris takes",
+		},
+		{
+			name:      "the skipped hour moves backward here, not forward",
+			seriesDay: "2026-03-01", hour: 2, min: 30,
+			date:     "2026-03-08",
+			wantUTC:  "2026-03-08T06:30:00Z",
+			wantWall: "01:30 EST",
+			note:     "moving forward, the Paris answer, would be 03:30 EDT at 2026-03-08T07:30:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixtureIn(t, newYork, nil)
+			f.timed(t, "All-nighter", tc.seriesDay, tc.hour, tc.min, &domain.Recurrence{
+				Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+			})
+
+			occ := f.occurrenceOn(t, tc.date)
+			if got := occ.StartsAt.UTC().Format(time.RFC3339); got != tc.wantUTC {
+				t.Errorf("%s starts at %s, want %s (%s)", tc.date, got, tc.wantUTC, tc.note)
+			}
+			if got := occ.StartsAt.In(f.loc).Format("15:04 MST"); got != tc.wantWall {
+				t.Errorf("%s reads back as %s locally, want %s", tc.date, got, tc.wantWall)
+			}
+		})
+	}
+}
+
+// TestOccurrenceEndIsStartPlusTheTemplatesExactDuration covers the recurrence policy row
+// that says what happens to the *end* of an occurrence at a daylight-saving change. The
+// start keeps its wall clock, which is the rule the whole expansion is built around; the
+// end is the start plus the template's exact duration, so it is the end whose wall clock
+// moves. One occurrence a year is therefore an hour longer or shorter to read off a clock
+// face than the ones either side of it, while being exactly as long in real time.
+//
+// This is characterisation rather than a fix: it passed the moment it was written, and
+// #25 asked for it because the docs were silent, not because shift() was wrong. RFC 5545
+// treats a time-based duration as exact rather than nominal and Google Calendar agrees,
+// and the alternative is worse than untidy — preserving both wall clocks would make an
+// occurrence's length depend on the date it falls on, and would collapse anything inside
+// the missing spring hour to zero length or less.
+func TestOccurrenceEndIsStartPlusTheTemplatesExactDuration(t *testing.T) {
+	f := newFixture(t)
+
+	// Two hours, 01:30 to 03:30, weekly on Sunday from a week before the spring
+	// changeover. An occurrence that lies *across* a changeover is the only one where
+	// the two candidate rules differ, so the series is placed to produce one of each.
+	if _, err := f.svc.Create(context.Background(), f.maman, Input{
+		CalendarID: f.cal, Title: "Veillée",
+		StartsAt: f.at("2026-03-22", 1, 30), EndsAt: f.at("2026-03-22", 3, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+		},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		date    string
+		wantEnd string // the wall clock the end reads at, in Paris
+	}{
+		{"an ordinary week", "2026-03-22", "03:30"},
+		{"across the spring change, an hour longer on the clock face", "2026-03-29", "04:30"},
+		{"an ordinary week again", "2026-04-05", "03:30"},
+		{"across the autumn change, an hour shorter on the clock face", "2026-10-25", "02:30"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			occ := f.occurrenceOn(t, tc.date)
+
+			// The start keeps its wall clock, always. That is the other rule, and this
+			// test would be meaningless without it holding.
+			if got := occ.StartsAt.In(f.loc).Format("15:04"); got != "01:30" {
+				t.Errorf("%s starts at %s locally, want 01:30", tc.date, got)
+			}
+			// The end does not, and this is the row: it is a fixed distance in real
+			// time from the start, not a fixed reading on the clock face.
+			if got := occ.EndsAt.In(f.loc).Format("15:04"); got != tc.wantEnd {
+				t.Errorf("%s ends at %s locally, want %s", tc.date, got, tc.wantEnd)
+			}
+			if got := occ.EndsAt.Sub(occ.StartsAt); got != 2*time.Hour {
+				t.Errorf("%s lasts %s, want exactly 2h", tc.date, got)
+			}
+		})
 	}
 }
 

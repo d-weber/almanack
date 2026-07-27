@@ -9,9 +9,46 @@
 // Every test here starts already signed in, from the session auth.setup.js saved. The
 // login form itself is exercised there, once.
 //
+// The two tests below create an event, and both delete it again in a finally — through the
+// API, and whether the assertions passed or not. They used to leave them, which cost the
+// next run three failures somewhere else entirely: the offline test, the cache-cap test and
+// the timezone test all read what is on the screen or count what has been cached, and an
+// extra event changes both. CI never saw it, because CI seeds a database per run; it landed
+// entirely on whoever ran the suite twice, which is the case `make e2e` exists for.
+//
 // Run against a freshly seeded dev server:  make seed && make dev
 
 import { test, expect } from '@playwright/test';
+import { MEETING, HOSTILE_TITLE, HEADERS } from './fixtures.js';
+
+/**
+ * Press Save and hand back the id of the event that was created.
+ *
+ * The id is taken off the response rather than out of the page: the editor goes back to
+ * the month view when it saves, so there is nothing on screen that names the row, and
+ * the only reason to want it is to be able to delete it again afterwards.
+ */
+async function saveNewEvent(page) {
+  const created = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/v1/events',
+  );
+  await page.getByRole('button', { name: /Save/i }).click();
+  const response = await created;
+  expect(response.status(), await response.text()).toBe(201);
+  return (await response.json()).event.id;
+}
+
+/**
+ * Remove it again, through the API rather than through the UI.
+ *
+ * Deleting an event in the browser is a flow of its own, with a confirmation and a
+ * this / this and following / the whole series question behind it. Driving that here
+ * would put a test of deletion inside a test about something else — where nobody would
+ * look for it, and where it would fail these two the day it broke.
+ */
+async function deleteEvent(page, id) {
+  await page.request.delete(`/api/v1/events/${id}`, { headers: HEADERS });
+}
 
 test('the seeded family calendar loads and shows its events', async ({ page }) => {
   await page.goto('/');
@@ -37,25 +74,36 @@ test('no console errors and no CSP violations on load', async ({ page }) => {
 test('creating an event shows it in the month grid', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
-  await page.getByLabel(/Title/i).fill('Test meeting');
-  await page.getByRole('button', { name: /Save/i }).click();
-  await expect(page.getByText('Test meeting')).toBeVisible();
+  await page.getByLabel(/Title/i).fill(MEETING);
+  const id = await saveNewEvent(page);
+
+  // In a finally, so that an assertion which fails still leaves the calendar as it found
+  // it. A leftover event is not a leftover event's problem: it is three other tests going
+  // red on the next run, over what is on screen and how many API ranges got cached.
+  try {
+    await expect(page.getByText(MEETING)).toBeVisible();
+  } finally {
+    await deleteEvent(page, id);
+  }
 });
 
 test('a hostile event title is rendered as text, never as markup', async ({ page }) => {
-  const hostile = '<img src=x onerror="window.__pwned = true">';
   await page.goto('/');
 
   await page.getByRole('button', { name: /New event|Add|\+/ }).first().click();
-  await page.getByLabel(/Title/i).fill(hostile);
-  await page.getByRole('button', { name: /Save/i }).click();
+  await page.getByLabel(/Title/i).fill(HOSTILE_TITLE);
+  const id = await saveNewEvent(page);
 
-  // The literal characters must appear on screen…
-  await expect(page.getByText(hostile)).toBeVisible();
-  // …the payload must not have executed…
-  expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
-  // …and no element may have been injected.
-  expect(await page.locator('img[src="x"]').count()).toBe(0);
+  try {
+    // The literal characters must appear on screen…
+    await expect(page.getByText(HOSTILE_TITLE)).toBeVisible();
+    // …the payload must not have executed…
+    expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
+    // …and no element may have been injected.
+    expect(await page.locator('img[src="x"]').count()).toBe(0);
+  } finally {
+    await deleteEvent(page, id);
+  }
 });
 
 test('the service worker registers and the app is installable', async ({ page }) => {

@@ -157,6 +157,11 @@ All-day form omits `starts_at`/`ends_at` and sends `start_date`/`end_date` (incl
 reminders as `{ "days_before":1, "at_time_local":"09:00" }`. `recurrence` and `reminders` are
 optional; `reminders` apply to the caller only. → `201 { "event": Event }`
 
+`url` may be empty or must begin with `http://` or `https://`, up to 500 characters, and may
+not contain a tab or a line break: the browser's URL parser removes those from a URL before
+it decides what the scheme is, so a link holding one is not the link it displays. Both are
+`400 invalid`.
+
 ### `GET /api/v1/events/{id}?date=YYYY-MM-DD`
 Detail for one occurrence (`date` = `occurrence_date`, required for series, ignored for
 an edited occurrence's own id). `recurrence` is the **series'**, so an edited occurrence
@@ -185,8 +190,27 @@ series + overrides + reminders + queued notifications. → `204`
 Replaces **the caller's** reminders for the event or its series.
 `{ "reminders": [ { "offset_minutes": 30 } ] }` → `{ "reminders": [Reminder] }`
 
+Which of the two it is depends on the id: a series template's reminders are the series',
+and an **edited occurrence's** are that occurrence's. Sending a list to an edited
+occurrence is what makes it stop following the series — for the caller alone, and from
+then on, including when the list is empty, which is how "no reminder, just for this one"
+is said. Until somebody does that, an edited occurrence is announced by its series'
+reminders, so one added to the series afterwards reaches it like every other date.
+`my_reminders` on `GET /events/{id}` reports whichever list will actually fire, which is
+what makes it truthful.
+
+Two consequences for a client. Send the reminder list to the id the `PATCH` answered
+with, not the one it was addressed to: editing one occurrence answers with the copy, and
+posting to the series instead changes every occurrence's reminder rather than the one on
+screen. And **only send it when it changed** — sending the list back unchanged after an
+edit to a single occurrence detaches that occurrence from the series for no reason, and
+the family would not hear about it again.
+
 ### `GET /api/v1/search?q=&participant=&label_id=&calendar_id=`
-Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once.
+Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once, as
+its template — unless one occurrence was edited to carry text the series does not, in which
+case that occurrence answers for itself. No date filter: a series matches whether or not it
+still runs, and `next_occurrence` is the date to show.
 → `{ "results": [ { "event": Event, "next_occurrence": "2026-09-01" } ] }`
 
 ## Notifications

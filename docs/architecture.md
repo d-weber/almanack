@@ -83,7 +83,9 @@ would see different occurrences of the same event.
 
 **The hour that happens twice is not a name for a moment.** When the clocks go back, a wall
 time inside the repeated hour describes two instants, and `wallToInstant()` in the browser
-answers the later one. That is the right default for a time somebody has just typed and the
+answers the later one in Europe/Paris — the earlier one in a zone whose winter offset is
+negative, which is a consequence of the conversion rather than a choice, and is why the
+policy table below states it per zone. That is the right default for a time somebody has just typed and the
 wrong one for a time merely read back off a form, so the event editor keeps the instants it
 loaded an event with for as long as the corresponding date and time fields are untouched.
 Opening an event in that hour and saving it therefore cannot move it, and an event lying
@@ -91,6 +93,18 @@ across the changeover — whose wall clock runs backwards — is still editable.
 field and the wall clock wins again, later pass and all. The rule is asserted end to end in
 `e2e/dst-fallback.spec.js`, which is where browser date behaviour gets tested: the frontend
 takes no dependencies, so there is no JavaScript unit runner to put it in.
+
+**And the server answers it the same way.** `internal/events` expands a series through Go's
+`time.Date`, which resolves a broken wall time by reading the fields as though they were UTC,
+taking the zone offset in force at that instant and correcting once — step for step the
+two-pass conversion `wallToInstant()` does. So an occurrence the server generates and a time
+the editor saves land on the same instant — as long as the two sides read the same timezone
+data, which is a real caveat and is spelled out under the table — and neither half of the
+application has a rule of its own. That is worth stating because it is an agreement between two implementations rather
+than one piece of code, and it would break quietly: both sides say 02:30 whichever instant
+they pick. The two ambiguity rows below are therefore pinned twice, by
+`TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant` in `internal/events` and by
+`e2e/dst-fallback.spec.js`, each of which names the other.
 
 ### The recurrence policy table
 
@@ -103,11 +117,29 @@ These were decided deliberately, because every one of them has a plausible oppos
 | `UNTIL` | Inclusive |
 | Interval anchoring | The series start is the anchor, for every frequency |
 | Monthly modes | Exactly one of: day-of-month, nth weekday (`1..5`, `-1` = last), or last calendar day |
+| A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, given the same tz database.** Both run one conversion — read the wall fields as though they were UTC, take the offset in force at that reading, apply it, and correct once — and those are the same function, checked over every transition in all 406 zones. Which of the two passes it lands on follows the zone rather than being a policy: the second in Europe/Paris, the first in a zone whose winter offset is negative. See the caveat below the table: the same *function* is not the same *answer* if the two sides disagree about the rules |
+| A wall time in the hour the clocks skip (spring) | **Moved by the length of the gap, in the direction the offset dictates** — forward where the standard offset is at or above zero, so 02:30 becomes 03:30 in Europe/Paris; backward where it is negative, so 02:30 becomes 01:30 in America/New_York. It is not a choice either implementation makes, but what falls out of the conversion above, and in a zone that jumps at midnight it can land on the **previous day** — a 00:30 series in America/Santiago resolves to 23:30 the day before, and is then bucketed on that day. Both sides again |
+| Occurrence end | **Start plus the template's exact duration.** An occurrence spanning a daylight-saving change is therefore an hour longer or shorter in wall-clock terms, while being exactly as long in real time; RFC 5545 and Google Calendar do the same. Keeping both wall clocks instead would make an occurrence's length depend on the date it fell on, and collapse anything inside the missing spring hour to zero length or less |
 
 `internal/recur` is pure functions over dates with no I/O, which is why it can be tested
 exhaustively. Its test suite includes cases derived from a calendar independently of the
-implementation, and the five policies above were mutation-tested to confirm the suite
-actually catches their opposites.
+implementation, and the first five policies above — the ones that are its own — were
+mutation-tested to confirm the suite actually catches their opposites. The rows below them
+belong to `internal/events`: they are about the instant an occurrence lands on rather than
+the date it falls on.
+
+**The two daylight-saving rows say "the same conversion", not "the same answer".** The
+conversion is provably one function written twice — but each side reads its own copy of the
+tz database, and those can be different vintages: Go prefers the system zoneinfo and falls
+back to the `time/tzdata` the binary embeds, while the browser carries whatever its engine
+shipped with. When a zone's rules change and one side has not caught up, the two disagree
+about a perfectly ordinary time, not merely an edge case — a browser on tzdata 2024b and a
+server on 2026b put `Europe/Chisinau` 2026-03-29 03:30 an hour apart, and put *every*
+`America/Vancouver` timestamp after November 2026 an hour apart, because British Columbia
+stopped changing its clocks. Nothing here can fix that from one side; what it means is that
+the guarantee is about the algorithm, and a household in a zone whose rules have just
+changed should expect an occurrence and a typed time to differ until the browser updates.
+France has not changed its rules since 1996.
 
 ### Occurrences are never stored
 
@@ -128,6 +160,16 @@ a month is deliberately coarse in the same direction: it also reads series that 
 shortly before the window, in case a multi-day occurrence reaches into it. Expansion
 decides what is actually visible. Too wide costs a few rows; too narrow loses events.
 
+Search is the one place that "a copy is not an event of its own" bends, because search
+answers *find the thing I typed*. Renaming a single occurrence puts the new title on the
+copy and nowhere else, so hiding it makes the words the family typed unfindable; returning
+every copy shows one series once per exception it has. So a copy is returned exactly when
+it matches the query and its own template does not — no duplicates and no silent misses,
+in one condition. Search deliberately has no window: it is over the whole calendar, past
+and finished series included, which is also why a series result sorts under the date its
+pattern began. The occurrence-relative date beside each result (`next_occurrence`) is
+computed per result by the handler, because only expansion knows it and SQL cannot ask.
+
 That standalone event is the id the API then publishes for the occurrence, so the *second*
 thing anyone does to an edited occurrence arrives addressed to the copy rather than to the
 series — and a copy carries no pattern of its own. Every operation therefore resolves an id
@@ -136,6 +178,31 @@ the client: the identity of an occurrence is a fact about the data, and a client
 to reconstruct it would be one release away from getting it wrong again. Not doing so is
 how "delete this occurrence" deleted the exception instead of the occurrence, and brought
 it back at its original time.
+
+**An edited occurrence inherits its series' reminders until somebody changes them on that
+occurrence.** For a date with an override the planner reads the copy's reminders if that
+member has set them there, and the series' if not — one list or the other, never both.
+Both is what announced a moved swimming lesson twice, from two rows the outbox could not
+tell apart. "Has set them there" is recorded, per (copy, member), when they save a
+reminder list against the copy, *including an empty one*: that is how "no reminder, just
+for this one" is expressed, and without somewhere to write it, removing a reminder from a
+single occurrence showed an empty list and went off anyway.
+
+The reason it is a record rather than "does the copy have any rows of its own" is the
+whole of this rule. Copying the series' reminders onto the copy when the copy is created
+— which is what an earlier attempt at #42 did — makes "no rows" mean two different
+things, and the one it silently gets wrong is the dangerous one: rows are copied at that
+moment and never again, so a reminder the series is given afterwards, or the first
+reminder a member sets after joining the calendar, never reaches an occurrence somebody
+had already moved. Nothing on screen distinguishes such an occurrence, and the outbox is
+at-least-once by design precisely because a missing notification is worse than a repeated
+one. Inheritance also costs nothing in the other direction: an edit to the series still
+leaves an edited occurrence's *contents* alone, as it always has.
+
+Creating an override therefore writes no reminders at all. The one place a copy is given
+reminders of its own is when a "this and following" edit re-patterns the series out from
+under it: the copy stops being an occurrence of that series, so it takes the reminders it
+was inheriting with it, per member, or it would be announced by nothing at all.
 
 "This and following" **splits the series**: the original gets an end date the day before,
 a new series starts at the split, overrides at or after the split move across, and every
@@ -255,6 +322,18 @@ knows, so a mistaken downgrade fails loudly instead of corrupting data, and a de
 one is a decision somebody takes rather than a surprise. Every migration is proved against
 a database a shipped release really wrote, checked in under `internal/store/testdata/`.
 
+0004 adds the table that records which members have set an edited occurrence's reminders
+on the occurrence itself, and it is deliberately schema only. The version of it that
+backfilled — writing the series' reminders onto every copy already in the database — would
+have marked every edited occurrence in every household as having had its reminders set by
+hand, which is exactly the failure the rule above exists to avoid, applied retroactively
+and invisibly. There is nothing to backfill under inheritance: an existing copy has no
+reminders of its own, so it inherits, which is what those families have been receiving all
+along. A migration that writes rows is an exception that has to be argued for out loud,
+and `TestUpgradeFromReleasedDatabase` makes it one: the number of rows a migration is
+expected to add is named per release beside the fixture, and any other movement in the
+family's rows fails the build.
+
 Backups are `almanack backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
 **on the output**, fsync, then rename atomically. Checking the copy rather than the source
 is the point — a backup that faithfully preserves a corrupt page is not a backup — and a
@@ -266,6 +345,16 @@ Hand-written ES2020 modules. Views render through an `h()` helper that inserts t
 nodes and attaches handlers with `addEventListener`; the CSP ships without `unsafe-inline`,
 so an inline `onclick` is a dead button rather than a shortcut, and `innerHTML` with server
 data is forbidden outright.
+
+An attribute that becomes a URL — `href`, `src`, `action` — goes through `safeHref()`, which
+strips control characters *before* it reads the scheme and then hands on the stripped value.
+Both halves are the fix for [#20](https://github.com/d-weber/almanack/issues/20). The URL
+parser removes tab, newline and carriage return from anywhere in a URL and control characters
+from the front of one, so a scheme read off the string as written is a scheme read off a
+different URL than the browser will follow; and returning the original after checking a
+cleaned copy would leave that second reading intact. The server refuses a link with a tab or
+a line break in it as well, but the browser is where this has to hold: it is the layer that
+sees every URL, wherever it came from.
 
 Every sheet and dialog in the app is the same function, `openOverlay()` in `js/ui.js`, and
 modal there means modal to the keyboard as well as to the eye: Tab cycles inside the panel

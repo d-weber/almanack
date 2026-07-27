@@ -285,6 +285,65 @@ func TestForeignKeysAreLeftAlone(t *testing.T) {
 	}
 }
 
+// The same typo in the environment. This is the half that was missing, and it is
+// the half that matters most: almanack.conf.example is in systemd
+// `EnvironmentFile=` format, which is the deployment docs/install.md recommends
+// first, and under it systemd reads the file and hands it to the process as
+// environment — so the binary starts with no --config at all, parses no file, and
+// ran its strictness check over an empty map. In the recommended deployment the
+// feature 0.2.0 was written for did not run.
+func TestUnknownEnvironmentKeyIsRejectedByName(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("ALMANACK_TZZ", "Europe/Paris")
+	_, err := loadConf(t, minimalProd()...)
+	wantErrMentioning(t, err, "ALMANACK_TZZ", "environment", "almanack.conf.example")
+}
+
+// And with no file anywhere, which is that deployment in full: every setting
+// arrives as environment, and the typo has to be caught anyway.
+func TestUnknownEnvironmentKeyWithNoConfigFileAtAll(t *testing.T) {
+	isolateEnv(t)
+	requireNoSystemConfig(t)
+
+	for _, line := range minimalProd() {
+		key, value, _ := strings.Cut(line, "=")
+		t.Setenv(key, value)
+	}
+	t.Setenv("ALMANACK_HEARTBAET_TIME", "08:00")
+
+	_, err := Load("")
+	wantErrMentioning(t, err, "ALMANACK_HEARTBAET_TIME")
+}
+
+// The process environment legitimately holds hundreds of variables that are none
+// of this application's business, so the check stays inside its own namespace —
+// the same rule the file has always followed.
+func TestForeignEnvironmentKeysAreLeftAlone(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("EDITOR", "vi")
+	t.Setenv("TZ", "UTC")
+	t.Setenv("TZZ", "nonsense")
+	if _, err := loadConf(t, minimalProd()...); err != nil {
+		t.Fatalf("a non-ALMANACK environment variable was treated as a problem: %v", err)
+	}
+}
+
+// ALMANACK_CONFIG is the one key that is legitimately only ever in the
+// environment, since it names the file. It has always been in `known`, and this
+// says so out loud: the environment check would otherwise refuse to start every
+// deployment that uses it, which is the one docs/install.md describes.
+func TestConfigPathVariableIsNotAnUnknownKey(t *testing.T) {
+	isolateEnv(t)
+
+	path := writeConf(t, minimalProd()...)
+	t.Setenv("ALMANACK_CONFIG", path)
+	if _, err := Load(""); err != nil {
+		t.Fatalf("ALMANACK_CONFIG in the environment was rejected: %v", err)
+	}
+}
+
 // A value that does not parse must name the setting and show what was rejected.
 // ALMANACK_ALSACE_MOSELLE=yes is the case that motivated this: the natural spelling
 // of "true" quietly switched the two extra public holidays back off.
@@ -342,6 +401,81 @@ func TestBoolSpellings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings an empty value is a real answer for
+// ---------------------------------------------------------------------------
+
+// Setting the heartbeat to nothing is the documented way to turn the daily mail
+// off — the Config field says so, almanack.conf.example says so, and the notifier
+// implements it — and it did not work: an empty value was read as an absent one
+// and 08:00 came back, so the operator kept getting a mail every morning they had
+// been told they had switched off, with no way to reach the disabled path at all.
+func TestHeartbeatIsDisabledByAnEmptyValue(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd("ALMANACK_HEARTBEAT_TIME=")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HeartbeatTime != "" {
+		t.Errorf("an empty ALMANACK_HEARTBEAT_TIME in the file gave %q; the heartbeat is still on", cfg.HeartbeatTime)
+	}
+
+	// And from the environment over a file that sets it, which is the systemd
+	// EnvironmentFile deployment: there the file *is* the environment, so an
+	// operator who empties the line is heard through that path and no other.
+	t.Setenv("ALMANACK_HEARTBEAT_TIME", "")
+	cfg, err = loadConf(t, minimalProd("ALMANACK_HEARTBEAT_TIME=08:00")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HeartbeatTime != "" {
+		t.Errorf("an empty ALMANACK_HEARTBEAT_TIME in the environment gave %q", cfg.HeartbeatTime)
+	}
+
+	// The startup line and /healthz have to say which of the two silences this is.
+	// "no heartbeat mail" is the same symptom whether it was turned off on purpose
+	// or the mail path is broken, and the configuration is where that is settled.
+	if joined := strings.Join(cfg.Redacted(), "\n"); !strings.Contains(joined, "heartbeat_time=(disabled)") {
+		t.Errorf("Redacted() does not say the heartbeat is off:\n%s", joined)
+	}
+}
+
+// The other half of that decision, and the reason it was not made for every
+// setting at once. Everywhere else an empty value is a templating accident rather
+// than an instruction, and a general "empty means empty" rule would read
+// ALMANACK_TZ= as UTC — time.LoadLocation("") is UTC, with no error — which is the
+// whole family's calendar an hour out for half the year, silently, on upgrade.
+func TestAnEmptyValueElsewhereStillMeansTheDefault(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd(
+		"ALMANACK_TZ=",
+		"ALMANACK_LOG_LEVEL=",
+		"ALMANACK_LISTEN=",
+		"ALMANACK_HOLIDAY_COLOR=",
+	)...)
+	if err != nil {
+		t.Fatalf("an emptied line was treated as a value rather than as an omission: %v", err)
+	}
+	cases := []struct {
+		key       string
+		got, want any
+	}{
+		{"ALMANACK_TZ", cfg.TZName, "Europe/Paris"},
+		{"ALMANACK_LOG_LEVEL", cfg.LogLevel, "info"},
+		{"ALMANACK_LISTEN", cfg.ListenAddr, "127.0.0.1:8080"},
+		{"ALMANACK_HOLIDAY_COLOR", cfg.HolidayColor, "#d32f2f"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("%s= gave %v, want the default %v", tc.key, tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Required settings and validation
 // ---------------------------------------------------------------------------
 
@@ -379,6 +513,234 @@ func TestRequiredSettings(t *testing.T) {
 			}
 			_, err := loadConf(t, lines...)
 			wantErrMentioning(t, err, tc.mentions...)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The listen address
+// ---------------------------------------------------------------------------
+
+// ALMANACK_LISTEN=8080 is how a great many other services spell this setting, and
+// net.Listen reads a bare port as ":8080" — every interface on the machine. This
+// application speaks plain HTTP and its own example file says to keep it on
+// localhost behind a TLS proxy, so one missing colon is the family's calendar
+// unencrypted on the LAN, or on the internet behind a port forward. Nothing else
+// catches it: 127.0.0.1:8080 and :8080 differ by two characters in a startup line
+// nobody reads after the first install. The error has to say what was meant.
+func TestBarePortIsRefusedAndNamesTheAddressItMeant(t *testing.T) {
+	isolateEnv(t)
+
+	_, err := loadConf(t, overriding("ALMANACK_LISTEN", "8080")...)
+	wantErrMentioning(t, err, "ALMANACK_LISTEN", "8080", "every interface", "127.0.0.1:8080")
+}
+
+// The rest of the shapes. Each is something an operator plausibly writes, and each
+// would otherwise be found by net.Listen after the database has been opened and
+// migrated, in a message about an address rather than about a setting.
+func TestListenMustBeHostAndPort(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{
+		"8080",                 // a bare port
+		"127.0.0.1",            // a host and no port
+		"127.0.0.1:",           // a colon and no port
+		":",                    // neither
+		"127.0.0.1:http",       // a service name rather than a port
+		"127.0.0.1:0",          // port 0 asks the kernel to choose, so nothing can reach it
+		"127.0.0.1:70000",      // not a port at all
+		"::1:8080",             // IPv6 without the brackets net.Listen needs
+		"almanack.example.org", // no port, and not a number either
+	} {
+		t.Run(addr, func(t *testing.T) {
+			_, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			wantErrMentioning(t, err, "ALMANACK_LISTEN")
+		})
+	}
+}
+
+// And the shapes that must keep working, including the two that bind every
+// interface: an operator terminating TLS on another machine writes one of those
+// deliberately, and refusing them would be this fix breaking a working install.
+func TestListenAcceptsEveryReasonableSpelling(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{
+		"127.0.0.1:8080",
+		"localhost:8080",
+		"[::1]:8080",
+		"0.0.0.0:8080",
+		":8080",
+		"192.168.1.10:8080",
+		"almanack.internal:8080",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("ALMANACK_LISTEN=%s was refused: %v", addr, err)
+			}
+			if cfg.ListenAddr != addr {
+				t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, addr)
+			}
+		})
+	}
+}
+
+// A bind that is not loopback is a warning and not a refusal, because it is a
+// legitimate answer for somebody terminating TLS elsewhere — but it is also what
+// an operator gets by accident, and the plain-HTTP consequence deserves saying
+// once at startup rather than never.
+func TestNonLoopbackListenWarnsRatherThanRefusing(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{"0.0.0.0:8080", ":8080", "192.168.1.10:8080"} {
+		t.Run(addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("a non-loopback bind was refused rather than warned about: %v", err)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			if !strings.Contains(warnings, "ALMANACK_LISTEN") {
+				t.Errorf("binding %s produced no warning; warnings were %q", addr, warnings)
+			}
+		})
+	}
+
+	for _, addr := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		t.Run("quiet on "+addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Warnings) != 0 {
+				t.Errorf("a loopback bind warned anyway: %q", cfg.Warnings)
+			}
+		})
+	}
+
+	// Dev mode used to be exempt from this warning, on the grounds that binding every
+	// interface is how the app is opened from a phone on the same wifi. That silenced
+	// it in the one configuration where the stakes are highest: dev mode serves
+	// /dev/login/{id}, which signs in as any account with no password, and the comment
+	// justifying that says dev mode binds to localhost — which nothing checked. It is
+	// still a warning rather than a refusal, because the phone is a real use.
+	t.Run("dev is warned loudest of all", func(t *testing.T) {
+		cfg, err := loadConf(t,
+			"ALMANACK_DEV=true",
+			"ALMANACK_DATA=/tmp/dev.db",
+			"ALMANACK_BASE_URL=http://localhost:8080",
+			"ALMANACK_LISTEN=0.0.0.0:8080",
+		)
+		if err != nil {
+			t.Fatalf("a non-loopback bind in dev was refused rather than warned about: %v", err)
+		}
+		warnings := strings.Join(cfg.Warnings, "\n")
+		if !strings.Contains(warnings, "/dev/login") {
+			t.Errorf("dev mode did not name the endpoint that makes this dangerous; warnings were %q", warnings)
+		}
+	})
+
+	t.Run("dev on loopback is still quiet", func(t *testing.T) {
+		cfg, err := loadConf(t,
+			"ALMANACK_DEV=true",
+			"ALMANACK_DATA=/tmp/dev.db",
+			"ALMANACK_BASE_URL=http://localhost:8080",
+			"ALMANACK_LISTEN=127.0.0.1:8080",
+		)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Warnings) != 0 {
+			t.Errorf("make dev warned about a loopback bind: %q", cfg.Warnings)
+		}
+	})
+}
+
+// TestEnvironmentValuesAreTrimmedLikeFileOnes pins that a setting means the same thing
+// whichever way it arrives. systemd's Environment= keeps the spacing it was written
+// with, and an untrimmed ALMANACK_LISTEN warned that a loopback address was not one and
+// then failed to bind it.
+func TestEnvironmentValuesAreTrimmedLikeFileOnes(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", " 127.0.0.1:8080 ")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ListenAddr != "127.0.0.1:8080" {
+		t.Errorf("Listen = %q; want it trimmed", cfg.ListenAddr)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("a loopback bind with stray spaces warned: %q", cfg.Warnings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Addresses and contact URIs
+// ---------------------------------------------------------------------------
+
+// ALMANACK_MAIL_FROM is the envelope sender and ALMANACK_OWNER_EMAIL is where
+// every failure alert goes. A shape the MTA will refuse is worth catching at
+// startup rather than at the first reminder, and the display-name form is the
+// mistake to expect: it is how the address is written everywhere else.
+func TestMailAddressesAreCheckedForShape(t *testing.T) {
+	isolateEnv(t)
+
+	for _, key := range []string{"ALMANACK_MAIL_FROM", "ALMANACK_OWNER_EMAIL"} {
+		for _, value := range []string{
+			"Almanack <almanack@example.org>",
+			"almanack.example.org",
+			"you @example.org",
+			"you@@example.org",
+			"@example.org",
+			"you@",
+		} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				_, err := loadConf(t, overriding(key, value)...)
+				wantErrMentioning(t, err, key)
+			})
+		}
+	}
+
+	// The check is deliberately shallow, and these must all pass: RFC 5322 permits
+	// things no household will ever type, and the only proof an address works is
+	// that mail to it arrives. almanack@localhost matters most — it is what dev
+	// mode fills in, and a rule requiring a dot in the domain would refuse it.
+	for _, value := range []string{"almanack@localhost", "you+calendar@example.org", "wm@example.co.uk"} {
+		t.Run("accepted "+value, func(t *testing.T) {
+			if _, err := loadConf(t, overriding("ALMANACK_MAIL_FROM", value)...); err != nil {
+				t.Errorf("ALMANACK_MAIL_FROM=%s was refused: %v", value, err)
+			}
+		})
+	}
+}
+
+// RFC 8292 wants the VAPID subject to be a contact URI — mailto: or https: — and
+// internal/webpush enforces exactly that when it builds a sender. Catching it here
+// means the operator is told which setting is wrong, alongside every other
+// configuration problem, instead of after the database has been opened and only
+// when push keys happen to be configured.
+func TestVAPIDSubjectMustBeAContactURI(t *testing.T) {
+	isolateEnv(t)
+
+	for _, value := range []string{
+		"you@example.org",        // the bare address, which is the mistake to expect
+		"http://example.org",     // http is not one of the two
+		"mailto:",                // a scheme and no contact
+		"example.org/contact",    // no scheme at all
+		"MAILTO:you@example.org", // internal/webpush compares case-sensitively
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := loadConf(t, overriding("ALMANACK_VAPID_SUBJECT", value)...)
+			wantErrMentioning(t, err, "ALMANACK_VAPID_SUBJECT", "mailto:")
+		})
+	}
+
+	for _, value := range []string{"mailto:you@example.org", "https://example.org/contact"} {
+		t.Run("accepted "+value, func(t *testing.T) {
+			if _, err := loadConf(t, overriding("ALMANACK_VAPID_SUBJECT", value)...); err != nil {
+				t.Errorf("ALMANACK_VAPID_SUBJECT=%s was refused: %v", value, err)
+			}
 		})
 	}
 }
@@ -679,11 +1041,14 @@ func TestShippedExampleLoads(t *testing.T) {
 
 // exemptFromExample records the keys that legitimately do not appear in
 // almanack.conf.example. Anything else missing is drift.
-var exemptFromExample = map[string]string{
-	// Chicken and egg: this one names the file, so it cannot be set inside it.
-	// `almanack --help` and cmd/almanack's usage text document it instead.
-	"ALMANACK_CONFIG": "selects the configuration file, so it cannot live in it",
-}
+//
+// It is empty, and the emptiness is the point. ALMANACK_CONFIG was the one entry:
+// it names the file, so it cannot be set inside it. But the example's header now
+// says so in prose — it used to claim there was nothing configurable outside the
+// file, which was false by exactly this key — and prose counts as documentation
+// here, so an operator can discover it and the exemption has nothing left to
+// excuse. A key added back to this map is a key an operator cannot find.
+var exemptFromExample = map[string]string{}
 
 // The cross-check. `known` is the set of settings the parser accepts; the example
 // file is the set an operator can discover. When those two drift apart the failure
@@ -909,6 +1274,37 @@ func TestRedactedWithholdsSecrets(t *testing.T) {
 	short.VAPIDPrivate = "abc123"
 	if strings.Contains(strings.Join(short.Redacted(), "\n"), "abc123") {
 		t.Error("a short VAPID private key survives redaction")
+	}
+}
+
+// Redacted() is the startup log line and the /healthz detail view, which are the
+// two places an operator finds out what the running server actually thinks its
+// configuration is. A setting missing from it is one they have to take on faith,
+// and it stays missing silently: the backup retention keys were absent from the
+// day they were added, so a household could not see the policy that was deleting
+// their snapshots. The mapping is mechanical — the key without its prefix, in
+// lower case — so this cross-check needs no second list to drift.
+func TestRedactedShowsEverySetting(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd()...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	joined := strings.Join(cfg.Redacted(), "\n")
+
+	// ALMANACK_CONFIG is reported as where the settings came from rather than as a
+	// setting of its own, which is what an operator is actually asking.
+	renamed := map[string]string{"ALMANACK_CONFIG": "config_path"}
+	for key := range known {
+		name := renamed[key]
+		if name == "" {
+			name = strings.ToLower(strings.TrimPrefix(key, "ALMANACK_"))
+		}
+		if !strings.Contains(joined, name+"=") {
+			t.Errorf("Redacted() has no line for %s (expected %s=…), so its value cannot be seen\n"+
+				"in the startup log or on /healthz:\n%s", key, name, joined)
+		}
 	}
 }
 

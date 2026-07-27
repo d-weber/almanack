@@ -58,6 +58,45 @@ Notable changes to this project. The format follows
   browser is the same as not existing. CI now seeds a demo family, starts a server and
   runs it.
 
+- **The two hours a year that are not names for moments are now written down, and pinned on
+  both sides.** Twice a year a wall time stops identifying an instant: in autumn 02:30 comes
+  round twice, and in spring it never comes round at all. A recurring event at such a time
+  had to land somewhere, and nothing said where — the recurrence policy table in
+  [docs/architecture.md](docs/architecture.md) was silent on both. It now has a row for each.
+  In the repeated hour a French calendar's occurrence takes the second pass, and a time typed
+  into the editor resolves to the same instant; in the skipped hour both move by the length of
+  the gap, so 02:30 becomes 03:30 in Paris. Neither is a policy anyone chose — which pass and
+  which direction both follow from the zone, so a calendar kept in New York lands on the first
+  pass and moves 02:30 back to 01:30, and the table says so rather than pretending Paris is
+  the world. **Nothing about your calendar has changed**: this is the behaviour every version
+  so far has had, on both sides, and it was measured rather than assumed before being written
+  down. What was missing was the guarantee that it stays that way. The two halves of the
+  application reach the same answer through different code — Go's `time.Date` on the server, a
+  two-pass conversion in the browser — and if one of them ever drifted, nothing would look
+  wrong: both instants read 02:30 on a clock face, so an appointment could move by an hour
+  with nothing on screen to say so. So both rules are now asserted twice, once in
+  `internal/events` and once in a real browser in `e2e/dst-fallback.spec.js`, each test naming
+  the other. The guarantee is about the conversion and not about the timezone data underneath
+  it, which the two sides read separately and which can be of different vintages — a caveat
+  now written out under the table, and the reason a household whose country has just changed
+  its daylight-saving rules may see the two disagree until the browser catches up.
+  ([#51](https://github.com/d-weber/almanack/issues/51))
+
+- **What happens to the end of a repeating event at a daylight-saving change is now written
+  down.** A recurring event keeps its start on the clock — a 16:30 swimming lesson is at
+  16:30 all year — and its end is the start plus however long the event actually is. For the
+  one occurrence a year that lies across a changeover, those two facts pull in different
+  directions: a two-hour evening beginning at 01:30 on the night the clocks go forward ends
+  at 04:30 rather than 03:30, and on the night they go back it ends at 02:30. Two hours
+  either way, an hour more or less to read off a clock face. That is what the app has always
+  done, it is what RFC 5545 and Google Calendar do, and it is now a row in the recurrence
+  policy table in [docs/architecture.md](docs/architecture.md) with a test in
+  `internal/events` holding it there. **Nothing has changed**, and the alternative was
+  considered and rejected rather than overlooked: keeping both wall clocks would make an
+  event's length depend on the date it fell on, and would shrink anything inside the hour
+  spring skips to nothing at all.
+  ([#25](https://github.com/d-weber/almanack/issues/25))
+
 ### Changed
 
 - **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one
@@ -360,6 +399,242 @@ Notable changes to this project. The format follows
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
+- **Security: a link on an event could be written so that it executed instead of opening.**
+  Every URL this app puts on the page goes through one function, `safeHref()`, which reads
+  the scheme and refuses anything that is not `http`, `https`, `mailto` or `tel`. It read the
+  scheme off the string as typed, and the browser reads it off something else: the URL parser
+  removes tab, newline and carriage return from anywhere in a URL, and strips control
+  characters from the front of one, before deciding what the scheme is. So `java<TAB>script:`
+  matched no scheme at all, was waved through as "some kind of path", and became
+  `javascript:` the moment it was written into the page. A link beginning with an invisible
+  NUL did the same. Nothing was executing in practice — the Content-Security-Policy this app
+  ships with has no `script-src` and no `unsafe-inline`, and it blocks a `javascript:` link
+  outright — but a single policy header is not what the guardrail was supposed to be, and a
+  household member is not a stranger you have promised nothing to. `safeHref()` now removes
+  those characters *and* hands on what it removed them from, which is the half that matters:
+  checking a cleaned string and then returning the dirty one leaves the browser reading the
+  same URL it always did. One consequence a family may notice: a space inside a link is
+  removed along with the control characters, so a link that was pasted with one in it needs
+  the space taken out or written as `%20`.
+  The server no longer stores such a link either. It already refused anything that did not
+  begin with `http://` or `https://` — which is why nothing here was reachable in practice —
+  and it now also refuses a link holding a tab or a line break, because a link holding one
+  is not the link printed on the screen. Existing calendars are unaffected in the way that
+  matters: the rule runs when an event is saved and nowhere else, so an event stored by 0.2.0
+  with a tab in its link still lists, still opens and still sends its reminders. Editing that
+  one event is refused until the stray character is taken out of the link box, which is the
+  price of the check and is said in those words rather than as a failure to save.
+  ([#20](https://github.com/d-weber/almanack/issues/20))
+- **The unit, the timer and `/healthz` now behave the way the deployment contract says they
+  do.** Four operational faults, none of them visible from a browser and all of them visible
+  on the morning something goes wrong. Two backups running at once destroyed each other: the
+  sweep that clears partial files from an interrupted run took every one it found, whatever
+  its age, so a snapshot of a large database overtaken by the next hourly run had its file
+  deleted underneath it — and what followed was worse than a lost file, because `VACUUM INTO`
+  went on writing to the unlinked inode while the verification step opened the path afresh,
+  created an empty database there, and failed it at the schema check. The household saw a
+  "your backups are failing" mail and a 503 from `/healthz` until the next hour, about a
+  backup that was never in trouble. Partial files are now left alone for an hour and carry
+  the writing process's id, so two runs cannot meet at all; the hour is also why the off-host
+  sync must keep skipping `*.tmp`, as it always should have. Snapshots are written `0600`
+  rather than under whatever umask the timer's unit happened to have — the file is a complete
+  copy of the calendar, every address and every password hash, and an off-host sync preserves
+  the mode it finds. The systemd watchdog was a trap for anyone who tuned the scheduler: the
+  ping was throttled to once per half of `WatchdogSec`, but it is only reached when a tick
+  completes, so the real spacing was that half *plus* a whole tick against a deadline of the
+  whole `WatchdogSec` — 30 seconds of margin at the defaults, and a restart loop for whoever
+  set `ALMANACK_TICK=90s` to reduce load on a small box. The throttle is gone: a datagram
+  costs nothing, the spacing is now exactly one tick, and the process warns at startup if the
+  two settings are close enough to matter. Readiness was signalled before anything had bound
+  the port, so `systemctl restart` returned success — and the install guide's "confirm the
+  readiness signal arrived" passed — on a service that was about to die because a second copy
+  of the unit, or a proxy, already held the address; the listener is opened before `READY=1`
+  now, making the order migrations, bind, ready, serve. And `/healthz` reported a field named
+  `database_exists` that only checked the configuration string was not empty, while the
+  connection pool went on answering pings from a file that had been unlinked or a volume that
+  never mounted, so a server whose calendar had gone reported itself healthy indefinitely: it
+  stats the path now, and a database that is not there degrades the server.
+  ([#23](https://github.com/d-weber/almanack/issues/23))
+- **Searching for a name spelled with ø, ß, ð, þ or đ found nothing unless you typed the
+  letter itself.** Search ignores accents by folding both the stored text and what you type
+  down to plain letters, so `ecole` finds `École`; the table doing the folding covered
+  French and the ligatures `æ` and `œ`, but stopped there. A birthday filed under `Søren`
+  was therefore reachable only by typing the ø — an o would not do — and the same for the
+  German ß and the Icelandic ð and þ. Those five letters and their capitals now fold the
+  way the rest do: `soren` finds `Søren`, `strasse` finds `Straße`, `thorbjorg` finds
+  `Þorbjörg`. The events you already have are re-filed on upgrade, which is not a detail:
+  the folded copy of an event is written once, when the event is saved, so teaching the
+  search box that ø means o without also rewriting what is stored would have left `Søren`
+  matching neither spelling — findable before, findable by nothing after. Upgrading rewrites
+  the folded copy of every affected event in place; nothing you typed is touched, and there
+  is nothing to run by hand.
+  ([#24](https://github.com/d-weber/almanack/issues/24))
+- **A failed backup could leave an empty calendar where the family's used to be.** Every
+  run records its outcome where `/healthz` can read it, and that breadcrumb is written by
+  opening the database — which creates and fully migrates the file when it is not there. So
+  a backup taken while the data volume had failed to mount did the right thing twice over,
+  refusing to back up nothing and exiting non-zero, and then left a fresh, empty, 217 KB
+  Almanack database sitting at the data path. The next start came up on it without
+  complaint, the health check went green, and the real calendar was still on the volume
+  nobody had noticed was missing — which is a bad way to discover that the hourly timer had
+  been running against an unmounted disk since the reboot. The outcome is now recorded only
+  when there is a database to record it against; when there is not, the non-zero exit and
+  the failure mail are the whole signal, as the deployment contract has always said.
+  ([#29](https://github.com/d-weber/almanack/issues/29))
+- **The check that catches a misspelt setting was not running in the deployment we recommend.**
+  0.2.0 promised that an unknown `ALMANACK_*` key is a startup error naming the problem rather
+  than a silent fall back to the default. Only keys parsed out of the config *file* were ever
+  checked — and `almanack.conf.example` is in systemd `EnvironmentFile=` format, which is the
+  first deployment [docs/install.md](docs/install.md) describes, so systemd reads that file
+  itself and hands it to the process as environment. Almanack then starts with no `--config`
+  at all, parses no file, and ran its strictness check over an empty map. A typo in the
+  operator's configuration was ignored exactly where the feature was supposed to be working:
+  `ALMANACK_TZZ=Europe/Paris` was accepted in silence and every event went into the wrong
+  timezone, which is the failure 0.2.0 set out to kill. The environment is now checked the same
+  way, and the error names the key and says where it was seen.
+  **Before upgrading, check what sets `ALMANACK_*` variables on that machine.** A stale or
+  misspelt one that has been quietly ignored until now will stop the service from starting.
+  Three places to look: the configuration file, anything the unit or a drop-in adds
+  (`systemctl show almanack -p Environment`), and any profile script that exports one. Nothing
+  outside the `ALMANACK_` namespace is inspected, so unrelated variables are safe, and the
+  refusal happens at startup with the key named and before the database is opened — a failed
+  restart changes nothing and rolls back by correcting the key. Contributors: the browser
+  suite's `ALMANACK_URL` is now `E2E_BASE_URL`, since a test-only variable squatting in the
+  application's namespace would stop `make dev` in any shell that exported it.
+  ([#30](https://github.com/d-weber/almanack/issues/30))
+- **A damaged password row answered every sign-in attempt for that account with a server
+  error.** Verification promises that a stored hash it cannot read is an error rather than a
+  quiet "wrong password", because treating a corrupt row as a bad password sends its owner
+  round the reset loop forever, resetting to a password that then also fails. Three shapes of
+  malformed hash never reached that promise: a row claiming no passes (`t=0`), one claiming no
+  parallel lanes (`p=0`), and one whose tag is empty. Each made the argon2 library panic
+  instead of returning, and since the HTTP layer recovers, what came out was a 500 on every
+  sign-in as that person — which reads as "the site is down" rather than "this one row is
+  damaged" — plus a stack trace in the log that names no account. Reaching it needs a corrupt
+  or hand-edited `users` row rather than anything a visitor can send, so nobody's calendar was
+  exposed by it; it is fixed because a library panicking on data from its own database is the
+  wrong answer at any frequency.
+  ([#31](https://github.com/d-weber/almanack/issues/31))
+- **Turning the daily heartbeat mail off did not turn it off.** `ALMANACK_HEARTBEAT_TIME=`
+  with nothing after it is what `almanack.conf.example`, the setting's own documentation and
+  the notifier's code all describe as the way to stop the daily operations summary, and the
+  configuration loader read an empty value as no value at all and handed back the `08:00`
+  default. So the mail arrived every morning from a server whose operator had been told they
+  had switched it off, and the code that implements the disabled case could not be reached at
+  all. An empty value is now a value — for this setting and no other, because everywhere else
+  an emptied line is a templating accident rather than an instruction: `ALMANACK_TZ=` still
+  means Europe/Paris, where reading it literally would mean UTC and quietly move every
+  appointment in the calendar by an hour for half the year. The startup line and `/healthz`
+  now report `heartbeat_time=(disabled)` rather than `(unset)`, because no mail arriving looks
+  the same whether it was switched off on purpose or the mail path is broken, and that is the
+  line that settles it.
+  ([#32](https://github.com/d-weber/almanack/issues/32))
+- **`ALMANACK_LISTEN=8080` quietly listened on every interface.** That is how a good many
+  other services spell this setting, and `net.Listen` reads a bare port as `:8080` — every
+  address on the machine. Almanack speaks plain HTTP and its own example file tells you to
+  keep it on localhost behind a TLS proxy, so a single missing colon was the family's
+  calendar readable unencrypted by anything on the network, or on the internet on a box with
+  a port forward. Nothing caught it: `127.0.0.1:8080` and `:8080` differ by two characters in
+  a startup line nobody reads after the first install. The address is now checked for shape
+  at startup, and a bare port is refused with the address that was meant — "write
+  `127.0.0.1:8080` to keep it on localhost, or `0.0.0.0:8080` if reaching it from the network
+  is what you meant". A deliberate non-loopback bind still starts, because terminating TLS on
+  another machine is a real deployment, but it now says once in the log what it implies.
+  Three smaller things from the same reading of the file travel with it. `ALMANACK_MAIL_FROM`
+  and `ALMANACK_OWNER_EMAIL` are checked for the shape an MTA will accept, so the
+  display-name form — `Almanack <almanack@example.org>`, which is how the address is written
+  everywhere else — fails at startup rather than at the first reminder. `ALMANACK_VAPID_SUBJECT`
+  must carry the `mailto:` or `https:` scheme RFC 8292 requires: a bare email address was
+  refused later, deeper in, and only once a keypair was configured. And the startup log and
+  `/healthz` now show every setting rather than most of them — the backup retention keys, the
+  holiday colour, the log format and the dev mail directory were all missing, so a household
+  could not see the retention policy that was deleting their snapshots at the moment they
+  went looking for it. A test now cross-checks that list against the settings the parser
+  accepts, so it cannot fall behind again. Development mode gets the loudest version of the
+  bind warning rather than being exempt from it, which is how it started out: `make dev`
+  serves `/dev/login/{id}`, which signs anyone in as any account without a password, and the
+  comment justifying that says dev mode binds to localhost — an assumption nothing was
+  checking. It stays a warning, since opening the app from a phone on the same wifi is the
+  reason to bind wider in the first place.
+  ([#33](https://github.com/d-weber/almanack/issues/33))
+- **An edited occurrence could be announced twice, and the reminder you took off it went
+  off anyway.** Moving a single swimming lesson leaves a copy of the event behind, and the
+  app files the reminder list you were shown against that copy — while the planner went on
+  firing the series' reminders for that date as well. Two rows, two reminders as far as the
+  outbox could tell, two identical pushes half an hour before the lesson, one after the
+  other. The same disagreement ran the other way on screen: the editor lists the reminders
+  on the copy, so taking the reminder off one occurrence showed an empty list and left the
+  series' one to arrive that evening regardless. "No reminder, just for this one" was not
+  something the app could be told, and it did not say so. Underneath both was one question
+  nobody had answered — does an edited occurrence inherit its series' reminders, or go its
+  own way? It inherits them, until you say otherwise about that occurrence. A lesson you
+  have moved is reminded about like every other one, including by a reminder you add to
+  the series next month and by the first reminder somebody sets after joining the calendar.
+  Change the reminders on that one lesson and only that one changes — that is what tells
+  the app you mean this occasion in particular, and an empty list is a perfectly good thing
+  to mean, which is how "no reminder, just for this one" is finally sayable. The lesson is
+  announced once either way. Nothing is rewritten in calendars that already exist: the
+  occurrences you have already edited go on being reminded about exactly as they are
+  today, minus the duplicate push. Clearing the reminder on a single occurrence has never
+  worked, so there is nothing on disk that means it; it works from the moment you upgrade,
+  for the occurrences you clear from then on.
+  ([#42](https://github.com/d-weber/almanack/issues/42))
+- **Renaming one occurrence of a series made it impossible to find.** Rename next Tuesday's
+  swimming lesson to "Swimming (later than usual)" and searching for those words returned
+  nothing at all, while searching for "swimming" returned the series with its old title and
+  its old time. The renamed occurrence is stored as a separate copy of the event, and search
+  hid every such copy on the grounds that a series should appear once rather than once per
+  exception — which is right until the copy is the only place the words you typed exist.
+  Search now answers "find the thing I typed": a copy is returned when it matches and the
+  series it belongs to does not, so the renamed lesson is findable by its new name, and a
+  series with a dozen moved occurrences is still one result. The renamed occurrence also
+  arrives dated the day it actually happens; before, the only thing search could offer was
+  the series, sorted under the date the pattern began, so a lesson next week sorted among
+  2019. Two limits are unchanged and now written down rather than left to be discovered:
+  search covers the whole calendar with no date filter, so a series that finished years ago
+  still matches, and a series result is still sorted by the date its pattern began — the
+  date shown beside it is the next occurrence, which is the useful one.
+  ([#43](https://github.com/d-weber/almanack/issues/43))
+- **Deleting a calendar could silence the notifications for the ones that were left.** The
+  planner remembers how far it has got through the change log by the number of the last
+  entry it announced, and SQLite hands the numbers of deleted rows out again. A deleted
+  calendar takes its entries in the log with it, so deleting the one holding the newest
+  changes left that remembered number above every number the log would go on to issue:
+  everything anybody did afterwards was filed behind the marker, nothing is ever read from
+  behind it, and nobody was told about any of it — not on that tick, not on any later one,
+  and not until months of ordinary use had brought the log back up to where it had been.
+  Nothing looked wrong either: the activity feed listed every change, in the right order, and
+  the notifications about them simply never existed. The marker is now checked against the
+  log on every pass, and it is checked against the entry it was set from rather than against
+  how big the numbers have got. That distinction is the whole fix: the reused numbers climb
+  back towards the stranded marker, so comparing the two only ever caught the case where
+  *fewer* changes had been made than the deleted calendar took away — which is not the
+  ordinary one. Delete the holiday calendar and add one thing to the family calendar, and
+  nobody was told. The marker now remembers which change it stands at, not only its number,
+  and a number that has come to mean a different change — or none — is dropped back far
+  enough to take in whatever was logged in the meantime. The last day of entries is walked
+  again and the ones already announced are recognised and left where they are rather than
+  sent a second time. Somebody who joined a calendar during that day is no longer handed the
+  whole of it: a change made before you joined was never your news, and that day-long
+  re-walk was the one thing that made it look like it was. Reminders and digests were never
+  affected, since those are planned from the calendar rather than from the log. Nothing
+  changed in the database schema; the marker keeps what it remembers beside itself, and the
+  first pass after the upgrade walks the last day once to make up for a marker that predates
+  it having anything to say for itself.
+  ([#44](https://github.com/d-weber/almanack/issues/44))
+- **Running the browser tests twice failed the second time, for reasons that pointed
+  nowhere near the cause.** Two of the smoke tests created an event and never removed it, so
+  a second `make e2e` against the same seeded database found three other tests failing — the
+  offline one, the cache-cap one and the timezone one — because an extra event changes what
+  is on the screen and how many API ranges get cached. Nothing said "there is a leftover
+  event"; it looked like a broken application. CI never saw it, since that job seeds a
+  database before every run, so the whole cost fell on whoever ran the suite locally, which
+  is the case the target exists for. Both tests now delete what they created, in a `finally`
+  so that a failing assertion still tidies up, and through the API rather than by driving the
+  delete flow in a test that is about something else. On top of that the suite now looks, once
+  per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
+  run `make seed` — instead of letting three unrelated-looking tests go red.
+  ([#52](https://github.com/d-weber/almanack/issues/52))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

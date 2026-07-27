@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -201,15 +202,28 @@ func (s *Server) diskCheck(degraded *bool) map[string]any {
 	if dir == "" || dir == "." {
 		dir = "."
 	}
+	// Whether the database file is still there is a different question from whether the
+	// pool can be pinged: the connections hold the file open, so a volume that failed to
+	// mount, or a database deleted by hand, answers Ping happily for as long as the
+	// process lives. This field used to report that the *setting* was not empty, under
+	// the same name, and so said "true" on a server whose calendar had gone.
+	_, statErr := os.Stat(s.cfg.DataPath)
+	exists := statErr == nil
+	if !exists {
+		*degraded = true
+	}
+
 	total, free, err := diskUsage(dir)
 	if err != nil {
-		return map[string]any{"ok": true, "unavailable": err.Error(), "path": dir}
+		// Free space is not knowable on every platform (disk_other.go), and a figure
+		// this check cannot obtain is not a fault to restart the server over.
+		return map[string]any{"ok": exists, "unavailable": err.Error(), "path": dir, "database_exists": exists}
 	}
 	ratio := 0.0
 	if total > 0 {
 		ratio = float64(free) / float64(total)
 	}
-	ok := free >= diskFreeMinBytes && ratio >= diskFreeMinRatio
+	ok := exists && free >= diskFreeMinBytes && ratio >= diskFreeMinRatio
 	if !ok {
 		*degraded = true
 	}
@@ -221,7 +235,7 @@ func (s *Server) diskCheck(degraded *bool) map[string]any {
 		"free_percent":    int(ratio * 100),
 		"free_min_bytes":  int64(diskFreeMinBytes),
 		"free_min_ratio":  diskFreeMinRatio,
-		"database_exists": s.cfg.DataPath != "",
+		"database_exists": exists,
 	}
 }
 

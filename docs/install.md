@@ -317,12 +317,18 @@ WantedBy=multi-user.target
 EOF
 ```
 
-`Type=notify` is not decoration: the process signals readiness **after** migrations finish,
-so a restart that is still migrating is distinguishable from one that has died.
-`WatchdogSec` restarts a scheduler that has hung — which otherwise means reminders quietly
-stop while the process still answers HTTP. `After=time-sync.target` keeps a box that booted
-with a dead clock battery from either flushing every pending reminder at once or marking
-them delivered without sending them.
+`Type=notify` is not decoration: the process signals readiness **after** migrations finish
+and the port is bound, so a restart that is still migrating is distinguishable from one
+that has died, and `systemctl restart` does not report success on a service that is about
+to exit because something else already holds the port. `WatchdogSec` restarts a scheduler
+that has hung — which otherwise means reminders quietly stop while the process still
+answers HTTP. The ping goes out once per completed scheduler tick, and a tick that runs
+long delays the ping with it, so keep `ALMANACK_TICK` **under half of `WatchdogSec`** —
+120 s against the default 30 s tick leaves four times the room it needs. The process warns
+at startup when the tick passes that half, which is earlier than the point where it breaks:
+a tick anywhere near the full `WatchdogSec` restart-loops the first time it runs slowly.
+`After=time-sync.target` keeps a box that booted with a dead clock battery from either
+flushing every pending reminder at once or marking them delivered without sending them.
 
 ### 7. Make failure loud
 
@@ -474,11 +480,22 @@ instead of corrupting anything.
 Open browsers pick up the new version by themselves: every response carries the app version
 and the client reloads when it changes.
 
+**Check your `ALMANACK_*` variables before you restart.** Configuration is strict: a key the
+binary does not recognise is a startup error naming it, rather than a setting silently
+ignored. From 0.3.0 that applies to the environment as well as to the config file — which is
+the same thing under `EnvironmentFile=`, and was the gap that left the check doing nothing in
+this deployment. So a setting a release removes or renames has to come out of everywhere it
+is set, not just out of `/etc/almanack/almanack.conf`: `systemctl show almanack -p Environment`
+for anything the unit or a drop-in adds, and any profile script that exports one. The
+changelog names every setting a release removes. If a restart fails, the error says which key
+and where it was seen; nothing has started and nothing has changed.
+
 ## When something is wrong
 
 | Symptom | Where to look |
 |---|---|
 | `almanack: configuration problems:` on start | It lists every problem at once, by setting name. Nothing started; fix them and try again. |
+| `… is not a setting this version understands` | An `ALMANACK_*` key this version does not have, in the config file or in the service's environment. The message says which and where. It is usually a typo; after an upgrade it is a setting the new version dropped. |
 | Service restarts in a loop | `journalctl -u almanack -n 50`. Almost always the config file or permissions on `/var/lib/almanack`. |
 | The page loads but nothing works | A second `Content-Security-Policy` from your proxy. Remove it. |
 | Uploads fail | The proxy's body size limit; needs at least 2 MB. |

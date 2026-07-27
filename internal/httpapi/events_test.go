@@ -297,6 +297,98 @@ func TestHostileTitleIsData(t *testing.T) {
 	}
 }
 
+// An event's link is the one free-text field in this application that becomes an href,
+// and the browser's URL parser removes ASCII tab, LF and CR from anywhere in a URL
+// before it decides what the scheme is. So a link holding one is not the link that is
+// printed on the screen, and this refuses to store it on the way in. The guardrail is
+// web/js/dom.js, which strips them before deciding whether a scheme may be followed
+// (e2e/safe-href.spec.js); this is the second lock on the same door.
+func TestALinkCannotHideAControlCharacter(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	event := func(link string) map[string]any {
+		return map[string]any{
+			"calendar_id": cal.ID,
+			"title":       "Rendez-vous",
+			"starts_at":   "2026-08-04T14:30:00Z",
+			"ends_at":     "2026-08-04T15:15:00Z",
+			"label_id":    labels[0].ID,
+			"url":         link,
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		link string
+		want int
+	}{
+		{"an ordinary link", "https://example.org/rdv", http.StatusCreated},
+		{"no link at all", "", http.StatusCreated},
+		{"a tab inside the path", "https://example.org/r\tdv", http.StatusBadRequest},
+		{"a newline inside the path", "https://example.org/r\ndv", http.StatusBadRequest},
+		{"a tab hiding in the scheme", "java\tscript:alert(1)", http.StatusBadRequest},
+		{"a newline hiding in the scheme", "java\nscript:alert(1)", http.StatusBadRequest},
+		{"a carriage return hiding in the scheme", "java\rscript:alert(1)", http.StatusBadRequest},
+		{"a leading NUL", "\x00javascript:alert(1)", http.StatusBadRequest},
+		{"a leading tab", "\tjavascript:alert(1)", http.StatusBadRequest},
+		{"a scheme that is simply not http", "javascript:alert(1)", http.StatusBadRequest},
+	} {
+		// Checked rather than asserted, so that one row getting through does not hide
+		// which of the others do: what is let past is the whole diagnosis.
+		res := e.do(http.MethodPost, "/api/v1/events", event(tc.link))
+		if res.status != tc.want {
+			t.Errorf("%s (%q): status = %d, want %d (body: %s)",
+				tc.name, tc.link, res.status, tc.want, truncate(string(res.body), 200))
+		}
+	}
+
+	// The edit path takes the same body through the same validator, and an event given a
+	// hidden character on a later save must be refused for the same reason.
+	created := e.createEvent(event("https://example.org/rdv"))
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d", created.ID), event("https://example.org/r\tdv")).
+		expect(http.StatusBadRequest)
+}
+
+// The rule above applies on write and nowhere else. A calendar written by an older
+// binary may hold a link with a tab in it — 0.2.0 accepted one, since cleanText tolerated
+// tab and newline — and upgrading must not make that event unreadable. So the row goes in
+// underneath the HTTP layer, exactly as an old release left it, and is read back through
+// every path the app has for reading an event.
+func TestALinkStoredBeforeTheRuleTightenedStillReads(t *testing.T) {
+	e := newEnv(t)
+	user, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	const legacy = "https://example.org/r\tdv"
+	stored, err := e.store.CreateEvent(e.t.Context(), domain.Event{
+		CalendarID: cal.ID,
+		Title:      "Rendez-vous d'avant",
+		StartsAt:   time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC),
+		EndsAt:     time.Date(2026, 8, 4, 15, 15, 0, 0, time.UTC),
+		URL:        legacy,
+		LabelID:    labels[0].ID,
+		CreatedBy:  user.ID,
+		UpdatedBy:  user.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("write the legacy row: %v", err)
+	}
+
+	list := e.listEvents("2026-08-01", "2026-08-31")
+	if len(list.Occurrences) != 1 || list.Occurrences[0].URL != legacy {
+		t.Fatalf("listed url = %q, want %q", list.Occurrences[0].URL, legacy)
+	}
+
+	var detail eventDetail
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=2026-08-04", stored.ID)).
+		expect(http.StatusOK).decode(&detail)
+	if detail.Occurrence.URL != legacy {
+		t.Errorf("detail url = %q, want %q", detail.Occurrence.URL, legacy)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Authorization
 // ---------------------------------------------------------------------------
@@ -484,6 +576,96 @@ func TestScopedEditThisOccurrenceOnly(t *testing.T) {
 	list = e.listEvents("2026-08-01", "2026-08-31")
 	if got, want := dates(list.Occurrences), []string{"2026-08-04", "2026-08-11", "2026-08-25"}; !equalStrings(got, want) {
 		t.Fatalf("after cancelling one occurrence = %v, want %v", got, want)
+	}
+}
+
+// TestEditedOccurrenceReportsTheRemindersThatWillFire is the reader's half of the rule
+// in docs/architecture.md: an edited occurrence inherits its series' reminders until
+// somebody changes them on that occurrence, so `my_reminders` has to report whichever
+// of the two will actually fire. The list must also be the same whichever way the
+// occurrence is named — by the copy's id, or by the series' id and the date — because
+// the editor shows it and a save writes it back.
+func TestEditedOccurrenceReportsTheRemindersThatWillFire(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+	series := e.weeklySeries(cal, labels[4].ID)
+
+	e.do(http.MethodPatch,
+		fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-11", series.ID),
+		map[string]any{
+			"title": "Piscine (déplacée)", "label_id": labels[4].ID,
+			"starts_at": "2026-08-11T16:00:00Z", "ends_at": "2026-08-11T17:00:00Z",
+		}).expect(http.StatusOK)
+
+	var copyID int64
+	for _, occ := range e.listEvents("2026-08-01", "2026-08-31").Occurrences {
+		if occ.OccurrenceDate.String() == "2026-08-11" {
+			copyID = occ.EventID
+		}
+	}
+	if copyID == 0 || copyID == series.ID {
+		t.Fatalf("the edited occurrence is addressed by %d; want the override copy's own id", copyID)
+	}
+
+	remindersFor := func(path string) []domain.Reminder {
+		t.Helper()
+		var detail eventDetail
+		e.get(path).expect(http.StatusOK).decode(&detail)
+		return detail.MyReminders
+	}
+	offsetOf := func(rs []domain.Reminder) string {
+		if len(rs) != 1 || rs[0].OffsetMinutes == nil {
+			return fmt.Sprintf("%+v", rs)
+		}
+		return fmt.Sprintf("%d minutes before", *rs[0].OffsetMinutes)
+	}
+	byCopy := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", copyID)
+	bySeries := fmt.Sprintf("/api/v1/events/%d?date=2026-08-11", series.ID)
+
+	// The reminder is set on the series *after* the occurrence was edited, which is the
+	// case a copy taken at the moment of the edit can never account for.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", series.ID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 30}},
+	}).expect(http.StatusOK)
+
+	for _, path := range []string{byCopy, bySeries} {
+		if got := offsetOf(remindersFor(path)); got != "30 minutes before" {
+			t.Errorf("%s reports my_reminders = %s, want the series' 30 minutes:"+
+				" an edited occurrence inherits until somebody changes them on it", path, got)
+		}
+	}
+
+	// Changing them on this one occurrence, the way the editor does, replaces the
+	// inherited list for that date and nothing else.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", copyID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 120}},
+	}).expect(http.StatusOK)
+
+	for _, path := range []string{byCopy, bySeries} {
+		if got := offsetOf(remindersFor(path)); got != "120 minutes before" {
+			t.Errorf("%s reports my_reminders = %s after two hours were set on that occurrence", path, got)
+		}
+	}
+	if got := offsetOf(remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID))); got != "30 minutes before" {
+		t.Errorf("an untouched occurrence reports my_reminders = %s, want the series' 30 minutes", got)
+	}
+
+	// And taking it off this one occurrence — an empty list, which is the only way to
+	// say "no reminder, just for this one" — is remembered as a choice rather than read
+	// back as "nothing has been set here", which would inherit the series' again.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", copyID), map[string]any{
+		"reminders": []map[string]any{},
+	}).expect(http.StatusOK)
+
+	for _, path := range []string{byCopy, bySeries} {
+		if rs := remindersFor(path); len(rs) != 0 {
+			t.Errorf("%s still reports my_reminders = %+v after the reminder was removed from that occurrence", path, rs)
+		}
+	}
+	// Every other lesson keeps it.
+	if got := offsetOf(remindersFor(fmt.Sprintf("/api/v1/events/%d?date=2026-08-18", series.ID))); got != "30 minutes before" {
+		t.Errorf("an untouched occurrence reports my_reminders = %s, want the series' one", got)
 	}
 }
 

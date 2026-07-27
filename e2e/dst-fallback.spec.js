@@ -1,4 +1,4 @@
-// The one hour a year that exists twice.
+// The two hours a year that are not names for moments.
 //
 // When Europe/Paris falls back, the wall clock runs 02:00–02:59 and then runs it again.
 // A wall time inside it does not identify an instant, so the editor cannot round-trip an
@@ -8,6 +8,16 @@
 // says 02:10 either way, which is exactly what made the second one invisible. The third
 // test is the other side of the fix: a time somebody actually typed must still be read
 // off the clock face, or the editor would have stopped being able to change one.
+//
+// The fourth test is the other broken hour: the one in spring that never happens at all,
+// where 02:30 means 03:30. Together with the third it pins both ambiguity rows of the
+// recurrence policy table from the browser's side — the third says which pass the repeated
+// hour takes, the fourth says which way the skipped hour moves. `internal/events` pins the
+// same two rules from the server's side, in
+// TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant. That pairing is the whole
+// point: the two halves of the application must not answer a broken hour differently, and
+// nothing louder than a pair of tests would ever tell anyone that they had started to,
+// because every candidate instant reads the same on a clock face.
 //
 // These are browser tests because the date layer has no other test harness: the frontend
 // takes no dependencies (CONVENTIONS §1), so there is no JavaScript unit runner to put
@@ -26,7 +36,21 @@ const FIRST_PASS_0250 = '2026-10-25T00:50:00Z'; // 02:50 CEST, before the seam
 const SECOND_PASS_0210 = '2026-10-25T01:10:00Z'; // 02:10 CET, after it
 const SECOND_PASS_0220 = '2026-10-25T01:20:00Z'; // 02:20 CET
 
+// Paris springs forward on this date at 02:00 CET → 03:00 CEST, so 02:00–02:59 is skipped.
+const SPRING_DATE = '2026-03-29';
+const SPRING_0130 = '2026-03-29T00:30:00Z'; // 01:30 CET, the last half-hour before the gap
+const SPRING_0430 = '2026-03-29T02:30:00Z'; // 04:30 CEST, safely after it
+const SPRING_SEAM = '2026-03-29T01:00:00Z'; // 03:00 CEST: the first instant of the new offset
+const NORMALISED_0230 = '2026-03-29T01:30:00Z'; // what 02:30 becomes: 03:30 CEST
+
 const HEADERS = { 'X-Requested-With': 'almanack' };
+
+/** Wall clock of some instants in Paris, as the app itself would read them. */
+async function parisWall(page, instants) {
+  return page.evaluate((list) => list.map((i) =>
+    new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .format(new Date(i))), instants);
+}
 
 /**
  * The hour really is ambiguous in this browser's tzdata.
@@ -37,11 +61,20 @@ const HEADERS = { 'X-Requested-With': 'almanack' };
  * still has one, not a weaker assertion.
  */
 async function assertTheHourExistsTwice(page) {
-  const wall = await page.evaluate((instants) => instants.map((i) =>
-    new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-      .format(new Date(i))), [FIRST_PASS_0210, SECOND_PASS_0210]);
+  const wall = await parisWall(page, [FIRST_PASS_0210, SECOND_PASS_0210]);
   expect(wall, `${FIRST_PASS_0210} and ${SECOND_PASS_0210} must both be 02:10 in Paris`)
     .toEqual(['02:10', '02:10']);
+}
+
+/**
+ * And the spring hour really is missing: the clock goes 01:59 straight to 03:00, so no
+ * instant at all reads 02:something. Same guard, same reason — a browser without the
+ * changeover would turn the test below into an assertion about nothing.
+ */
+async function assertTheHourNeverHappens(page) {
+  const wall = await parisWall(page, ['2026-03-29T00:59:00Z', SPRING_SEAM]);
+  expect(wall, `the Paris clock must jump from 01:59 to 03:00 on ${SPRING_DATE}`)
+    .toEqual(['01:59', '03:00']);
 }
 
 /** Create a timed event straight through the API, and hand back its id. */
@@ -64,9 +97,9 @@ async function createEvent(page, { title, starts_at, ends_at }) {
   return (await response.json()).event.id;
 }
 
-/** What the server holds now, which is the only thing that settles either of these. */
-async function storedTimes(page, id) {
-  const body = await (await page.request.get(`/api/v1/events/${id}?date=${DATE}`)).json();
+/** What the server holds now, which is the only thing that settles any of these. */
+async function storedTimes(page, id, date = DATE) {
+  const body = await (await page.request.get(`/api/v1/events/${id}?date=${date}`)).json();
   return { title: body.occurrence.title, starts_at: body.occurrence.starts_at, ends_at: body.occurrence.ends_at };
 }
 
@@ -171,6 +204,51 @@ test('a time edited inside the fall-back hour still resolves, and to the later p
       starts_at: FIRST_PASS_0210,
       ends_at: SECOND_PASS_0220,
     });
+  } finally {
+    await deleteEvent(page, id);
+  }
+});
+
+test('a time typed inside the hour the clocks skip is normalised forward', async ({ page }) => {
+  await page.goto('/');
+  await assertTheHourNeverHappens(page);
+
+  // 01:30 CET to 04:30 CEST — three hours on the clock face, two of real time, and it
+  // already straddles the gap, so moving the start into the gap cannot put it after the
+  // end and turn this into a test about validation.
+  const id = await createEvent(page, {
+    title: 'Short night',
+    starts_at: SPRING_0130,
+    ends_at: SPRING_0430,
+  });
+
+  try {
+    await page.goto(`/#/event/${id}/${SPRING_DATE}/edit`);
+    const times = page.locator('input[type="time"]');
+    await expect(times.first()).toHaveValue('01:30');
+    await expect(times.last()).toHaveValue('04:30');
+
+    // 02:30 does not happen on this date: the clock goes 01:59 straight to 03:00. The
+    // rule is that it moves forward by the length of the gap, so it means 03:30 — not
+    // 01:30 an hour back, and not the seam at 03:00 either. That is the same answer
+    // internal/events gives when it expands a 02:30 series onto this date; see
+    // TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant, which pins this very
+    // instant. Neither test is worth much without the other.
+    await times.first().fill('02:30');
+    await times.first().blur();
+    await page.getByRole('button', { name: /^Save$/ }).click();
+
+    await expect(page.getByText('The end must come after the start.')).toHaveCount(0);
+    await expect(page).not.toHaveURL(/\/edit$/);
+
+    expect(await storedTimes(page, id, SPRING_DATE)).toEqual({
+      title: 'Short night',
+      starts_at: NORMALISED_0230,
+      ends_at: SPRING_0430, // untouched, so it keeps the instant it was loaded with
+    });
+
+    // And that instant really is half past three, not half past two.
+    expect(await parisWall(page, [NORMALISED_0230, SPRING_SEAM])).toEqual(['03:30', '03:00']);
   } finally {
     await deleteEvent(page, id);
   }

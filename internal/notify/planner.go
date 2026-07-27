@@ -176,16 +176,35 @@ func (n *Notifier) planReminders(ctx context.Context, from, to time.Time) error 
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i] < users[j] })
 
+	// Read once for the whole pass, like the reminders themselves: at family scale
+	// this is a handful of rows, and the alternative is a query per occurrence.
+	rows, err := n.st.ListReminderDetachments(ctx)
+	if err != nil {
+		return err
+	}
+	detached := make(map[detachedPair]bool, len(rows))
+	for _, d := range rows {
+		detached[detachedPair{eventID: d.EventID, userID: d.UserID}] = true
+	}
+
 	var errs []error
 	for _, userID := range users {
-		if err := n.planUserReminders(ctx, userID, byUser[userID], from, to); err != nil {
+		if err := n.planUserReminders(ctx, userID, byUser[userID], detached, from, to); err != nil {
 			errs = append(errs, fmt.Errorf("reminders for user %d: %w", userID, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []domain.Reminder, from, to time.Time) error {
+// detachedPair identifies one member's reminders for one edited occurrence — the copy
+// the edit left behind, and the member who set them on it.
+type detachedPair struct {
+	eventID int64
+	userID  int64
+}
+
+func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []domain.Reminder,
+	detached map[detachedPair]bool, from, to time.Time) error {
 	byEvent := map[int64][]domain.Reminder{}
 	byRecurrence := map[int64][]domain.Reminder{}
 	var maxLead time.Duration
@@ -230,34 +249,38 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			sourceEvent = *occ.SeriesEventID
 		}
 
-		seen := map[int64]bool{}
+		// An occurrence inherits its series' reminders until somebody changes them on
+		// that occurrence — one list or the other, never both. Both is what announced a
+		// moved swimming lesson twice, from two rows the outbox could not tell apart;
+		// and reading only the copy's is what made a reminder added to the series later,
+		// or the first one a member set after joining, never reach an occurrence
+		// somebody had already edited.
+		//
+		// "Changed them on that occurrence" is a recorded fact rather than something
+		// inferred from the rows, because the change may be to an empty list: that is
+		// how "no reminder, just for this one" is said, and it has to outrank the
+		// series' or removing a reminder from one lesson does nothing at all.
+		//
+		// A reminder is scoped to an event or to a recurrence and never to both — the
+		// schema's CHECK says so — so the two lists cannot overlap and nothing has to
+		// be deduplicated between them.
 		var cands []domain.Reminder
-		add := func(list []domain.Reminder) {
-			for _, r := range list {
-				if !seen[r.ID] {
-					seen[r.ID] = true
-					cands = append(cands, r)
-				}
+		cands = append(cands, byEvent[occ.Event.ID]...)
+		switch {
+		case occ.IsOverride:
+			if detached[detachedPair{eventID: occ.Event.ID, userID: userID}] {
+				break // the copy's own list is the whole answer for this date
 			}
-		}
-		add(byEvent[occ.Event.ID])
-		if sourceEvent != occ.Event.ID {
-			add(byEvent[sourceEvent])
-		}
-
-		recurrenceID := occ.RecurrenceID
-		if recurrenceID == nil && occ.SeriesEventID != nil {
-			// An override copy is a standalone event row, so its series-level
-			// reminders have to be found through the template it replaced.
-			rid, err := n.recurrenceOfSeries(ctx, *occ.SeriesEventID, recurrenceOfSeries)
+			// An override copy is a standalone event row, so the reminders it
+			// inherits have to be found through the series template it stands in for.
+			rid, err := n.recurrenceOfSeries(ctx, sourceEvent, recurrenceOfSeries)
 			if err != nil {
 				errs = append(errs, err)
-			} else {
-				recurrenceID = rid
+			} else if rid != nil {
+				cands = append(cands, byRecurrence[*rid]...)
 			}
-		}
-		if recurrenceID != nil {
-			add(byRecurrence[*recurrenceID])
+		case occ.RecurrenceID != nil:
+			cands = append(cands, byRecurrence[*occ.RecurrenceID]...)
 		}
 
 		for _, r := range cands {
@@ -301,7 +324,11 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 }
 
 // recurrenceOfSeries resolves a series template event id to its recurrence id,
-// memoised for the pass.
+// memoised for the pass. It is how an edited occurrence finds the reminders it
+// inherits: the copy standing in for it is a standalone event row and names no
+// recurrence of its own, so the series it belongs to is the only place to ask —
+// and asking the series it actually belongs to, rather than any series, is what
+// keeps one family's judo reminder off another lesson.
 func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
 	if rid, ok := cache[eventID]; ok {
 		return rid, nil
@@ -490,36 +517,36 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 	if len(cals) == 0 {
 		return nil
 	}
-	raw, err := n.st.GetMeta(ctx, MetaActivityCursor)
+	cursor, started, err := n.readActivityCursor(ctx)
 	if err != nil {
 		return err
 	}
-	if raw == "" {
+	if !started {
 		// First ever pass. Start from the present: replaying a decade of history
 		// into everyone's notification tray is not a welcome.
 		newest, err := n.st.ListActivity(ctx, cals, 1, 0)
 		if err != nil {
 			return err
 		}
-		var start int64
+		var start activityCursor
 		if len(newest) > 0 {
-			start = newest[0].ID
+			start = cursorAt(newest[0])
 		}
-		return n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(start, 10))
+		return n.setActivityCursor(ctx, start)
 	}
-	cursor, err := strconv.ParseInt(raw, 10, 64)
+	cursor, err = n.repairCursor(ctx, cals, cursor)
 	if err != nil {
-		return fmt.Errorf("activity cursor %q is unreadable: %w", raw, err)
+		return err
 	}
 
-	acts, err := n.st.ListActivityAfter(ctx, cals, cursor, activityCatchUpLimit)
+	acts, err := n.st.ListActivityAfter(ctx, cals, cursor.id, activityCatchUpLimit)
 	if err != nil {
 		return err
 	}
 
 	actors := map[int64]string{}
 	calendars := map[int64]string{}
-	highest := cursor
+	next := cursor
 	var errs []error
 	for _, a := range acts {
 		if err := n.planOneActivity(ctx, a, prefs, actors, calendars); err != nil {
@@ -538,18 +565,202 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 			errs = append(errs, err)
 			break
 		}
-		if a.ID > highest {
-			highest = a.ID
+		if a.ID > next.id {
+			next = cursorAt(a)
 		}
 	}
-	if highest != cursor {
+	if !next.same(cursor) {
 		// The cursor moves only after the rows are durably in the outbox, so a
 		// crash in between re-reads them and INSERT OR IGNORE absorbs the repeat.
-		if err := n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(highest, 10)); err != nil {
+		if err := n.setActivityCursor(ctx, next); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// activityCursor is the planner's place in the change log: the id of the last change
+// it announced, and enough of that change to tell whether the id still names it.
+// activity_log.id is handed out twice, so the id alone cannot — see repairCursor.
+type activityCursor struct {
+	id         int64
+	calendarID int64
+	at         time.Time
+}
+
+// cursorAt is the cursor that stands at a change.
+func cursorAt(a domain.Activity) activityCursor {
+	return activityCursor{id: a.ID, calendarID: a.CalendarID, at: a.At}
+}
+
+// vouched reports whether the cursor carries the witness that lets it be checked. A
+// database written by a release that did not record one does not.
+func (c activityCursor) vouched() bool { return c.calendarID != 0 && !c.at.IsZero() }
+
+// names reports whether a is the change this cursor was set from. The instant alone
+// would not do it: dev mode runs on a stopped clock and every entry shares one, so a
+// reused id would look like the row it replaced.
+func (c activityCursor) names(a domain.Activity) bool {
+	return a.ID == c.id && a.CalendarID == c.calendarID && a.At.Equal(c.at)
+}
+
+func (c activityCursor) same(o activityCursor) bool {
+	return c.id == o.id && c.calendarID == o.calendarID && c.at.Equal(o.at)
+}
+
+// readActivityCursor reads the cursor and its witness. The second result is false when
+// no pass has ever run, which is the one state that is not a cursor at all.
+//
+// A witness that is missing or unreadable is left zero rather than raised: it means
+// only that this cursor cannot be vouched for, which repairCursor answers by re-walking
+// the day and which the next write puts right. Refusing to plan would be the worse
+// answer to a value somebody can only have got wrong by hand.
+func (n *Notifier) readActivityCursor(ctx context.Context) (activityCursor, bool, error) {
+	raw, err := n.st.GetMeta(ctx, MetaActivityCursor)
+	if err != nil || raw == "" {
+		return activityCursor{}, false, err
+	}
+	var c activityCursor
+	if c.id, err = strconv.ParseInt(raw, 10, 64); err != nil {
+		return activityCursor{}, false, fmt.Errorf("activity cursor %q is unreadable: %w", raw, err)
+	}
+	rawCal, err := n.st.GetMeta(ctx, MetaActivityCursorCalendar)
+	if err != nil {
+		return activityCursor{}, false, err
+	}
+	if rawCal != "" {
+		if c.calendarID, err = strconv.ParseInt(rawCal, 10, 64); err != nil {
+			slog.Warn("the calendar recorded beside the activity cursor is unreadable and will be rebuilt",
+				"value", rawCal, "error", err)
+			c.calendarID = 0
+		}
+	}
+	rawAt, err := n.st.GetMeta(ctx, MetaActivityCursorAt)
+	if err != nil {
+		return activityCursor{}, false, err
+	}
+	if rawAt != "" {
+		at, err := time.Parse(time.RFC3339, rawAt)
+		if err != nil {
+			slog.Warn("the instant recorded beside the activity cursor is unreadable and will be rebuilt",
+				"value", rawAt, "error", err)
+		} else {
+			c.at = at.UTC()
+		}
+	}
+	return c, true, nil
+}
+
+// setActivityCursor writes the cursor and its witness.
+func (n *Notifier) setActivityCursor(ctx context.Context, c activityCursor) error {
+	// The id goes first, so an interruption partway leaves the witness describing
+	// the row *behind* the id rather than ahead of it. Behind is the harmless
+	// direction: the next pass finds the id and the witness disagreeing, re-walks
+	// the day, and the outbox absorbs what was already announced. Ahead would let a
+	// stranded cursor vouch for itself.
+	if err := n.st.SetMeta(ctx, MetaActivityCursor, strconv.FormatInt(c.id, 10)); err != nil {
+		return err
+	}
+	if err := n.st.SetMeta(ctx, MetaActivityCursorCalendar, strconv.FormatInt(c.calendarID, 10)); err != nil {
+		return err
+	}
+	return n.st.SetMeta(ctx, MetaActivityCursorAt, instantOrEmpty(c.at))
+}
+
+// instantOrEmpty keeps year 1 out of a stored value and a log line, where it reads as
+// a date rather than as the absence of one.
+func instantOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// repairCursor drops a cursor the log has been rebuilt underneath, and returns the one
+// to read from.
+//
+// activity_log.id is INTEGER PRIMARY KEY without AUTOINCREMENT, so SQLite hands the ids
+// of deleted rows out again, and activity rows cascade away with the calendar or the
+// user they belong to. Delete the calendar holding the newest entries and the remembered
+// cursor sits above every id the log will produce next: each new change is logged
+// *behind* the cursor, nothing ever reads it, and activity notifications stay silent
+// until the log climbs back to the old high-water mark. Nothing the cursor is otherwise
+// compared against notices, because within the surviving rows a reused id still sorts
+// correctly — it is only the number kept outside the table that goes stale.
+//
+// A cursor cannot be checked by magnitude. Testing it against the log's current maximum
+// is the obvious guard and is worth nothing in the ordinary case: reused ids climb back
+// towards the stranded number, and the moment they reach it the guard says all is well
+// while every row in between is still behind the cursor, never to be read. Measured on
+// the grid of (rows the deleted calendar held above the survivors, changes made before
+// the next pass), it repaired only the cases where fewer changes were made than the
+// deletion took away — and the ordinary case, a deleted calendar holding the single
+// newest entry and one change made before the next tick, is not one of them.
+//
+// So the cursor is checked against the change it was set from, which is the only thing
+// a reused id cannot imitate: the id, the calendar and the instant are kept together,
+// and the row is read back and looked at. Gone, or no longer that row, and the cursor
+// has stopped meaning what it meant. That covers every depth of reuse at once, because
+// it asks nothing about how far the ids have climbed.
+//
+// Deciding on the instant alone — reading the log by `at`, or vouching for the cursor by
+// `at` — was the other candidate and is not enough. `at` is stored to the second, a
+// family can make two changes inside one (which is why Store.ListActivity pages by id in
+// the first place), and dev mode runs on a stopped clock where *every* entry shares an
+// instant. A reused id would pass an instant-only check there, which is to say it would
+// pass it exactly where the fault is easiest to hit. The calendar is in the witness for
+// that reason.
+//
+// What it is reset to is a separate decision. Resetting to the log's highest id loses
+// the changes logged between the deletion and this pass: those carry reused ids below
+// the stranded cursor and, by id alone, are indistinguishable from the rows announced
+// before it. So the reset goes further back, to the last row old enough that delivery
+// would refuse it anyway (maxActivityLateness). Everything after that is re-walked,
+// which costs nothing the design does not already rely on — UNIQUE(user, kind,
+// source_ref, due_at) with INSERT OR IGNORE absorbs a row that was announced already,
+// and nothing prunes the outbox by age, so a row inside the lookback is always still
+// there to absorb it. The bound matters too: without it a family with a year of history
+// would re-walk all of it and file a year of stale rows to be skipped one by one.
+func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor activityCursor) (activityCursor, error) {
+	if cursor.id == 0 {
+		// Nothing has been announced, so nothing can have been stepped over.
+		return cursor, nil
+	}
+	// A database from a release that recorded no witness cannot say whether its
+	// cursor is sound — including whether it is already stranded, which is the state
+	// this fault leaves behind — so it is not trusted. That costs one re-walk of the
+	// day, once, and the outbox absorbs all of it.
+	reason := "it carries no record of the change it was set from"
+	if cursor.vouched() {
+		row, err := n.st.ActivityByID(ctx, cals, cursor.id)
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
+			reason = "the change it was set from is no longer in the log"
+		case err != nil:
+			return activityCursor{}, err
+		case !cursor.names(row):
+			reason = fmt.Sprintf("id %d now belongs to a change in calendar %d logged at %s, not calendar %d at %s",
+				row.ID, row.CalendarID, instantOrEmpty(row.At), cursor.calendarID, instantOrEmpty(cursor.at))
+		default:
+			return cursor, nil
+		}
+	}
+
+	var reset activityCursor
+	settled, err := n.st.ListActivityBetween(ctx, cals, time.Time{}, n.now().Add(-maxActivityLateness), 1)
+	if err != nil {
+		return activityCursor{}, err
+	}
+	if len(settled) > 0 {
+		reset = cursorAt(settled[0])
+	}
+	slog.Warn("the activity cursor no longer names the change it was set from and has been reset",
+		"cursor", cursor.id, "cursor_calendar", cursor.calendarID, "cursor_at", instantOrEmpty(cursor.at),
+		"reset_to", reset.id, "reset_to_at", instantOrEmpty(reset.at), "reason", reason)
+	if err := n.setActivityCursor(ctx, reset); err != nil {
+		return activityCursor{}, err
+	}
+	return reset, nil
 }
 
 func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs map[int64]domain.NotificationPrefs,
@@ -603,6 +814,15 @@ func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs
 		case m.UserID == a.UserID: // nobody needs telling what they just did
 			continue
 		case m.Muted:
+			continue
+		case m.JoinedAt.After(a.At):
+			// A change made before somebody joined is not their news. This is a
+			// rule about the row, not about the pass that reads it, but the pass
+			// that needs it is the repair: it walks the last day of the log again
+			// and fans each row out to the calendar's members as they stand now,
+			// so without this a member who joined during that day is handed the
+			// whole window at once — six pushes where one was wanted, about a
+			// calendar they could not see when any of it happened.
 			continue
 		}
 		pr, ok := prefs[m.UserID]

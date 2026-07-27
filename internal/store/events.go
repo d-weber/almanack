@@ -815,10 +815,44 @@ const searchLimit = 200
 // case-insensitively: both the stored search_norm and the query go through the same
 // folding, so "ecole" matches "École" and vice versa.
 //
-// A recurring series is represented by its template, once. Override copies are
-// excluded, exactly as in EventsInRange: they are occurrence-level edits of a series
-// that is already in the results, and including them would show the same event several
-// times.
+// Search answers "find the thing I typed", and that decides how a series is treated.
+// Normally a series is represented by its template, once: the edited copies standing in
+// for single occurrences are occurrence-level edits of an event already in the results,
+// and returning those too would show one series once per exception it has. But a copy
+// can carry words its template does not — renaming a single occurrence is the ordinary
+// way that happens — and then the template is not a hit at all, so hiding the copy makes
+// the title the family actually typed unfindable. Hence the rule: a copy is returned
+// exactly when it matches the text and its own template does not. On the text alone that
+// is "no duplicates" and "no silent misses" in one condition. When no text is given, a
+// participant or label filter alone still sees a series as its template once, because a
+// template not being asked about text always counts as matching.
+//
+// The suppression looks at the template's text and nothing else, so a copy is hidden by a
+// matching template even when a participant or label filter has excluded that template
+// from the results — rename one occurrence and re-file it under a different label, search
+// for the shared word with that label selected, and neither row comes back. Adding the
+// filters to the subquery would fix it; it is left because a filter and a rename landing
+// on the same occurrence is rare, and because the subquery is what keeps this query
+// indexed. Pre-existing: the same predicate on the no-text path has always behaved this way.
+//
+// Three related limits, deliberately left. The first two need the dates of individual
+// occurrences, which come from internal/recur and SQL cannot call:
+//
+//   - There is no date predicate. A series matches whether or not it still runs, and a
+//     one-off matches whatever year it happened in. For a search box that is the point;
+//     narrowing it would mean the caller naming a window, and nothing here has one.
+//   - Rows are ordered newest first by their own date, which for a series template is
+//     the date its pattern began rather than the date of any occurrence that matched: a
+//     lesson happening next week sorts under 2019. Override copies do have a date of
+//     their own and sort on it. Ordering templates by their next occurrence would mean
+//     expanding every match, which internal/httpapi is already positioned to do — it
+//     computes next_occurrence per result for display.
+//   - Copies compete with everything else for the searchLimit rows, and sort on their own
+//     dates, which are usually later than a template's. So a series with more matching
+//     exceptions than that limit would fill the page and push out other events that used
+//     to be on it. That takes 200 renamed occurrences of one series to reach, which is not
+//     a household calendar, and capping copies per series costs a window function on every
+//     search to buy nothing anyone will hit.
 //
 // participant and labelID are optional filters; nil means "no filter". Results are
 // newest first and capped at searchLimit.
@@ -830,11 +864,21 @@ func (s *Store) SearchEvents(ctx context.Context, calendarIDs []int64, q string,
 	conds := []string{`e.calendar_id IN (` + placeholders(len(calendarIDs)) + `)`}
 	args := idArgs(calendarIDs)
 
-	conds = append(conds, `NOT EXISTS (SELECT 1 FROM event_overrides o WHERE o.override_event_id = e.id)`)
-
-	if needle := foldSearch(strings.TrimSpace(q)); needle != "" {
-		conds = append(conds, `e.search_norm LIKE ? ESCAPE '\'`)
-		args = append(args, "%"+likeEscape(needle)+"%")
+	// The join finds a copy's template: a series has exactly one event carrying its
+	// recurrence_id and a copy never carries one, so a copy cannot suppress itself. A
+	// copy whose template has been deleted matches nothing here and is kept, which is
+	// right — there is no series left to stand for it.
+	if needle := foldSearch(strings.TrimSpace(q)); needle == "" {
+		conds = append(conds, `NOT EXISTS (SELECT 1 FROM event_overrides o WHERE o.override_event_id = e.id)`)
+	} else {
+		like := "%" + likeEscape(needle) + "%"
+		conds = append(conds,
+			`NOT EXISTS (SELECT 1 FROM event_overrides o
+			              JOIN events t ON t.recurrence_id = o.recurrence_id
+			             WHERE o.override_event_id = e.id
+			               AND t.search_norm LIKE ? ESCAPE '\')`,
+			`e.search_norm LIKE ? ESCAPE '\'`)
+		args = append(args, like, like)
 	}
 	if participant != nil {
 		conds = append(conds, `EXISTS (SELECT 1 FROM event_participants p WHERE p.event_id = e.id AND p.user_id = ?)`)

@@ -235,6 +235,12 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("half a database"), 0o600); err != nil {
 		t.Fatalf("write the stale partial: %v", err)
 	}
+	// Old enough that no run could still be writing it. Age is the whole distinction
+	// between a leftover and a colleague — see the test below.
+	aged := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(stale, aged, aged); err != nil {
+		t.Fatalf("age the stale partial: %v", err)
+	}
 
 	res, err := takeBackup(context.Background(), cfg, "", false)
 	if err != nil {
@@ -245,6 +251,88 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 	}
 	if got := remaining(t, cfg.BackupDir); len(got) != 1 || got[0] != filepath.Base(res.Path) {
 		t.Errorf("backup directory holds %v, want only the new snapshot", got)
+	}
+}
+
+// The sweep above used to take every *.db.tmp regardless of age, which made two backups
+// running at once destroy each other. A snapshot of a large database can easily outlast
+// the gap to the next hourly run, and the failure was worse than a deleted file: VACUUM
+// INTO went on writing to the unlinked inode, verify then opened the *path* — creating a
+// fresh, empty database, which passes integrity_check — and the run failed at the schema
+// count. Exit non-zero, OnFailure= mail to the owner, /healthz at 503 until the next
+// hour, over a backup that was never in trouble.
+func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
+	_, cfg, _ := liveDatabase(t)
+	if err := os.MkdirAll(cfg.BackupDir, 0o750); err != nil {
+		t.Fatalf("create backup directory: %v", err)
+	}
+	// Named for an hour ago, but written now: an earlier run still working on it.
+	inFlight := filepath.Join(cfg.BackupDir, "almanack-"+time.Now().UTC().Add(-time.Hour).Format(backupTimeLayout)+".db.tmp")
+	if err := os.WriteFile(inFlight, []byte("a snapshot in progress"), 0o600); err != nil {
+		t.Fatalf("write the in-flight partial: %v", err)
+	}
+
+	if _, err := takeBackup(context.Background(), cfg, "", false); err != nil {
+		t.Fatalf("takeBackup: %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("a partial file younger than an hour was deleted out from under the run writing it: %v", err)
+	}
+}
+
+// A snapshot is a complete copy of the family's calendar — every event, every address,
+// every password hash. VACUUM INTO creates it under the process umask, which on the
+// backup timer's unit is the system default, and the off-host sync preserves the mode.
+func TestBackupSnapshotIsNotReadableByOthers(t *testing.T) {
+	_, cfg, _ := liveDatabase(t)
+
+	res, err := takeBackup(context.Background(), cfg, "", false)
+	if err != nil {
+		t.Fatalf("takeBackup: %v", err)
+	}
+	info, err := os.Stat(res.Path)
+	if err != nil {
+		t.Fatalf("stat the snapshot: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("snapshot mode = %#o, want %#o", got, 0o600)
+	}
+}
+
+// TestSnapshotIsPrivateFromTheMomentItExists covers the half a chmod cannot.
+//
+// VACUUM INTO creates the file and then fills it, so the mode it is created with is the
+// mode it holds for the whole of the copy — long enough to matter on a calendar with
+// photographs in it. Tightening it afterwards leaves that window open, and does nothing
+// at all about a descriptor another process opened during it. The test above looks at
+// the finished artifact, which is why it passed while the window was there.
+//
+// Watching for the partial file mid-write would be a race that passes by seeing nothing,
+// so this asserts the mechanism instead: inside withRestrictiveUmask, a file created the
+// way SQLite creates one — mode 0666 through the umask — comes out private. The
+// deliberately permissive umask around it stands in for the stock 0022, so this fails on
+// a machine that happens to run 0077 too.
+func TestSnapshotIsPrivateFromTheMomentItExists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snapshot.db")
+
+	err := withRestrictiveUmask(func() error {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o666)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
+	if err != nil {
+		t.Fatalf("create under the restrictive umask: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if leaked := info.Mode().Perm() &^ 0o700; leaked != 0 {
+		t.Errorf("a file created the way VACUUM INTO creates one was readable by group or others (%#o); "+
+			"it is world-readable for as long as the snapshot takes to write", leaked)
 	}
 }
 
@@ -539,6 +627,32 @@ func TestRunBackupRecordsFailureForHealthz(t *testing.T) {
 	}
 	if result == "ok" || result == "" {
 		t.Errorf("recorded result = %q, want the reason the backup failed", result)
+	}
+}
+
+// Recording the outcome must not bring a database into existence. store.Open creates and
+// fully migrates the file when it is not there, and the breadcrumb was written on the
+// failure path too — so a backup run against a data volume that had failed to mount
+// exited non-zero, correctly, and then left a fresh empty calendar at the path the
+// family's used to be at. The next `almanack serve` started on it happily and /healthz
+// went green. It also defeated the stat in takeBackup, whose whole purpose is to refuse
+// to back up nothing.
+func TestFailedBackupDoesNotRecreateAMissingDatabase(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+	cfg := config.Config{
+		DataPath: filepath.Join(dataDir, "almanack.db"),
+		FamilyTZ: testTZ(t),
+	}
+
+	if _, err := runBackup(context.Background(), cfg, filepath.Join(root, "snapshots"), false); err == nil {
+		t.Fatal("runBackup succeeded with no database to back up")
+	}
+	if got := remaining(t, dataDir); len(got) != 0 {
+		t.Errorf("a failed run left %v where the database should be", got)
 	}
 }
 

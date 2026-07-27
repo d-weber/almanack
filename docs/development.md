@@ -116,6 +116,13 @@ XSS-hostile event title, the service-worker update reload) against a dev server 
 started with `make dev`. Locally it needs `npx`, and the target skips cleanly rather than failing
 when that is absent.
 
+Every spec that creates an event deletes it again in a `finally`, so the suite can be run twice
+against one database and leaves the seeded family as it found it. A run that is interrupted can
+still leave a fixture behind, and the first thing the suite does is look for one and stop with the
+answer — `make seed` — rather than letting three unrelated-looking tests fail over an extra event.
+Fixtures are deleted through the API, never through the UI: deleting an event in the browser is a
+flow of its own, and a test about something else is the wrong place to exercise it.
+
 **These run in CI**, in their own job, which seeds a demo family and starts a server first. They
 are not optional there, and that is deliberate: three of the bugs 0.2.0 fixed were reachable only
 through a real browser — an upload the app's own CSP forbade, an invite link that never opened the

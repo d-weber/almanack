@@ -14,19 +14,25 @@ The complete list of settings is [`almanack.conf.example`](../almanack.conf.exam
 in systemd `EnvironmentFile` format so the same templated file works as `EnvironmentFile=` in
 a unit or as `almanack --config <path>`.
 
+The `ALMANACK_` namespace is a closed set: a key the binary does not recognise is a startup
+error naming it, wherever it was seen — the config file or the process environment, which
+`EnvironmentFile=` makes the same thing. Templating something that only some hosts use, or
+leaving a removed setting in place across an upgrade, therefore stops the service rather than
+being ignored. Variables outside the namespace are never inspected.
+
 ## What the application provides
 
 | Interface | Contract |
 |---|---|
 | `almanack serve` | Long-running process. Listens on `ALMANACK_LISTEN`. Exits non-zero on a configuration or migration failure, with the problems listed on stderr. |
 | `almanack bootstrap --email <address> --name <name>` | Creates the first account and calendar on an empty database and prints an invite link. Signup is invite-only and there is no HTTP route to the first account, deliberately: the bootstrap window is never reachable from the internet. Refuses to run once any account exists. |
-| `almanack backup <dir> [--prune]` | Takes a verified snapshot (`VACUUM INTO` → `PRAGMA integrity_check` on the output → fsync → atomic rename). **Exits non-zero if the snapshot is not intact**, which is the signal to alert on. `--prune` applies the generational retention from the config. |
+| `almanack backup <dir> [--prune]` | Takes a verified snapshot (`VACUUM INTO` → `PRAGMA integrity_check` on the output → fsync → atomic rename), written `0600`. **Exits non-zero if the snapshot is not intact**, which is the signal to alert on. It never brings a database into existence: if the data path is not there — an unmounted volume — the run fails and leaves the path as it found it, rather than starting the family on a new empty calendar. `--prune` applies the generational retention from the config. |
 | `almanack gen-vapid` | Prints a fresh VAPID keypair. Run once, ever, at first deployment. |
 | `almanack seed` | Creates a demo family. Development only. |
 | `almanack version` | Prints the build version. |
-| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, scheduler heartbeat age, last backup age and result, consecutive SMTP failures, how many push subscriptions are failing (`push.failing`) and how many have gone quiet, and disk usage. Because it needs no session it reports no push service *names*: which one is failing is in the daily heartbeat mail, where there is a recipient rather than a URL. |
-| systemd readiness | If `NOTIFY_SOCKET` is set, the process sends `READY=1` **after** migrations complete, so a health check can distinguish "still migrating" from "dead". Use `Type=notify`. |
-| systemd watchdog | If `WATCHDOG_USEC` is set, the scheduler loop pings the watchdog. Set `WatchdogSec` so that a hung scheduler is restarted rather than silently ceasing to send reminders. |
+| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, whether the database file is still at the configured path (`disk.database_exists` — a pool that already has the file open answers a ping long after the volume has gone), scheduler heartbeat age, last backup age and result, consecutive SMTP failures, how many push subscriptions are failing (`push.failing`) and how many have gone quiet, and disk usage. Because it needs no session it reports no push service *names*: which one is failing is in the daily heartbeat mail, where there is a recipient rather than a URL. |
+| systemd readiness | If `NOTIFY_SOCKET` is set, the process sends `READY=1` **after** migrations complete *and* the listener is bound, so a health check can distinguish "still migrating" from "dead", and a unit systemd reports as active is one that is answering rather than one about to exit on a busy port. Use `Type=notify`. |
+| systemd watchdog | If `WATCHDOG_USEC` is set, the scheduler pings the watchdog once per completed tick. `WatchdogSec` must therefore be comfortably longer than `ALMANACK_TICK`, and longer than the worst-case boot catch-up as well: systemd starts the watchdog clock at `READY=1`, and catching up a long outage's reminders happens after that. A tick that runs long delays its own ping, so keep `ALMANACK_TICK` under **half** of `WatchdogSec`. The shipped defaults — `WatchdogSec=120s` against a 30 s tick — leave four times the room needed for both; raise `WatchdogSec` if you raise the tick, and the process warns in its log at startup once the tick passes that half. |
 | Signals | `SIGTERM`/`SIGINT` drain in-flight requests and stop cleanly. |
 | Logs | Structured, to stdout only. Nothing to rotate. |
 
@@ -51,7 +57,10 @@ TLS and forwards. Requirements: pass `X-Forwarded-For` (and list the proxy in
 sets its own and a second one is intersected, which will break the UI; allow request bodies of
 at least 2 MB for avatar uploads; use a read timeout above 30 s. HTTPS is not optional — PWA
 installation and Web Push both refuse an insecure origin, and the app rejects a non-https
-`ALMANACK_BASE_URL` at startup.
+`ALMANACK_BASE_URL` at startup. `ALMANACK_LISTEN` must be `host:port`: a bare port is refused,
+because `8080` on its own is every interface and would put plain HTTP on the network. Binding
+a non-loopback address is allowed — it is the right answer when TLS is terminated on another
+machine — and logs a warning at startup saying what it means.
 
 **Certificates.** Automated renewal, and an alert when fewer than ~14 days remain. Certificate
 lifetimes are shrinking to 47 days by 2029, which leaves no slack for renewal that has quietly
@@ -64,8 +73,11 @@ alerting.
 
 **Backups on a timer.** Run `almanack backup <dir> --prune` hourly, as the service user. Sync the
 directory off-host at least daily, ordered after the snapshot, copying only `almanack-*.db` and
-never `*.tmp`. Alert on non-zero exit — that is a failed integrity check, i.e. the database is
-damaged and the clock is running on how long the good generations survive.
+never `*.tmp` — a partial file is left in place for an hour, so that a run overtaken by the next
+one is not destroyed by it. Each snapshot is a complete copy of the calendar and is written
+`0600`; keep it as restrictive off-host. Alert on non-zero exit — that is a failed integrity
+check, i.e. the database is damaged and the clock is running on how long the good generations
+survive.
 
 **Failure alerting.** Wire a mail-on-failure hook to the service unit and to both timers. This
 is the single most important thing in the deployment: everything else in this system fails
