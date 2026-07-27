@@ -106,6 +106,19 @@ notification outbox, the push encryption — and what it covers is described in
 If you run it, issues and pull requests are welcome. If you fork it into something better
 for your group, that is the point.
 
+## How this was written
+
+Almanack was vibe coded, end to end, with [Claude Code](https://claude.com/claude-code)
+running Claude Opus 5. The Go, the JavaScript, the SQL, the commit messages and these
+documents all came out of that; a human set the goals, pushed back on the results and
+decided what shipped.
+
+That is said here rather than left to be worked out, because it should change how you read
+the rest of this page. Treat the claims about correctness as claims, and check them against
+the things you can actually run: `make check`, the recurrence and daylight-saving tests, the
+Web Push vectors taken from the RFCs, and [docs/known-issues.md](docs/known-issues.md) —
+which is what an adversarial review found and reproduced, not what the author hoped was true.
+
 ## Licence
 
 [AGPL-3.0](LICENSE). If you run a modified version as a service for other people, they
