@@ -383,6 +383,19 @@ Notable changes to this project. The format follows
   one event is refused until the stray character is taken out of the link box, which is the
   price of the check and is said in those words rather than as a failure to save.
   ([#20](https://github.com/d-weber/almanack/issues/20))
+- **Running the browser tests twice failed the second time, for reasons that pointed
+  nowhere near the cause.** Two of the smoke tests created an event and never removed it, so
+  a second `make e2e` against the same seeded database found three other tests failing — the
+  offline one, the cache-cap one and the timezone one — because an extra event changes what
+  is on the screen and how many API ranges get cached. Nothing said "there is a leftover
+  event"; it looked like a broken application. CI never saw it, since that job seeds a
+  database before every run, so the whole cost fell on whoever ran the suite locally, which
+  is the case the target exists for. Both tests now delete what they created, in a `finally`
+  so that a failing assertion still tidies up, and through the API rather than by driving the
+  delete flow in a test that is about something else. On top of that the suite now looks, once
+  per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
+  run `make seed` — instead of letting three unrelated-looking tests go red.
+  ([#52](https://github.com/d-weber/almanack/issues/52))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
