@@ -91,6 +91,12 @@ func run() error {
 		return err
 	}
 	setupLogging(cfg)
+	// Configuration that will run but probably should not. It is said here rather
+	// than in serve.go so that every subcommand says it: `almanack backup` on a
+	// timer is the one an operator reads the output of most often.
+	for _, warning := range cfg.Warnings {
+		slog.Warn(warning)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

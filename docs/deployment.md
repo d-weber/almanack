@@ -51,7 +51,10 @@ TLS and forwards. Requirements: pass `X-Forwarded-For` (and list the proxy in
 sets its own and a second one is intersected, which will break the UI; allow request bodies of
 at least 2 MB for avatar uploads; use a read timeout above 30 s. HTTPS is not optional — PWA
 installation and Web Push both refuse an insecure origin, and the app rejects a non-https
-`ALMANACK_BASE_URL` at startup.
+`ALMANACK_BASE_URL` at startup. `ALMANACK_LISTEN` must be `host:port`: a bare port is refused,
+because `8080` on its own is every interface and would put plain HTTP on the network. Binding
+a non-loopback address is allowed — it is the right answer when TLS is terminated on another
+machine — and logs a warning at startup saying what it means.
 
 **Certificates.** Automated renewal, and an alert when fewer than ~14 days remain. Certificate
 lifetimes are shrinking to 47 days by 2029, which leaves no slack for renewal that has quietly

@@ -1,8 +1,10 @@
 # Almanack — complete configuration reference.
 #
 # Copy this file, fill it in, and template it from your configuration management.
-# Every setting the application has is listed here; there is nothing configurable
-# that is not in this file.
+# Every setting the application has is listed here, with one exception that cannot
+# be: ALMANACK_CONFIG names this file, so it is given as `--config <path>` or in the
+# environment. Nothing else configurable is missing from here, and a test fails the
+# build if that stops being true.
 #
 # Format is systemd's EnvironmentFile format (KEY=VALUE, # comments, optional
 # quotes), deliberately, so ONE templated file works either way:
@@ -26,6 +28,12 @@
 # ---------------------------------------------------------------------------
 
 # Where the app listens. Keep it on localhost and put a TLS reverse proxy in front.
+#
+# It must be host:port. A bare port is refused at startup, because `8080` on its own
+# means every interface on the machine — and this server speaks plain HTTP, so that
+# is the family's calendar readable by anything on the network. Binding a
+# non-loopback address (0.0.0.0:8080, :8080) is allowed, for terminating TLS
+# elsewhere, and logs a warning at startup saying what it implies.
 ALMANACK_LISTEN=127.0.0.1:8080
 
 # REQUIRED. The public origin, no trailing slash. Appears in invite links and
@@ -111,7 +119,8 @@ ALMANACK_VAPID_PUBLIC=
 ALMANACK_VAPID_PRIVATE=
 
 # REQUIRED outside dev: a mailto: contact, per RFC 8292. Push services use it to
-# reach you if your sender misbehaves.
+# reach you if your sender misbehaves. It must carry the scheme — a bare email
+# address is refused at startup, because the push services refuse it too.
 ALMANACK_VAPID_SUBJECT=mailto:you@example.org
 
 # Which hosts a device's push endpoint may point at, comma-separated.

@@ -458,6 +458,196 @@ func TestRequiredSettings(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The listen address
+// ---------------------------------------------------------------------------
+
+// ALMANACK_LISTEN=8080 is how a great many other services spell this setting, and
+// net.Listen reads a bare port as ":8080" — every interface on the machine. This
+// application speaks plain HTTP and its own example file says to keep it on
+// localhost behind a TLS proxy, so one missing colon is the family's calendar
+// unencrypted on the LAN, or on the internet behind a port forward. Nothing else
+// catches it: 127.0.0.1:8080 and :8080 differ by two characters in a startup line
+// nobody reads after the first install. The error has to say what was meant.
+func TestBarePortIsRefusedAndNamesTheAddressItMeant(t *testing.T) {
+	isolateEnv(t)
+
+	_, err := loadConf(t, overriding("ALMANACK_LISTEN", "8080")...)
+	wantErrMentioning(t, err, "ALMANACK_LISTEN", "8080", "every interface", "127.0.0.1:8080")
+}
+
+// The rest of the shapes. Each is something an operator plausibly writes, and each
+// would otherwise be found by net.Listen after the database has been opened and
+// migrated, in a message about an address rather than about a setting.
+func TestListenMustBeHostAndPort(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{
+		"8080",                 // a bare port
+		"127.0.0.1",            // a host and no port
+		"127.0.0.1:",           // a colon and no port
+		":",                    // neither
+		"127.0.0.1:http",       // a service name rather than a port
+		"127.0.0.1:0",          // port 0 asks the kernel to choose, so nothing can reach it
+		"127.0.0.1:70000",      // not a port at all
+		"::1:8080",             // IPv6 without the brackets net.Listen needs
+		"almanack.example.org", // no port, and not a number either
+	} {
+		t.Run(addr, func(t *testing.T) {
+			_, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			wantErrMentioning(t, err, "ALMANACK_LISTEN")
+		})
+	}
+}
+
+// And the shapes that must keep working, including the two that bind every
+// interface: an operator terminating TLS on another machine writes one of those
+// deliberately, and refusing them would be this fix breaking a working install.
+func TestListenAcceptsEveryReasonableSpelling(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{
+		"127.0.0.1:8080",
+		"localhost:8080",
+		"[::1]:8080",
+		"0.0.0.0:8080",
+		":8080",
+		"192.168.1.10:8080",
+		"almanack.internal:8080",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("ALMANACK_LISTEN=%s was refused: %v", addr, err)
+			}
+			if cfg.ListenAddr != addr {
+				t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, addr)
+			}
+		})
+	}
+}
+
+// A bind that is not loopback is a warning and not a refusal, because it is a
+// legitimate answer for somebody terminating TLS elsewhere — but it is also what
+// an operator gets by accident, and the plain-HTTP consequence deserves saying
+// once at startup rather than never.
+func TestNonLoopbackListenWarnsRatherThanRefusing(t *testing.T) {
+	isolateEnv(t)
+
+	for _, addr := range []string{"0.0.0.0:8080", ":8080", "192.168.1.10:8080"} {
+		t.Run(addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("a non-loopback bind was refused rather than warned about: %v", err)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			if !strings.Contains(warnings, "ALMANACK_LISTEN") {
+				t.Errorf("binding %s produced no warning; warnings were %q", addr, warnings)
+			}
+		})
+	}
+
+	for _, addr := range []string{"127.0.0.1:8080", "localhost:8080", "[::1]:8080"} {
+		t.Run("quiet on "+addr, func(t *testing.T) {
+			cfg, err := loadConf(t, overriding("ALMANACK_LISTEN", addr)...)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Warnings) != 0 {
+				t.Errorf("a loopback bind warned anyway: %q", cfg.Warnings)
+			}
+		})
+	}
+
+	// Development binds every interface on purpose — it is how the app is opened
+	// from a phone on the same wifi — and a warning that fires every `make dev`
+	// is a warning nobody reads when it matters.
+	t.Run("silent in dev", func(t *testing.T) {
+		cfg, err := loadConf(t,
+			"ALMANACK_DEV=true",
+			"ALMANACK_DATA=/tmp/dev.db",
+			"ALMANACK_BASE_URL=http://localhost:8080",
+			"ALMANACK_LISTEN=0.0.0.0:8080",
+		)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Warnings) != 0 {
+			t.Errorf("dev mode warned about its own listen address: %q", cfg.Warnings)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Addresses and contact URIs
+// ---------------------------------------------------------------------------
+
+// ALMANACK_MAIL_FROM is the envelope sender and ALMANACK_OWNER_EMAIL is where
+// every failure alert goes. A shape the MTA will refuse is worth catching at
+// startup rather than at the first reminder, and the display-name form is the
+// mistake to expect: it is how the address is written everywhere else.
+func TestMailAddressesAreCheckedForShape(t *testing.T) {
+	isolateEnv(t)
+
+	for _, key := range []string{"ALMANACK_MAIL_FROM", "ALMANACK_OWNER_EMAIL"} {
+		for _, value := range []string{
+			"Almanack <almanack@example.org>",
+			"almanack.example.org",
+			"you @example.org",
+			"you@@example.org",
+			"@example.org",
+			"you@",
+		} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				_, err := loadConf(t, overriding(key, value)...)
+				wantErrMentioning(t, err, key)
+			})
+		}
+	}
+
+	// The check is deliberately shallow, and these must all pass: RFC 5322 permits
+	// things no household will ever type, and the only proof an address works is
+	// that mail to it arrives. almanack@localhost matters most — it is what dev
+	// mode fills in, and a rule requiring a dot in the domain would refuse it.
+	for _, value := range []string{"almanack@localhost", "you+calendar@example.org", "wm@example.co.uk"} {
+		t.Run("accepted "+value, func(t *testing.T) {
+			if _, err := loadConf(t, overriding("ALMANACK_MAIL_FROM", value)...); err != nil {
+				t.Errorf("ALMANACK_MAIL_FROM=%s was refused: %v", value, err)
+			}
+		})
+	}
+}
+
+// RFC 8292 wants the VAPID subject to be a contact URI — mailto: or https: — and
+// internal/webpush enforces exactly that when it builds a sender. Catching it here
+// means the operator is told which setting is wrong, alongside every other
+// configuration problem, instead of after the database has been opened and only
+// when push keys happen to be configured.
+func TestVAPIDSubjectMustBeAContactURI(t *testing.T) {
+	isolateEnv(t)
+
+	for _, value := range []string{
+		"you@example.org",        // the bare address, which is the mistake to expect
+		"http://example.org",     // http is not one of the two
+		"mailto:",                // a scheme and no contact
+		"example.org/contact",    // no scheme at all
+		"MAILTO:you@example.org", // internal/webpush compares case-sensitively
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := loadConf(t, overriding("ALMANACK_VAPID_SUBJECT", value)...)
+			wantErrMentioning(t, err, "ALMANACK_VAPID_SUBJECT", "mailto:")
+		})
+	}
+
+	for _, value := range []string{"mailto:you@example.org", "https://example.org/contact"} {
+		t.Run("accepted "+value, func(t *testing.T) {
+			if _, err := loadConf(t, overriding("ALMANACK_VAPID_SUBJECT", value)...); err != nil {
+				t.Errorf("ALMANACK_VAPID_SUBJECT=%s was refused: %v", value, err)
+			}
+		})
+	}
+}
+
 // docs/deployment.md promises this in as many words: PWA installation and Web Push
 // both refuse an insecure origin, so an http:// base URL produces an application
 // that installs nowhere and notifies nobody. Catching it at startup is the whole
@@ -754,11 +944,14 @@ func TestShippedExampleLoads(t *testing.T) {
 
 // exemptFromExample records the keys that legitimately do not appear in
 // almanack.conf.example. Anything else missing is drift.
-var exemptFromExample = map[string]string{
-	// Chicken and egg: this one names the file, so it cannot be set inside it.
-	// `almanack --help` and cmd/almanack's usage text document it instead.
-	"ALMANACK_CONFIG": "selects the configuration file, so it cannot live in it",
-}
+//
+// It is empty, and the emptiness is the point. ALMANACK_CONFIG was the one entry:
+// it names the file, so it cannot be set inside it. But the example's header now
+// says so in prose — it used to claim there was nothing configurable outside the
+// file, which was false by exactly this key — and prose counts as documentation
+// here, so an operator can discover it and the exemption has nothing left to
+// excuse. A key added back to this map is a key an operator cannot find.
+var exemptFromExample = map[string]string{}
 
 // The cross-check. `known` is the set of settings the parser accepts; the example
 // file is the set an operator can discover. When those two drift apart the failure
@@ -984,6 +1177,37 @@ func TestRedactedWithholdsSecrets(t *testing.T) {
 	short.VAPIDPrivate = "abc123"
 	if strings.Contains(strings.Join(short.Redacted(), "\n"), "abc123") {
 		t.Error("a short VAPID private key survives redaction")
+	}
+}
+
+// Redacted() is the startup log line and the /healthz detail view, which are the
+// two places an operator finds out what the running server actually thinks its
+// configuration is. A setting missing from it is one they have to take on faith,
+// and it stays missing silently: the backup retention keys were absent from the
+// day they were added, so a household could not see the policy that was deleting
+// their snapshots. The mapping is mechanical — the key without its prefix, in
+// lower case — so this cross-check needs no second list to drift.
+func TestRedactedShowsEverySetting(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd()...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	joined := strings.Join(cfg.Redacted(), "\n")
+
+	// ALMANACK_CONFIG is reported as where the settings came from rather than as a
+	// setting of its own, which is what an operator is actually asking.
+	renamed := map[string]string{"ALMANACK_CONFIG": "config_path"}
+	for key := range known {
+		name := renamed[key]
+		if name == "" {
+			name = strings.ToLower(strings.TrimPrefix(key, "ALMANACK_"))
+		}
+		if !strings.Contains(joined, name+"=") {
+			t.Errorf("Redacted() has no line for %s (expected %s=…), so its value cannot be seen\n"+
+				"in the startup log or on /healthz:\n%s", key, name, joined)
+		}
 	}
 }
 

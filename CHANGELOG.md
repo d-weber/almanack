@@ -465,6 +465,29 @@ Notable changes to this project. The format follows
   the same whether it was switched off on purpose or the mail path is broken, and that is the
   line that settles it.
   ([#32](https://github.com/d-weber/almanack/issues/32))
+- **`ALMANACK_LISTEN=8080` quietly listened on every interface.** That is how a good many
+  other services spell this setting, and `net.Listen` reads a bare port as `:8080` — every
+  address on the machine. Almanack speaks plain HTTP and its own example file tells you to
+  keep it on localhost behind a TLS proxy, so a single missing colon was the family's
+  calendar readable unencrypted by anything on the network, or on the internet on a box with
+  a port forward. Nothing caught it: `127.0.0.1:8080` and `:8080` differ by two characters in
+  a startup line nobody reads after the first install. The address is now checked for shape
+  at startup, and a bare port is refused with the address that was meant — "write
+  `127.0.0.1:8080` to keep it on localhost, or `0.0.0.0:8080` if reaching it from the network
+  is what you meant". A deliberate non-loopback bind still starts, because terminating TLS on
+  another machine is a real deployment, but it now says once in the log what it implies.
+  Three smaller things from the same reading of the file travel with it. `ALMANACK_MAIL_FROM`
+  and `ALMANACK_OWNER_EMAIL` are checked for the shape an MTA will accept, so the
+  display-name form — `Almanack <almanack@example.org>`, which is how the address is written
+  everywhere else — fails at startup rather than at the first reminder. `ALMANACK_VAPID_SUBJECT`
+  must carry the `mailto:` or `https:` scheme RFC 8292 requires: a bare email address was
+  refused later, deeper in, and only once a keypair was configured. And the startup log and
+  `/healthz` now show every setting rather than most of them — the backup retention keys, the
+  holiday colour, the log format and the dev mail directory were all missing, so a household
+  could not see the retention policy that was deleting their snapshots at the moment they
+  went looking for it. A test now cross-checks that list against the settings the parser
+  accepts, so it cannot fall behind again.
+  ([#33](https://github.com/d-weber/almanack/issues/33))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

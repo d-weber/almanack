@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -125,6 +126,12 @@ type Config struct {
 
 	// ConfigPath records where settings were read from, for logging and /healthz.
 	ConfigPath string
+
+	// Warnings are configurations that will run but probably should not, said once
+	// at startup. They are not errors: refusing to start is for a setting that
+	// cannot work, and a deliberate bind on every interface — someone terminating
+	// TLS on another machine — is a real deployment, not a mistake.
+	Warnings []string
 }
 
 // Load reads the config file (if any) and the environment, then validates. Pass an
@@ -296,12 +303,40 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
-func (c Config) validate(problems []string) error {
+func (c *Config) validate(problems []string) error {
 	if c.DataPath == "" {
 		problems = append(problems, "ALMANACK_DATA is required (path to the SQLite file)")
 	}
 	if c.BaseURL == "" {
 		problems = append(problems, "ALMANACK_BASE_URL is required (used in invite links and emails)")
+	}
+	if problem, warning := checkListen(c.ListenAddr, c.Dev); problem != "" {
+		problems = append(problems, problem)
+	} else if warning != "" {
+		c.Warnings = append(c.Warnings, warning)
+	}
+	// The envelope sender and the address every failure alert goes to. Both are
+	// handed to the MTA, which will refuse a shape it does not like — at the first
+	// reminder, hours after the deployment that introduced it.
+	for _, addr := range []struct{ key, value string }{
+		{"ALMANACK_MAIL_FROM", c.MailFrom},
+		{"ALMANACK_OWNER_EMAIL", c.OwnerEmail},
+	} {
+		if addr.value != "" && !looksLikeEmail(addr.value) {
+			problems = append(problems, fmt.Sprintf(
+				"%s=%q does not look like an email address: it must be a bare address such as almanack@example.org, with no display name and no angle brackets",
+				addr.key, addr.value))
+		}
+	}
+	// RFC 8292 requires the VAPID subject to be a contact URI so that a push
+	// service can reach whoever is sending. internal/webpush refuses anything else
+	// when it builds a sender, but only for `serve`, only once a keypair is
+	// configured, and only after the database has been opened — and it complains
+	// about a "vapid subject" rather than about a setting an operator can find.
+	if c.VAPIDSubject != "" && !isContactURI(c.VAPIDSubject) {
+		problems = append(problems, fmt.Sprintf(
+			"ALMANACK_VAPID_SUBJECT=%q must be a mailto: or https: URI, which is what RFC 8292 requires of a push contact, e.g. mailto:you@example.org",
+			c.VAPIDSubject))
 	}
 	if !isHexColor(c.HolidayColor) {
 		problems = append(problems, fmt.Sprintf("ALMANACK_HOLIDAY_COLOR=%q must be a hex colour such as #d32f2f", c.HolidayColor))
@@ -421,16 +456,27 @@ func (c Config) Redacted() []string {
 		"smtp=" + c.SMTPAddr,
 		"mail_from=" + orNone(c.MailFrom),
 		"owner_email=" + orNone(c.OwnerEmail),
+		// Dev-only, and worth showing precisely because it is: a non-empty mail_dir
+		// on a family server means mail is being written to files instead of sent.
+		"mail_dir=" + orNone(c.MailDir),
 		"vapid_public=" + mask(c.VAPIDPublic),
 		"vapid_private=" + mask(c.VAPIDPrivate),
 		"vapid_subject=" + orNone(c.VAPIDSubject),
 		"push_hosts=" + orDefault(strings.Join(c.PushHosts, ",")),
 		"alsace_moselle=" + strconv.FormatBool(c.AlsaceMoselle),
+		"holiday_color=" + c.HolidayColor,
 		"source_url=" + orNone(c.SourceURL),
 		"plan_horizon=" + c.PlanHorizon.String(),
 		"tick=" + c.SchedulerTick.String(),
 		"heartbeat_time=" + orOff(c.HeartbeatTime),
+		// The retention policy, which is otherwise invisible exactly when somebody
+		// is asking why their snapshots have disappeared.
+		"backup_keep_hourly=" + strconv.Itoa(c.KeepHourly),
+		"backup_keep_daily=" + strconv.Itoa(c.KeepDaily),
+		"backup_keep_weekly=" + strconv.Itoa(c.KeepWeekly),
+		"backup_keep_monthly=" + strconv.Itoa(c.KeepMonthly),
 		"log_level=" + c.LogLevel,
+		"log_format=" + c.LogFormat,
 	}
 }
 
@@ -468,6 +514,96 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkListen reads ALMANACK_LISTEN's shape, and reports separately on a bind
+// address that is not loopback.
+//
+// The bare port is the case worth refusing a start over. ALMANACK_LISTEN=8080 is
+// how a great many other services spell this setting, and net.Listen reads it as
+// ":8080" — every interface on the machine — for an application that speaks plain
+// HTTP and whose own example file says to keep it on localhost behind a TLS
+// proxy. One missing colon is otherwise an unencrypted family calendar on the
+// LAN, and the only trace of it is a startup line nobody reads twice. So the
+// error says what was meant rather than merely that something is wrong.
+//
+// Anything else that is not loopback is a warning instead, because a deliberate
+// 0.0.0.0 is a real deployment: somebody terminating TLS on another machine.
+func checkListen(addr string, dev bool) (problem, warning string) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if _, ok := portNumber(addr); ok {
+			return fmt.Sprintf(
+				"ALMANACK_LISTEN=%s would listen on every interface, because a bare port means every address; write 127.0.0.1:%s to keep it on localhost, or 0.0.0.0:%s if reaching it from the network is what you meant",
+				addr, addr, addr), ""
+		}
+		return fmt.Sprintf(
+			"ALMANACK_LISTEN=%q must be host:port, such as 127.0.0.1:8080 (an IPv6 address goes in brackets: [::1]:8080)",
+			addr), ""
+	}
+	if _, ok := portNumber(port); !ok {
+		return fmt.Sprintf(
+			"ALMANACK_LISTEN=%q must end in a port number between 1 and 65535, such as 127.0.0.1:8080",
+			addr), ""
+	}
+	if dev || isLoopbackHost(host) {
+		return "", ""
+	}
+	where := addr
+	if host == "" {
+		where = addr + " (every interface)"
+	}
+	return "", fmt.Sprintf(
+		"ALMANACK_LISTEN=%s is not a loopback address, and this server speaks plain HTTP: anything that can reach that address can read the calendar unencrypted. That is right only if TLS is terminated in front of it.",
+		where)
+}
+
+// portNumber rejects the service names net.Listen would otherwise accept (":http")
+// along with everything else that is not a port: in a household configuration file
+// a non-numeric port is a typo, not a deployment.
+func portNumber(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, false
+	}
+	return n, true
+}
+
+// isLoopbackHost answers only for what can be decided without a resolver. An empty
+// host is ":8080", which is every interface; a name other than localhost cannot be
+// judged here, and a warning about it is cheaper than a DNS lookup during startup
+// validation.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// looksLikeEmail is the same shallow shape check the HTTP layer applies to a
+// member's address, minus the requirement of a dot in the domain, because dev mode
+// fills these in as almanack@localhost. RFC 5322 permits things no household will
+// ever type, and the only real proof an address works is that mail to it arrives —
+// what this catches is the display-name form, which the MTA refuses as an envelope
+// sender, and a stray space or newline.
+func looksLikeEmail(addr string) bool {
+	at := strings.IndexByte(addr, '@')
+	if at <= 0 || at == len(addr)-1 || strings.Count(addr, "@") != 1 {
+		return false
+	}
+	return !strings.ContainsAny(addr, " \t\r\n,;<>\"")
+}
+
+// isContactURI matches internal/webpush's rule exactly, case sensitivity included,
+// so that a subject this accepts cannot be refused a moment later by the sender.
+func isContactURI(s string) bool {
+	for _, scheme := range []string{"mailto:", "https://"} {
+		if strings.HasPrefix(s, scheme) && len(s) > len(scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 func validHHMM(s string) bool {
