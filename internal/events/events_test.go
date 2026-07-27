@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -486,6 +487,79 @@ func TestEditAllLeavesDeliberateOverridesAlone(t *testing.T) {
 		if o.Title != "Natation" {
 			t.Errorf("%s is %q, want the new series title", o.OccurrenceDate, o.Title)
 		}
+	}
+}
+
+// TestAddingARepeatToAnExistingEventIsRefused: ticking "repeat weekly" on an event that
+// does not repeat used to answer 200 and store nothing at all. Turning an event into a
+// series has to carry the family's existing reminders onto the series with it, and until
+// that is written the honest answer is a refusal — with the rest of the edit left alone,
+// because half of an edit the user was told was rejected is worse than none of it.
+func TestAddingARepeatToAnExistingEventIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	ev := f.timed(t, "Dentiste", "2026-04-10", 16, 30, nil)
+
+	_, err := f.svc.Update(ctx, f.maman, ev.ID, domain.ScopeAll, domain.Date{}, Input{
+		Title: "Dentiste (tous les vendredis)", StartsAt: f.at("2026-04-10", 18, 0), EndsAt: f.at("2026-04-10", 19, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Friday}},
+	})
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("adding a repeat: err = %v, want one wrapping domain.ErrInvalid", err)
+	}
+
+	after, err := f.st.EventByID(ctx, ev.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if after.RecurrenceID != nil {
+		t.Errorf("the refused edit made the event recurring anyway (recurrence %d)", *after.RecurrenceID)
+	}
+	if after.Title != "Dentiste" || !after.StartsAt.Equal(f.at("2026-04-10", 16, 30)) {
+		t.Errorf("the refused edit was half applied: title %q, starts at %s", after.Title, after.StartsAt)
+	}
+}
+
+// TestRemovingTheRepeatFromASeriesIsRefused is the same defect the other way round: the
+// editor sends no recurrence when the family unticks "repeat", and a whole-series edit
+// used to take that as "leave the pattern alone" and answer 200. What should happen to
+// the occurrences someone had already edited by hand is an open question, so the series
+// and its pattern stay exactly as they were and the edit is refused.
+func TestRemovingTheRepeatFromASeriesIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+
+	_, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeAll, domain.Date{}, Input{
+		Title: "Piscine (une seule fois)", StartsAt: f.at("2026-04-07", 18, 0), EndsAt: f.at("2026-04-07", 19, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	})
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("removing the repeat: err = %v, want one wrapping domain.ErrInvalid", err)
+	}
+
+	after, err := f.st.EventByID(ctx, series.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if after.RecurrenceID == nil {
+		t.Fatal("the refused edit removed the repeat anyway")
+	}
+	if after.Title != "Piscine" || !after.StartsAt.Equal(f.at("2026-04-07", 17, 30)) {
+		t.Errorf("the refused edit was half applied: title %q, starts at %s", after.Title, after.StartsAt)
+	}
+	rec, err := f.st.RecurrenceByID(ctx, *after.RecurrenceID)
+	if err != nil {
+		t.Fatalf("reload recurrence: %v", err)
+	}
+	if rec.Freq != domain.FreqWeekly || rec.Interval != 1 || len(rec.ByWeekday) != 1 || rec.ByWeekday[0] != time.Tuesday {
+		t.Errorf("the pattern changed under a refused edit: %+v", rec)
+	}
+	if occ := f.occurrences(t, "2026-04-01", "2026-04-30"); len(occ) != 4 {
+		t.Errorf("%d occurrences in April, want the 4 Tuesdays the series still has", len(occ))
 	}
 }
 

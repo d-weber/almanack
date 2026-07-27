@@ -98,6 +98,8 @@
   "recur.interval.weeks": "weeks",
   "recur.interval.months": "months",
   "recur.interval.years": "years",
+  "recur.lockedOneOff": "This event does not repeat. A repeat is chosen when the event is created: to make this a series, delete it and add it again.",
+  "recur.lockedSeries": "A repeat cannot be removed here: to stop this repeating, delete the series.",
   "recur.until": "Until",
   "recur.forever": "Forever",
   "recur.weekdays": "Days",

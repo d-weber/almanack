@@ -607,6 +607,40 @@ func TestScopedEditUpcomingSplitsTheSeries(t *testing.T) {
 	}
 }
 
+// TestRepeatCannotBeAddedOrRemovedOverTheWire pins the status code the editor relies on:
+// both transitions used to answer 200 and store nothing, so a family who ticked "repeat
+// weekly" was told their change was saved and it never was.
+func TestRepeatCannotBeAddedOrRemovedOverTheWire(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	plain := e.createEvent(map[string]any{
+		"calendar_id": cal.ID, "title": "Dentiste", "all_day": false,
+		"starts_at": "2026-08-04T14:30:00Z", "ends_at": "2026-08-04T15:15:00Z",
+		"label_id": labels[4].ID,
+	})
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d", plain.ID), map[string]any{
+		"title": "Dentiste", "label_id": labels[4].ID,
+		"starts_at": "2026-08-04T14:30:00Z", "ends_at": "2026-08-04T15:15:00Z",
+		"recurrence": map[string]any{"freq": "weekly", "interval": 1, "by_weekday": []int{2}},
+	}).expect(http.StatusBadRequest)
+
+	series := e.weeklySeries(cal, labels[4].ID)
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d?scope=all", series.ID), map[string]any{
+		"title": "Piscine", "label_id": labels[4].ID,
+		"starts_at": "2026-08-04T14:30:00Z", "ends_at": "2026-08-04T15:15:00Z",
+		"recurrence": nil,
+	}).expect(http.StatusBadRequest)
+
+	// Neither refusal touched anything: the one-off is still a one-off and the series
+	// still expands.
+	list := e.listEvents("2026-08-01", "2026-08-31")
+	if got, want := dates(list.Occurrences), []string{"2026-08-04", "2026-08-04", "2026-08-11", "2026-08-18", "2026-08-25"}; !equalStrings(got, want) {
+		t.Fatalf("after both refusals = %v, want %v", got, want)
+	}
+}
+
 func TestScopedDeleteAll(t *testing.T) {
 	e := newEnv(t)
 	_, cal := e.family()

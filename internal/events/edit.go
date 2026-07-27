@@ -165,6 +165,9 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 	}
 
 	if existing.RecurrenceID == nil {
+		if in.Recurrence != nil {
+			return domain.Event{}, errNoRepeatTransition("event %d does not repeat", eventID)
+		}
 		return s.updatePlain(ctx, actor, existing, in)
 	}
 	if !scope.Valid() {
@@ -177,6 +180,14 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 
 	switch scope {
 	case domain.ScopeAll:
+		// A whole-series edit is the only request that can carry a new pattern, so it is
+		// also the only one where a missing pattern can mean "stop repeating". It used to
+		// mean "leave the pattern alone", which is how unticking "repeat" answered 200 and
+		// changed nothing. The other two scopes are about occurrences and legitimately
+		// arrive without a pattern — the server owns the split — so they are untouched.
+		if in.Recurrence == nil {
+			return domain.Event{}, errNoRepeatTransition("event %d is a series", eventID)
+		}
 		return s.updateSeries(ctx, actor, existing, rec, in)
 	case domain.ScopeThis:
 		if occDate.IsZero() {
@@ -195,6 +206,21 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 		return s.splitSeries(ctx, actor, existing, rec, occDate, in)
 	}
 	return domain.Event{}, fmt.Errorf("%w: unknown edit scope %q", domain.ErrInvalid, scope)
+}
+
+// errNoRepeatTransition refuses an edit that would give an existing event a repeat or
+// take one away. Both used to be accepted and then quietly dropped on the floor, which
+// is the worse of the two failures: the family saw a saved event that had not changed.
+//
+// Neither transition is a matter of writing one more row. Adding a repeat has to move
+// the event's reminders onto the new series, or every occurrence is notified twice —
+// once from the reminders still scoped to the event, once from the series' own. Removing
+// one destroys the override rows for occurrences somebody edited by hand, and what
+// should become of those copies is a question nobody has answered yet. Until both are
+// done deliberately, the edit is refused before anything is written; a repeat is decided
+// when the event is created, and changing one's mind means deleting and recreating it.
+func errNoRepeatTransition(reason string, args ...any) error {
+	return fmt.Errorf("%w: a repeat cannot be added or removed here (%s)", domain.ErrInvalid, fmt.Sprintf(reason, args...))
 }
 
 func (s *Service) updatePlain(ctx context.Context, actor int64, existing domain.Event, in Input) (domain.Event, error) {
