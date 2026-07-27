@@ -451,6 +451,20 @@ Notable changes to this project. The format follows
   exposed by it; it is fixed because a library panicking on data from its own database is the
   wrong answer at any frequency.
   ([#31](https://github.com/d-weber/almanack/issues/31))
+- **Turning the daily heartbeat mail off did not turn it off.** `ALMANACK_HEARTBEAT_TIME=`
+  with nothing after it is what `almanack.conf.example`, the setting's own documentation and
+  the notifier's code all describe as the way to stop the daily operations summary, and the
+  configuration loader read an empty value as no value at all and handed back the `08:00`
+  default. So the mail arrived every morning from a server whose operator had been told they
+  had switched it off, and the code that implements the disabled case could not be reached at
+  all. An empty value is now a value — for this setting and no other, because everywhere else
+  an emptied line is a templating accident rather than an instruction: `ALMANACK_TZ=` still
+  means Europe/Paris, where reading it literally would mean UTC and quietly move every
+  appointment in the calendar by an hour for half the year. The startup line and `/healthz`
+  now report `heartbeat_time=(disabled)` rather than `(unset)`, because no mail arriving looks
+  the same whether it was switched off on purpose or the mail path is broken, and that is the
+  line that settles it.
+  ([#32](https://github.com/d-weber/almanack/issues/32))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

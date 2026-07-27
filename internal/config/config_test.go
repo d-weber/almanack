@@ -342,6 +342,81 @@ func TestBoolSpellings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Settings an empty value is a real answer for
+// ---------------------------------------------------------------------------
+
+// Setting the heartbeat to nothing is the documented way to turn the daily mail
+// off — the Config field says so, almanack.conf.example says so, and the notifier
+// implements it — and it did not work: an empty value was read as an absent one
+// and 08:00 came back, so the operator kept getting a mail every morning they had
+// been told they had switched off, with no way to reach the disabled path at all.
+func TestHeartbeatIsDisabledByAnEmptyValue(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd("ALMANACK_HEARTBEAT_TIME=")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HeartbeatTime != "" {
+		t.Errorf("an empty ALMANACK_HEARTBEAT_TIME in the file gave %q; the heartbeat is still on", cfg.HeartbeatTime)
+	}
+
+	// And from the environment over a file that sets it, which is the systemd
+	// EnvironmentFile deployment: there the file *is* the environment, so an
+	// operator who empties the line is heard through that path and no other.
+	t.Setenv("ALMANACK_HEARTBEAT_TIME", "")
+	cfg, err = loadConf(t, minimalProd("ALMANACK_HEARTBEAT_TIME=08:00")...)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HeartbeatTime != "" {
+		t.Errorf("an empty ALMANACK_HEARTBEAT_TIME in the environment gave %q", cfg.HeartbeatTime)
+	}
+
+	// The startup line and /healthz have to say which of the two silences this is.
+	// "no heartbeat mail" is the same symptom whether it was turned off on purpose
+	// or the mail path is broken, and the configuration is where that is settled.
+	if joined := strings.Join(cfg.Redacted(), "\n"); !strings.Contains(joined, "heartbeat_time=(disabled)") {
+		t.Errorf("Redacted() does not say the heartbeat is off:\n%s", joined)
+	}
+}
+
+// The other half of that decision, and the reason it was not made for every
+// setting at once. Everywhere else an empty value is a templating accident rather
+// than an instruction, and a general "empty means empty" rule would read
+// ALMANACK_TZ= as UTC — time.LoadLocation("") is UTC, with no error — which is the
+// whole family's calendar an hour out for half the year, silently, on upgrade.
+func TestAnEmptyValueElsewhereStillMeansTheDefault(t *testing.T) {
+	isolateEnv(t)
+
+	cfg, err := loadConf(t, minimalProd(
+		"ALMANACK_TZ=",
+		"ALMANACK_LOG_LEVEL=",
+		"ALMANACK_LISTEN=",
+		"ALMANACK_HOLIDAY_COLOR=",
+	)...)
+	if err != nil {
+		t.Fatalf("an emptied line was treated as a value rather than as an omission: %v", err)
+	}
+	cases := []struct {
+		key       string
+		got, want any
+	}{
+		{"ALMANACK_TZ", cfg.TZName, "Europe/Paris"},
+		{"ALMANACK_LOG_LEVEL", cfg.LogLevel, "info"},
+		{"ALMANACK_LISTEN", cfg.ListenAddr, "127.0.0.1:8080"},
+		{"ALMANACK_HOLIDAY_COLOR", cfg.HolidayColor, "#d32f2f"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("%s= gave %v, want the default %v", tc.key, tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Required settings and validation
 // ---------------------------------------------------------------------------
 

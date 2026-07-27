@@ -157,6 +157,25 @@ func Load(path string) (Config, error) {
 		}
 		return def
 	}
+	// getAllowingEmpty is get() for a setting whose documented contract includes an
+	// empty value, which today is ALMANACK_HEARTBEAT_TIME and nothing else: setting
+	// it to nothing is how the daily mail is turned off, and get() read that as
+	// "absent" and handed back 08:00.
+	//
+	// It is deliberately not the rule for every setting. Everywhere else an emptied
+	// line is a templating accident rather than an instruction, and taking it
+	// literally would read ALMANACK_TZ= as UTC — time.LoadLocation("") is UTC, and
+	// returns no error — which puts the whole family's calendar an hour out for half
+	// the year on an upgrade nobody would connect it to.
+	getAllowingEmpty := func(key, def string) string {
+		if v, ok := os.LookupEnv(key); ok {
+			return v
+		}
+		if v, ok := file[key]; ok {
+			return v
+		}
+		return def
+	}
 	// A misspelt value used to fall back to the default in silence, so
 	// ALMANACK_ALSACE_MOSELLE=yes — the natural spelling — quietly switched the two
 	// extra public holidays back off. Collect the complaint instead; the reporting
@@ -221,7 +240,7 @@ func Load(path string) (Config, error) {
 		SourceURL:      get("ALMANACK_SOURCE_URL", DefaultSourceURL),
 		PlanHorizon:    getDur("ALMANACK_PLAN_HORIZON", 48*time.Hour),
 		SchedulerTick:  getDur("ALMANACK_TICK", 30*time.Second),
-		HeartbeatTime:  get("ALMANACK_HEARTBEAT_TIME", "08:00"),
+		HeartbeatTime:  getAllowingEmpty("ALMANACK_HEARTBEAT_TIME", "08:00"),
 		KeepHourly:     getInt("ALMANACK_BACKUP_KEEP_HOURLY", 48),
 		KeepDaily:      getInt("ALMANACK_BACKUP_KEEP_DAILY", 14),
 		KeepWeekly:     getInt("ALMANACK_BACKUP_KEEP_WEEKLY", 8),
@@ -410,7 +429,7 @@ func (c Config) Redacted() []string {
 		"source_url=" + orNone(c.SourceURL),
 		"plan_horizon=" + c.PlanHorizon.String(),
 		"tick=" + c.SchedulerTick.String(),
-		"heartbeat_time=" + orNone(c.HeartbeatTime),
+		"heartbeat_time=" + orOff(c.HeartbeatTime),
 		"log_level=" + c.LogLevel,
 	}
 }
@@ -418,6 +437,16 @@ func (c Config) Redacted() []string {
 func orNone(s string) string {
 	if s == "" {
 		return "(unset)"
+	}
+	return s
+}
+
+// orOff is orNone for a setting whose empty value is a decision rather than an
+// omission: an empty ALMANACK_HEARTBEAT_TIME is how the daily mail is turned off,
+// and "(unset)" would read as an oversight to whoever is asking why it stopped.
+func orOff(s string) string {
+	if s == "" {
+		return "(disabled)"
 	}
 	return s
 }
