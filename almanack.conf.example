@@ -19,6 +19,12 @@
 # Precedence: environment variable > this file > built-in default.
 # Values shown are the defaults unless marked REQUIRED.
 #
+# The ALMANACK_ namespace is a closed set. A key this version does not recognise is
+# a startup error that names it and says where it came from — this file or the
+# environment — because a misspelt setting that is merely ignored is a server
+# running on a default nobody chose. Variables outside the namespace are none of
+# its business, so this file can carry them for whatever else reads it.
+#
 # Secrets live in this file (VAPID private key). Deploy it 0640, owned by
 # root:almanack, and keep the source in an encrypted store such as Ansible Vault.
 

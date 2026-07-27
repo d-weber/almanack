@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -288,13 +289,40 @@ func Load(path string) (Config, error) {
 
 	// An unrecognised key is almost always a typo, and the settings are a closed set
 	// — silently ignoring ALMANACK_TZZ books every event in the wrong timezone.
+	//
+	// Both sources are checked, and the environment is the one that matters most:
+	// almanack.conf.example is in systemd EnvironmentFile format, which is the
+	// deployment docs/install.md recommends first, and under it systemd reads the
+	// file and passes it as the process environment — so the binary starts with no
+	// --config, parses no file, and a check that read only the file ran over an
+	// empty map. The feature was off in exactly the deployment it was written for.
+	//
+	// Only this application's own namespace is judged, because a process
+	// environment legitimately holds hundreds of variables belonging to other
+	// things. ALMANACK_CONFIG needs no exception: it is a setting like any other,
+	// and it is the one that can only ever arrive this way.
+	seenIn := map[string]string{}
 	for key := range file {
-		if !strings.HasPrefix(key, "ALMANACK_") {
-			continue
+		if strings.HasPrefix(key, "ALMANACK_") && !known[key] {
+			seenIn[key] = "the configuration file"
 		}
-		if !known[key] {
-			bad = append(bad, fmt.Sprintf("%s is not a setting this version understands (check the spelling against almanack.conf.example)", key))
+	}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "ALMANACK_") && !known[key] {
+			seenIn[key] = "the environment"
 		}
+	}
+	unknown := make([]string, 0, len(seenIn))
+	for key := range seenIn {
+		unknown = append(unknown, key)
+	}
+	// Sorted, because two typos in one file should be reported in the same order
+	// twice running: an operator comparing a restart with the last one is reading
+	// for differences.
+	slices.Sort(unknown)
+	for _, key := range unknown {
+		bad = append(bad, fmt.Sprintf("%s, in %s, is not a setting this version understands (check the spelling against almanack.conf.example)", key, seenIn[key]))
 	}
 
 	if err := c.validate(bad); err != nil {

@@ -488,6 +488,27 @@ Notable changes to this project. The format follows
   went looking for it. A test now cross-checks that list against the settings the parser
   accepts, so it cannot fall behind again.
   ([#33](https://github.com/d-weber/almanack/issues/33))
+- **The check that catches a misspelt setting was not running in the deployment we recommend.**
+  0.2.0 promised that an unknown `ALMANACK_*` key is a startup error naming the problem rather
+  than a silent fall back to the default. Only keys parsed out of the config *file* were ever
+  checked — and `almanack.conf.example` is in systemd `EnvironmentFile=` format, which is the
+  first deployment [docs/install.md](docs/install.md) describes, so systemd reads that file
+  itself and hands it to the process as environment. Almanack then starts with no `--config`
+  at all, parses no file, and ran its strictness check over an empty map. A typo in the
+  operator's configuration was ignored exactly where the feature was supposed to be working:
+  `ALMANACK_TZZ=Europe/Paris` was accepted in silence and every event went into the wrong
+  timezone, which is the failure 0.2.0 set out to kill. The environment is now checked the same
+  way, and the error names the key and says where it was seen.
+  **Before upgrading, check what sets `ALMANACK_*` variables on that machine.** A stale or
+  misspelt one that has been quietly ignored until now will stop the service from starting.
+  Three places to look: the configuration file, anything the unit or a drop-in adds
+  (`systemctl show almanack -p Environment`), and any profile script that exports one. Nothing
+  outside the `ALMANACK_` namespace is inspected, so unrelated variables are safe, and the
+  refusal happens at startup with the key named and before the database is opened — a failed
+  restart changes nothing and rolls back by correcting the key. Contributors: the browser
+  suite's `ALMANACK_URL` is now `E2E_BASE_URL`, since a test-only variable squatting in the
+  application's namespace would stop `make dev` in any shell that exported it.
+  ([#30](https://github.com/d-weber/almanack/issues/30))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

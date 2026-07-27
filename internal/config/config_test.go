@@ -285,6 +285,65 @@ func TestForeignKeysAreLeftAlone(t *testing.T) {
 	}
 }
 
+// The same typo in the environment. This is the half that was missing, and it is
+// the half that matters most: almanack.conf.example is in systemd
+// `EnvironmentFile=` format, which is the deployment docs/install.md recommends
+// first, and under it systemd reads the file and hands it to the process as
+// environment — so the binary starts with no --config at all, parses no file, and
+// ran its strictness check over an empty map. In the recommended deployment the
+// feature 0.2.0 was written for did not run.
+func TestUnknownEnvironmentKeyIsRejectedByName(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("ALMANACK_TZZ", "Europe/Paris")
+	_, err := loadConf(t, minimalProd()...)
+	wantErrMentioning(t, err, "ALMANACK_TZZ", "environment", "almanack.conf.example")
+}
+
+// And with no file anywhere, which is that deployment in full: every setting
+// arrives as environment, and the typo has to be caught anyway.
+func TestUnknownEnvironmentKeyWithNoConfigFileAtAll(t *testing.T) {
+	isolateEnv(t)
+	requireNoSystemConfig(t)
+
+	for _, line := range minimalProd() {
+		key, value, _ := strings.Cut(line, "=")
+		t.Setenv(key, value)
+	}
+	t.Setenv("ALMANACK_HEARTBAET_TIME", "08:00")
+
+	_, err := Load("")
+	wantErrMentioning(t, err, "ALMANACK_HEARTBAET_TIME")
+}
+
+// The process environment legitimately holds hundreds of variables that are none
+// of this application's business, so the check stays inside its own namespace —
+// the same rule the file has always followed.
+func TestForeignEnvironmentKeysAreLeftAlone(t *testing.T) {
+	isolateEnv(t)
+
+	t.Setenv("EDITOR", "vi")
+	t.Setenv("TZ", "UTC")
+	t.Setenv("TZZ", "nonsense")
+	if _, err := loadConf(t, minimalProd()...); err != nil {
+		t.Fatalf("a non-ALMANACK environment variable was treated as a problem: %v", err)
+	}
+}
+
+// ALMANACK_CONFIG is the one key that is legitimately only ever in the
+// environment, since it names the file. It has always been in `known`, and this
+// says so out loud: the environment check would otherwise refuse to start every
+// deployment that uses it, which is the one docs/install.md describes.
+func TestConfigPathVariableIsNotAnUnknownKey(t *testing.T) {
+	isolateEnv(t)
+
+	path := writeConf(t, minimalProd()...)
+	t.Setenv("ALMANACK_CONFIG", path)
+	if _, err := Load(""); err != nil {
+		t.Fatalf("ALMANACK_CONFIG in the environment was rejected: %v", err)
+	}
+}
+
 // A value that does not parse must name the setting and show what was rejected.
 // ALMANACK_ALSACE_MOSELLE=yes is the case that motivated this: the natural spelling
 // of "true" quietly switched the two extra public holidays back off.

@@ -14,6 +14,12 @@ The complete list of settings is [`almanack.conf.example`](../almanack.conf.exam
 in systemd `EnvironmentFile` format so the same templated file works as `EnvironmentFile=` in
 a unit or as `almanack --config <path>`.
 
+The `ALMANACK_` namespace is a closed set: a key the binary does not recognise is a startup
+error naming it, wherever it was seen — the config file or the process environment, which
+`EnvironmentFile=` makes the same thing. Templating something that only some hosts use, or
+leaving a removed setting in place across an upgrade, therefore stops the service rather than
+being ignored. Variables outside the namespace are never inspected.
+
 ## What the application provides
 
 | Interface | Contract |

@@ -23,7 +23,10 @@ export default {
   retries: 0,
   reporter: [['list']],
   use: {
-    baseURL: process.env.ALMANACK_URL || 'http://localhost:8080',
+    // Deliberately outside the ALMANACK_ namespace: the server treats an unknown
+    // ALMANACK_* variable as a startup error, so a test-only setting that squatted
+    // in there would stop `make dev` from starting in any shell that exported it.
+    baseURL: process.env.E2E_BASE_URL || 'http://localhost:8080',
     locale: 'en-GB',
     timezoneId: 'Europe/Paris',
     trace: 'retain-on-failure',
