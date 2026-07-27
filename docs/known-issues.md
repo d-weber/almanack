@@ -87,6 +87,41 @@ but the binary refuses to start against any schema newer than it knows, so putti
 binary back fails anyway. Either record a minimum-binary version per migration, or say
 plainly that a downgrade needs a restore.
 
+## Browser
+
+**The cached calendar outlives the session.** The service worker caches every
+successful `GET /api/`, including `/api/v1/me`. With the cookie gone and the server
+unreachable, the app boots authenticated and renders the whole family's calendar from
+CacheStorage. The API cache is also never pruned — only wiped on a version change — so
+a home-screen install accumulates every range and search query indefinitely. Skip the
+cache for `/api/v1/me` and `/api/v1/auth/`, and purge `/api/` entries on logout.
+
+**An event spanning the daylight-saving fall-back hour cannot be saved.** Its wall-clock
+end precedes its wall-clock start, so the editor's validation refuses it even when
+nothing was changed — the event becomes permanently uneditable. Validate against the
+original instants when the time fields are untouched, or carry the duration through the
+editor rather than round-tripping both endpoints.
+
+**Multi-day bars are unlabelled after the first week**, including to a screen reader —
+they are buttons with no accessible name. Repeat the title on continuation segments, or
+at least set `aria-label`.
+
+**The agenda view leaks an IntersectionObserver per visit**, and with it the whole
+detached view it closed over, because it only disconnects when paging completes. Views
+need a teardown hook called from `show()`.
+
+**Accessibility gaps in the overlays and editor:** no focus trap, no focus restore on
+close, and no accessible name on the dialog; the timed editor's four date and time
+inputs have no programmatic label; event chips are 20px tall, under the WCAG target
+size; and at 320px the app bar wraps to three lines with the two month arrows on
+different rows.
+
+**`safeHref` can be bypassed** by control characters inside the scheme
+(`java\tscript:`), because HTML URL parsing strips them after the check runs. Nothing
+executes today — the CSP has no `unsafe-inline` and no reachable sink takes user data —
+but the helper does not do what its contract says. Strip `[\u0000-\u0020]` before the
+scheme test.
+
 ## Low
 
 - A recurring event that spans a daylight-saving change keeps its start's wall clock but

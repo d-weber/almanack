@@ -14,27 +14,52 @@ export const MAX_EDGE_PX = 256;
  * Rejects when the browser cannot decode the file, which is also how a renamed
  * non-image gets caught before it reaches the network.
  */
-export function resizeImage(file, maxEdge = MAX_EDGE_PX) {
+export async function resizeImage(file, maxEdge = MAX_EDGE_PX) {
+  const source = await decode(file);
+  const scale = Math.min(1, maxEdge / Math.max(source.width, source.height));
+  const w = Math.max(1, Math.round(source.width * scale));
+  const hgt = Math.max(1, Math.round(source.height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = hgt;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas');
+  ctx.drawImage(source, 0, 0, w, hgt);
+  if (source.close) source.close();
+
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('encode'));
+    }, 'image/jpeg', 0.85);
+  });
+}
+
+/**
+ * Decode a picked file to something drawable.
+ *
+ * createImageBitmap takes the Blob directly, which matters: the obvious approach —
+ * URL.createObjectURL then img.src — asks the page to load a blob: URL, and this
+ * app's own Content-Security-Policy allows img-src from 'self' and data: only. That
+ * made every avatar and calendar picture fail to upload, with the error surfacing as
+ * a decode failure long before any request was made.
+ */
+async function decode(file) {
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(file);
+  }
+  // Older Safari: a data: URL is allowed by the same policy.
+  const dataURL = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('read'));
+    reader.readAsDataURL(file);
+  });
+  return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
-      const w = Math.max(1, Math.round(img.width * scale));
-      const hgt = Math.max(1, Math.round(img.height * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = hgt;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { reject(new Error('canvas')); return; }
-      ctx.drawImage(img, 0, 0, w, hgt);
-      canvas.toBlob((blob) => {
-        if (blob) resolve(blob);
-        else reject(new Error('encode'));
-      }, 'image/jpeg', 0.85);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('decode')); };
-    img.src = url;
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('decode'));
+    img.src = dataURL;
   });
 }

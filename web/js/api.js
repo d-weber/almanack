@@ -64,6 +64,21 @@ function checkVersion(res) {
     sessionStorage.setItem(guard, '1');
   } catch (_) { /* private mode: accept the small risk of a second reload */ }
   emit('version', { version: v });
+
+  // Ask the service worker for the new build BEFORE reloading. A bare reload is
+  // served from the existing precache, so it comes back running exactly the same
+  // stale code — and having spent the one-reload-per-version guard, the device stays
+  // pinned to the old build indefinitely, talking to a newer server with no signal
+  // that anything is wrong. When the update lands, the worker's own activate step
+  // messages open clients and the reload happens there; this timeout is only the
+  // fallback for a browser with no service worker at all.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistration()
+      .then((reg) => (reg ? reg.update() : null))
+      .catch(() => {})
+      .finally(() => setTimeout(() => location.reload(), 1500));
+    return;
+  }
   location.reload();
 }
 

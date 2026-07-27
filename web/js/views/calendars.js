@@ -300,7 +300,10 @@ export function renderCalendarDetail({ id }) {
   loadInvites();
 
   const showInvite = (invite) => {
-    const url = invite.url || `${location.origin}/#/join/${invite.token}`;
+    // Built here rather than taken from the server: this is a hash-routed app, and a
+  // path-only invite link lands the invitee on the login screen with no way to sign
+  // up — which, signup being invite-only, is the end of the road for them.
+  const url = `${location.origin}/#/join/${invite.token}`;
     const urlField = input({ value: url, readOnly: true });
     openOverlay((dismiss) => h('div', { class: 'dialog' },
       h('h2', { class: 'dialog-title' }, t('calendar.invite.link')),

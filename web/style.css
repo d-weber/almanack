@@ -280,7 +280,9 @@ a { color: var(--accent); }
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 0;
+  /* auto rather than 0: the group must never be laid out narrower than the title it
+     contains, or the next element paints over it. */
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -305,11 +307,16 @@ a { color: var(--accent); }
   white-space: nowrap;
 }
 
-/* One line holds title, switch, today and arrows from tablet width up. A phone
-   cannot fit all five legibly — squeezing them there gave clipped labels and a
-   "Semaine" hidden behind the Today button — so below this width the view switch
-   takes a line of its own, full width, which also makes it an easier tap target. */
-@media (max-width: 559px) {
+/* Title, today, arrows, view switch and actions fit on one line only on a genuinely
+   wide screen — measured at about 1060px. Below that the switch takes a line of its
+   own, which also makes it an easier tap target.
+
+   The threshold used to be 560px, on the assumption that the title would shrink
+   gracefully in between. It does not: the title sits in a flex group with min-width:0
+   and does not wrap, so from roughly 560 to 1050 it simply rendered *underneath* the
+   view switch — completely hidden at 640px and at 900px, which is exactly where the
+   desktop sidebar appears. */
+@media (max-width: 1059px) {
   .app-bar-row { flex-wrap: wrap; }
 
   .app-title { font-size: 18px; }

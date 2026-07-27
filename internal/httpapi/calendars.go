@@ -400,9 +400,14 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusCreated, inviteResponse{
-		ID:        invite.ID,
-		Token:     token,
-		URL:       strings.TrimRight(s.cfg.BaseURL, "/") + "/join/" + token,
+		ID:    invite.ID,
+		Token: token,
+		// The hash form, because the browser app is hash-routed: a path-only invite
+		// link serves the shell with an empty hash, which lands the invitee on the
+		// login screen — and signup is invite-only, so that is the end of the road
+		// for them. The path form still works via the redirect in web/js/app.js, for
+		// links sent before this was fixed.
+		URL:       strings.TrimRight(s.cfg.BaseURL, "/") + "/#/join/" + token,
 		ExpiresAt: invite.ExpiresAt,
 	})
 }

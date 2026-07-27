@@ -42,6 +42,27 @@ being fixed, and each has a regression test.
 - The Go version floor, `make e2e`, `make cover`, the dependency allowlist (which was
   checking an empty list), and several broken documentation links were all corrected.
 
+Then a browser pass, which found three things nothing server-side could have:
+
+- **Avatar and calendar-picture uploads never worked.** The client resized images
+  through a `blob:` URL, which the app's own Content-Security-Policy forbids, so
+  every upload failed before a request was made. It now decodes with
+  `createImageBitmap`, which takes the file directly.
+- **Invite links did not open the join screen.** The server emitted a path-only
+  URL for a hash-routed app, so an invitee landed on the login page with no way to
+  sign up — and signup is invite-only. The server now emits the hash form, and the
+  app translates the old form for links already sent.
+- **Editing one occurrence of a recurring event deleted that occurrence's reminder**
+  and left it on all the others: the client sent the reminders to the series rather
+  than to the override the server had just created.
+- A new build could never reach an open tab: the version check reloaded without
+  asking the service worker to update, so the page came back running the same cached
+  code — and, having spent its one-reload-per-version guard, stayed on the old build
+  indefinitely. This one cost two debugging detours during the work itself.
+- The month title was rendered *underneath* the view switcher between roughly 560px
+  and 1050px — invisible at 640px and at 900px, which is exactly where the desktop
+  sidebar appears.
+
 Everything found but not yet fixed is written down in
 [docs/known-issues.md](docs/known-issues.md).
 

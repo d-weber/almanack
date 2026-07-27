@@ -291,7 +291,12 @@ async function panelScreen(builder, ctx) {
   if (!DESKTOP.matches) {
     return plainScreen(builder);
   }
-  const date = (ctx && ctx.query && ctx.query.get('date')) || state.cursor || todayISO();
+  // params first: /event/:id/:date carries the occurrence being opened, which is the
+  // month the calendar beside it should be showing. A push notification deep-links in
+  // this shape, and it used to land on today's month next to an event in October.
+  const date = (ctx && ctx.params && ctx.params.date)
+    || (ctx && ctx.query && ctx.query.get('date'))
+    || state.cursor || todayISO();
   const view = state.view === 'agenda' ? 'agenda' : state.view;
   await calendarScreen(view, { query: new URLSearchParams(`d=${date}`) });
 
@@ -473,6 +478,14 @@ function afterLogin() {
 }
 
 async function boot() {
+  // Invite and password-reset links were once emitted without the "#/", and some are
+  // already in inboxes. Translate them rather than dropping their holder on the login
+  // screen with no way forward.
+  const deepLink = location.pathname.match(/^\/(join|reset)\/([^/]+)$/);
+  if (deepLink && !location.hash) {
+    history.replaceState(null, '', `/#/${deepLink[1]}/${deepLink[2]}`);
+  }
+
   buildShell();
   applyTheme();
   applyCollapsed();
