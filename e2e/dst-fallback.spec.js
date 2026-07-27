@@ -19,6 +19,13 @@
 // nothing louder than a pair of tests would ever tell anyone that they had started to,
 // because every candidate instant reads the same on a clock face.
 //
+// There is a third rule those two are subordinate to — a broken wall time may not resolve
+// onto another day — and nothing here can reach it: only a missing hour that touches a date
+// boundary can break it, and the seeded family is in Paris, which jumps at 02:00. `wallToInstant()`
+// therefore carries a branch these tests never take. It is pinned on the server's side in
+// `internal/domain`, over every minute of a year in the zones concerned, and the policy
+// table in docs/architecture.md carries the row.
+//
 // These are browser tests because the date layer has no other test harness: the frontend
 // takes no dependencies (CONVENTIONS §1), so there is no JavaScript unit runner to put
 // them in.

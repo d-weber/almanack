@@ -206,13 +206,29 @@ export function instantToWall(instant) {
  * Two passes: the first guess uses the offset at the naive instant, the second
  * uses the offset at the corrected one, which is what makes DST changeovers land
  * on the right side of the transition.
+ *
+ * A third pass, only ever taken by a wall time the clocks skipped: correcting one
+ * of those can cross midnight, and where it does the answer is the other reading.
+ * A zone that jumps at midnight has no 00:30 on the day it jumps, and an event
+ * typed onto that day must not be saved onto the evening before it. The server
+ * resolves a broken hour through the same rule (domain.Date.at) and the two halves
+ * of the application must not disagree about one — see docs/architecture.md.
  */
 export function wallToInstant(dateISO, hhmm) {
   const { y, m, d } = parseDate(dateISO);
   const [hh, mm] = String(hhmm || '00:00').split(':').map(Number);
+  const wanted = fromParts(y, m, d);
+  const onWantedDay = (t) => {
+    const p = wallParts(new Date(t));
+    return fromParts(p.year, p.month, p.day) === wanted;
+  };
   const naive = Date.UTC(y, m - 1, d, hh || 0, mm || 0, 0);
   let ms = naive - offsetMs(new Date(naive));
   ms = naive - offsetMs(new Date(ms));
+  if (!onWantedDay(ms)) {
+    const alt = naive - offsetMs(new Date(ms));
+    if (onWantedDay(alt)) ms = alt;
+  }
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 

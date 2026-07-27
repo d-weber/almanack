@@ -171,6 +171,138 @@ func TestAllDayHasNoTimezone(t *testing.T) {
 	}
 }
 
+// TestWallClockResolvesOntoTheDayItWasAskedFor pins what a Date does with a wall time
+// that a daylight-saving change broke, and it is two assertions at once.
+//
+// The first is that the existing rule is untouched. Which instant a skipped hour
+// resolves to follows the zone rather than a policy — forward in Europe/Paris, backward
+// in America/New_York — and both of those rows are pinned in internal/events and in a
+// real browser as well. A change here that moved either of them would be a change to a
+// documented promise, so they are restated in the two rows below that say "unchanged".
+//
+// The second is the rule this one is subordinate to: whatever the offsets do, the answer
+// is on the date that was asked for. A zone that jumps at midnight has no 00:30 on the
+// day it jumps, and until #57 the correction handed back 23:30 the previous evening —
+// a date every bucket in the application then disagreed with, having no way to know it
+// had been asked for a different one.
+func TestWallClockResolvesOntoTheDayItWasAskedFor(t *testing.T) {
+	cases := []struct {
+		name            string
+		zone, date      string
+		hour, min       int
+		wantUTC, wantHM string
+		note            string
+	}{
+		{
+			name: "an ordinary time is the ordinary answer",
+			zone: "Europe/Paris", date: "2026-03-31", hour: 16, min: 30,
+			wantUTC: "2026-03-31T14:30:00Z", wantHM: "16:30",
+			note: "the summer offset applied to a time that exists",
+		},
+		{
+			name: "Paris moves a skipped hour forward, unchanged",
+			zone: "Europe/Paris", date: "2026-03-29", hour: 2, min: 30,
+			wantUTC: "2026-03-29T01:30:00Z", wantHM: "03:30",
+			note: "02:30 never happens on this date; the day does not change, so neither does the answer",
+		},
+		{
+			name: "New York moves a skipped hour backward, unchanged",
+			zone: "America/New_York", date: "2026-03-08", hour: 2, min: 30,
+			wantUTC: "2026-03-08T06:30:00Z", wantHM: "01:30",
+			note: "the opposite direction from Paris, and still the 8th, so it stands",
+		},
+		{
+			name: "the repeated hour is untouched in either zone",
+			zone: "Europe/Paris", date: "2026-10-25", hour: 2, min: 30,
+			wantUTC: "2026-10-25T01:30:00Z", wantHM: "02:30",
+			note: "an hour that happens twice names two instants, not none, so nothing here applies to it",
+		},
+		{
+			name: "Santiago has no 00:30 on the day it jumps at midnight",
+			zone: "America/Santiago", date: "2026-09-06", hour: 0, min: 30,
+			wantUTC: "2026-09-06T04:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 2026-09-06T03:30:00Z, which is 23:30 on the 5th",
+		},
+		{
+			name: "and no midnight either, so the day starts at 01:00",
+			zone: "America/Santiago", date: "2026-09-06", hour: 0, min: 0,
+			wantUTC: "2026-09-06T04:00:00Z", wantHM: "01:00",
+			note: "Date.In is this case, and it is a day boundary in two range queries",
+		},
+		{
+			name: "the week either side of it is ordinary",
+			zone: "America/Santiago", date: "2026-09-13", hour: 0, min: 30,
+			wantUTC: "2026-09-13T03:30:00Z", wantHM: "00:30",
+			note: "00:30 exists on this date, and the summer offset is the one that says so",
+		},
+		{
+			name: "Havana, the other zone with a household in it",
+			zone: "America/Havana", date: "2026-03-08", hour: 0, min: 30,
+			wantUTC: "2026-03-08T05:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 23:30 on the 7th",
+		},
+		{
+			name: "the Azores, which is an hour from Lisbon and does the same thing",
+			zone: "Atlantic/Azores", date: "2026-03-29", hour: 0, min: 30,
+			wantUTC: "2026-03-29T01:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 23:30 on the 28th",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no tzdata: %v", err)
+			}
+			d := MustParseDate(tc.date)
+			got := d.At(tc.hour, tc.min, loc)
+			if s := got.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s %02d:%02d in %s = %s, want %s (%s)", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantUTC, tc.note)
+			}
+			if s := got.In(loc).Format("15:04"); s != tc.wantHM {
+				t.Errorf("%s %02d:%02d in %s reads back as %s, want %s", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantHM)
+			}
+			// The one that matters to every caller: the instant is on the date.
+			if bucket := DateIn(got, loc); !bucket.Equal(d) {
+				t.Errorf("%s %02d:%02d in %s lands on %s, which is not the day it was asked for", tc.date, tc.hour, tc.min, tc.zone, bucket)
+			}
+		})
+	}
+}
+
+// TestNoWallTimeInAWholeYearLeavesItsDay is the same promise made exhaustively rather
+// than by example, because the examples above are the cases somebody thought of. Every
+// minute of every day of a year, in the zones that break one, must resolve onto the day
+// it names. Nothing else in this application would notice if one did not: an occurrence
+// carries no memory of the date it was asked for once it is an instant, which is exactly
+// why #57 was invisible until somebody queried the day and got nothing back.
+func TestNoWallTimeInAWholeYearLeavesItsDay(t *testing.T) {
+	// Every kind of zone that has ever been a problem: the two the household might use,
+	// the negative-offset one whose skipped hour moves the other way, and four that jump
+	// at midnight, one of them (Scoresbysund) having only just started to.
+	zones := []string{
+		"Europe/Paris", "America/New_York", "America/Santiago", "America/Havana",
+		"Atlantic/Azores", "America/Scoresbysund", "Australia/Lord_Howe", "Pacific/Chatham",
+	}
+	first, last := MustParseDate("2026-01-01"), MustParseDate("2026-12-31")
+	for _, zone := range zones {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("no tzdata: %v", err)
+		}
+		for d := first; !d.After(last); d = d.AddDays(1) {
+			for mins := 0; mins < 24*60; mins++ {
+				got := d.At(mins/60, mins%60, loc)
+				if bucket := DateIn(got, loc); !bucket.Equal(d) {
+					t.Fatalf("%s %02d:%02d in %s resolved to %s, which is %s",
+						d, mins/60, mins%60, zone, got.In(loc).Format(time.RFC3339), bucket)
+				}
+			}
+		}
+	}
+}
+
 func TestZeroDateIsUnset(t *testing.T) {
 	var zero Date
 	if !zero.IsZero() {

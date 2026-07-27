@@ -58,15 +58,71 @@ func (d Date) String() string {
 // IsZero reports whether d is the zero Date, which is used to mean "unset".
 func (d Date) IsZero() bool { return d == Date{} }
 
-// In returns midnight at the start of d in loc. Where a DST transition means that
-// midnight does not exist, Go normalizes forward to the first valid instant.
+// In returns the first instant of d in loc. That is midnight on every day but the few
+// a year when a zone that changes its clocks at midnight has no midnight to offer, and
+// the day begins at 01:00 instead.
 func (d Date) In(loc *time.Location) time.Time {
-	return time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, loc)
+	return d.At(0, 0, loc)
 }
 
 // At returns the instant on d at the wall-clock time hour:min in loc.
 func (d Date) At(hour, min int, loc *time.Location) time.Time {
-	return time.Date(d.Year, d.Month, d.Day, hour, min, 0, 0, loc)
+	return d.at(hour, min, 0, loc)
+}
+
+// AtTimeOf returns the instant on d at the same wall-clock time of day that t reads in
+// loc. It is how a series template is carried onto another date: the arithmetic happens
+// in local wall-clock and converts afterwards, which is what keeps a 16:30 event at
+// 16:30 on both sides of a daylight-saving change (CONVENTIONS §4).
+func (d Date) AtTimeOf(t time.Time, loc *time.Location) time.Time {
+	wall := t.In(loc)
+	return d.at(wall.Hour(), wall.Minute(), wall.Second(), loc)
+}
+
+// at is the one place in this application where a wall clock in the family timezone
+// becomes an instant, and it is a function of its own because one of the answers the
+// standard library can give to that question is unusable here.
+//
+// A wall time inside the hour a spring-forward skips names no moment at all, so
+// time.Date resolves it: it reads the fields as though they were UTC, applies the offset
+// in force at that reading and corrects once. Which side of the jump that lands on
+// follows the sign of the zone's offset rather than any policy anyone chose — 02:30
+// becomes 03:30 in Europe/Paris and 01:30 in America/New_York — and that is the
+// documented behaviour, pinned from the server's side and the browser's. It stays.
+//
+// What it may not do is answer with a different day, and it can, whenever the hour that
+// went missing touches a date boundary. A zone that jumps at midnight has no 00:30 on
+// the day it jumps, and correcting a negative offset backwards puts that occurrence at
+// 23:30 the previous evening — so every date bucket in the application is wrong about it
+// at once. The day the series named returns nothing at all, while the month grid, the
+// digest and the reminder file it under a day nobody asked for. Every zone that still
+// does this is west of Greenwich (America/Santiago and America/Havana are the populous
+// ones, Atlantic/Azores the nearest), and Paris jumps at 02:00, which is the whole reason
+// the household this was built for never saw it. The mirror case — a zone that abolishes
+// the last hour of a day rather than the first — is rarer and mostly historical, and
+// comes out here the same way.
+//
+// A broken wall time has exactly two readings, being the offsets either side of the
+// jump, so where the first leaves the date behind the other one is the answer. Over
+// every minute of every gap in the timezone database between 1970 and 2100 it lands on
+// the date that was asked for, the sole exceptions being the six dates a zone deleted
+// outright on crossing the date line (Pacific/Apia has no 30 December 2011), which no
+// arithmetic can put an occurrence on because they never happened.
+func (d Date) at(hour, min, sec int, loc *time.Location) time.Time {
+	t := time.Date(d.Year, d.Month, d.Day, hour, min, sec, 0, loc)
+	if DateIn(t, loc).Equal(d) {
+		return t
+	}
+	// The offset in force at an answer that was corrected across the jump is the one on
+	// the far side of it from the offset that produced the answer, which is what makes
+	// applying it to the same fields the other reading rather than the same one again.
+	_, off := t.Zone()
+	alt := time.Date(d.Year, d.Month, d.Day, hour, min, sec, 0, time.UTC).
+		Add(-time.Duration(off) * time.Second)
+	if DateIn(alt, loc).Equal(d) {
+		return alt
+	}
+	return t
 }
 
 // AddDays returns the date n days after d (n may be negative).

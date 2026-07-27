@@ -334,6 +334,85 @@ func TestBrokenHoursFollowTheZoneRatherThanAPolicy(t *testing.T) {
 	}
 }
 
+// TestSeriesInAZoneThatJumpsAtMidnightStaysOnItsOwnDay is the regression test for the
+// occurrence that went missing from the calendar altogether (#57).
+//
+// The two rules above answer "which instant"; this one answers "which day", and the
+// second does not follow from the first. An occurrence carries the date its recurrence
+// asked for, but every bucket in the application — this package's overlaps(), the
+// planner's, the month grid's — reads the day off the instant instead, because that is
+// the only thing an occurrence still has by the time it reaches them. So the moment the
+// two disagree, the occurrence is filed under a day nobody asked for.
+//
+// A zone that jumps at midnight makes them disagree. Chile abolishes the hour after
+// midnight on 6 September 2026, so a 00:30 series has no 00:30 that morning, and the
+// correction that a negative offset produces landed it at 23:30 on the 5th: the query
+// for the 6th returned nothing at all, and the one for the 5th returned a lesson the
+// family had never put there. Not a display fault — a query for the day it was on
+// answered zero, so the reminder and the digest for that day missed it too.
+//
+// The series is deliberately fifteen minutes long. An hour-long one straddles midnight
+// from the wrong side and so is still dragged into the 6th by its end, which hides the
+// fault behind an occurrence that looks roughly right.
+func TestSeriesInAZoneThatJumpsAtMidnightStaysOnItsOwnDay(t *testing.T) {
+	santiago, err := time.LoadLocation("America/Santiago")
+	if err != nil {
+		t.Skipf("no tzdata available: %v", err)
+	}
+	f := newFixtureIn(t, santiago, nil)
+
+	if _, err := f.svc.Create(context.Background(), f.maman, Input{
+		CalendarID: f.cal, Title: "Astronomie",
+		StartsAt: f.at("2026-08-30", 0, 30), EndsAt: f.at("2026-08-30", 0, 45),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+		},
+	}); err != nil {
+		t.Fatalf("create series: %v", err)
+	}
+
+	// One day at a time, which is how a day view asks and how the fault shows: the
+	// middle row answered zero occurrences before this was fixed.
+	days := []struct {
+		date, wantWall, note string
+	}{
+		{date: "2026-08-30", wantWall: "00:30 -04", note: "the Sunday before the change"},
+		{
+			date: "2026-09-06", wantWall: "01:30 -03",
+			note: "the morning with no 00:30 in it; the answer this replaces was 23:30 on the 5th",
+		},
+		{date: "2026-09-13", wantWall: "00:30 -03", note: "the Sunday after, back to an ordinary 00:30"},
+	}
+	for _, d := range days {
+		occ := f.occurrences(t, d.date, d.date)
+		if len(occ) != 1 {
+			t.Fatalf("%s (%s): %d occurrences, want 1 — the series asked for this day", d.date, d.note, len(occ))
+		}
+		if got := occ[0].OccurrenceDate.String(); got != d.date {
+			t.Errorf("%s: the occurrence returned is %s's", d.date, got)
+		}
+		if got := occ[0].StartsAt.In(f.loc).Format("15:04 -07"); got != d.wantWall {
+			t.Errorf("%s (%s): starts at %s locally, want %s", d.date, d.note, got, d.wantWall)
+		}
+	}
+
+	// And the day it used to be filed under holds nothing: a fix that put the occurrence
+	// on both days would satisfy the loop above.
+	if occ := f.occurrences(t, "2026-09-05", "2026-09-05"); len(occ) != 0 {
+		t.Errorf("5 September holds %d occurrences, want none — nothing was ever asked for that day", len(occ))
+	}
+
+	// The invariant underneath all of it, over a window wide enough to hold the change:
+	// the day an occurrence says it is on is the day its instant is on.
+	for _, o := range f.occurrences(t, "2026-08-01", "2026-10-31") {
+		if bucket := domain.DateIn(o.StartsAt, f.loc); !bucket.Equal(o.OccurrenceDate) {
+			t.Errorf("occurrence of %s starts at %s, which is %s",
+				o.OccurrenceDate, o.StartsAt.In(f.loc).Format(time.RFC3339), bucket)
+		}
+	}
+}
+
 // TestOccurrenceEndIsStartPlusTheTemplatesExactDuration covers the recurrence policy row
 // that says what happens to the *end* of an occurrence at a daylight-saving change. The
 // start keeps its wall clock, which is the rule the whole expansion is built around; the

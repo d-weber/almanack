@@ -635,6 +635,34 @@ Notable changes to this project. The format follows
   per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
   run `make seed` — instead of letting three unrelated-looking tests go red.
   ([#52](https://github.com/d-weber/almanack/issues/52))
+- **In a few countries, one occurrence a year fell off the calendar on the morning the
+  clocks went forward.** Where a country moves its clocks at midnight rather than at two in
+  the morning — Chile, Cuba and the Azores still do; Brazil and Paraguay did — the day
+  the change lands on has no 00:30 and no midnight at all: the clock goes from 23:59 the
+  evening before straight to 01:00. A repeating event in that hour has to be put somewhere,
+  and it was being put at 23:30 on the *previous* day. Not moved on screen — gone. The day
+  the series named held nothing, so the month grid drew nothing there, the day view was
+  empty, and the digest for that morning and the reminder for that occurrence went with it,
+  because all four ask the calendar for a day and the calendar no longer thought the event
+  was on one. Meanwhile it appeared on the evening before, where nobody had put anything. A
+  reminder set for "the day before at 09:00" fired two days before instead. Such an event
+  now resolves to 01:30 that morning, which is where every other calendar puts it, and
+  midnight resolves to 01:00 — the day starts when the day starts. The rule is that the
+  conversion may do what the zone's offsets dictate, which is what keeps 16:30 at 16:30 and
+  is unchanged everywhere else, but it may not hand back a different day than the one it was
+  asked for; the alternative reading of an hour that never happened is always the one that
+  stays. **Nothing changes for a calendar kept in Paris, London or New York**: all three
+  change their clocks at two in the morning, so the hour they break is nowhere near a date
+  boundary and the new rule never fires there. It was checked against every minute of
+  every clock change in the timezone database between 1970 and 2100 before being written
+  down, and the editor in the browser applies the same rule as the server, because a
+  calendar whose two halves disagree about an hour is worse than one that gets it wrong
+  twice. Reminders already queued keep the name they were queued under, so the upgrade
+  strands none of them; an occurrence inside the next two days at the moment of the upgrade
+  can be announced twice, an hour apart, which is the trade this application always makes in
+  that direction. Nothing changed in the database.
+  ([#57](https://github.com/d-weber/almanack/issues/57))
+
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo
