@@ -390,6 +390,9 @@ Notable changes to this project. The format follows
   nothing tells it that it has been replaced — an observer on a detached target never fires
   again, so there is no moment at which it could notice.
   ([#19](https://github.com/d-weber/almanack/issues/19))
+- `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
+  under that name.
+
 - **Security: a link on an event could be written so that it executed instead of opening.**
   Every URL this app puts on the page goes through one function, `safeHref()`, which reads
   the scheme and refuses anything that is not `http`, `https`, `mailto` or `tel`. It read the
@@ -446,19 +449,17 @@ Notable changes to this project. The format follows
   never mounted, so a server whose calendar had gone reported itself healthy indefinitely: it
   stats the path now, and a database that is not there degrades the server.
   ([#23](https://github.com/d-weber/almanack/issues/23))
-- **Running the browser tests twice failed the second time, for reasons that pointed
-  nowhere near the cause.** Two of the smoke tests created an event and never removed it, so
-  a second `make e2e` against the same seeded database found three other tests failing — the
-  offline one, the cache-cap one and the timezone one — because an extra event changes what
-  is on the screen and how many API ranges get cached. Nothing said "there is a leftover
-  event"; it looked like a broken application. CI never saw it, since that job seeds a
-  database before every run, so the whole cost fell on whoever ran the suite locally, which
-  is the case the target exists for. Both tests now delete what they created, in a `finally`
-  so that a failing assertion still tidies up, and through the API rather than by driving the
-  delete flow in a test that is about something else. On top of that the suite now looks, once
-  per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
-  run `make seed` — instead of letting three unrelated-looking tests go red.
-  ([#52](https://github.com/d-weber/almanack/issues/52))
+- **Searching for a name spelled with ø, ß, ð, þ or đ found nothing unless you typed the
+  letter itself.** Search ignores accents by folding both the stored text and what you type
+  down to plain letters, so `ecole` finds `École`; the table doing the folding covered
+  French and the ligatures `æ` and `œ`, but stopped there. A birthday filed under `Søren`
+  was therefore reachable only by typing the ø — an o would not do — and the same for the
+  German ß and the Icelandic ð and þ. Those five letters and their capitals now fold the
+  way the rest do: `soren` finds `Søren`, `strasse` finds `Straße`, `thorbjorg` finds
+  `Þorbjörg`. One caveat, now written down beside the table: the folded copy of an event is
+  computed when the event is saved, so events created before this version keep the spelling
+  they were filed under until they are next edited. Opening one and saving it re-files it.
+  ([#24](https://github.com/d-weber/almanack/issues/24))
 - **A failed backup could leave an empty calendar where the family's used to be.** Every
   run records its outcome where `/healthz` can read it, and that breadcrumb is written by
   opening the database — which creates and fully migrates the file when it is not there. So
@@ -471,6 +472,27 @@ Notable changes to this project. The format follows
   when there is a database to record it against; when there is not, the non-zero exit and
   the failure mail are the whole signal, as the deployment contract has always said.
   ([#29](https://github.com/d-weber/almanack/issues/29))
+- **The check that catches a misspelt setting was not running in the deployment we recommend.**
+  0.2.0 promised that an unknown `ALMANACK_*` key is a startup error naming the problem rather
+  than a silent fall back to the default. Only keys parsed out of the config *file* were ever
+  checked — and `almanack.conf.example` is in systemd `EnvironmentFile=` format, which is the
+  first deployment [docs/install.md](docs/install.md) describes, so systemd reads that file
+  itself and hands it to the process as environment. Almanack then starts with no `--config`
+  at all, parses no file, and ran its strictness check over an empty map. A typo in the
+  operator's configuration was ignored exactly where the feature was supposed to be working:
+  `ALMANACK_TZZ=Europe/Paris` was accepted in silence and every event went into the wrong
+  timezone, which is the failure 0.2.0 set out to kill. The environment is now checked the same
+  way, and the error names the key and says where it was seen.
+  **Before upgrading, check what sets `ALMANACK_*` variables on that machine.** A stale or
+  misspelt one that has been quietly ignored until now will stop the service from starting.
+  Three places to look: the configuration file, anything the unit or a drop-in adds
+  (`systemctl show almanack -p Environment`), and any profile script that exports one. Nothing
+  outside the `ALMANACK_` namespace is inspected, so unrelated variables are safe, and the
+  refusal happens at startup with the key named and before the database is opened — a failed
+  restart changes nothing and rolls back by correcting the key. Contributors: the browser
+  suite's `ALMANACK_URL` is now `E2E_BASE_URL`, since a test-only variable squatting in the
+  application's namespace would stop `make dev` in any shell that exported it.
+  ([#30](https://github.com/d-weber/almanack/issues/30))
 - **A damaged password row answered every sign-in attempt for that account with a server
   error.** Verification promises that a stored hash it cannot read is an error rather than a
   quiet "wrong password", because treating a corrupt row as a bad password sends its owner
@@ -521,38 +543,29 @@ Notable changes to this project. The format follows
   went looking for it. A test now cross-checks that list against the settings the parser
   accepts, so it cannot fall behind again.
   ([#33](https://github.com/d-weber/almanack/issues/33))
-- **The check that catches a misspelt setting was not running in the deployment we recommend.**
-  0.2.0 promised that an unknown `ALMANACK_*` key is a startup error naming the problem rather
-  than a silent fall back to the default. Only keys parsed out of the config *file* were ever
-  checked — and `almanack.conf.example` is in systemd `EnvironmentFile=` format, which is the
-  first deployment [docs/install.md](docs/install.md) describes, so systemd reads that file
-  itself and hands it to the process as environment. Almanack then starts with no `--config`
-  at all, parses no file, and ran its strictness check over an empty map. A typo in the
-  operator's configuration was ignored exactly where the feature was supposed to be working:
-  `ALMANACK_TZZ=Europe/Paris` was accepted in silence and every event went into the wrong
-  timezone, which is the failure 0.2.0 set out to kill. The environment is now checked the same
-  way, and the error names the key and says where it was seen.
-  **Before upgrading, check what sets `ALMANACK_*` variables on that machine.** A stale or
-  misspelt one that has been quietly ignored until now will stop the service from starting.
-  Three places to look: the configuration file, anything the unit or a drop-in adds
-  (`systemctl show almanack -p Environment`), and any profile script that exports one. Nothing
-  outside the `ALMANACK_` namespace is inspected, so unrelated variables are safe, and the
-  refusal happens at startup with the key named and before the database is opened — a failed
-  restart changes nothing and rolls back by correcting the key. Contributors: the browser
-  suite's `ALMANACK_URL` is now `E2E_BASE_URL`, since a test-only variable squatting in the
-  application's namespace would stop `make dev` in any shell that exported it.
-  ([#30](https://github.com/d-weber/almanack/issues/30))
-- **Searching for a name spelled with ø, ß, ð, þ or đ found nothing unless you typed the
-  letter itself.** Search ignores accents by folding both the stored text and what you type
-  down to plain letters, so `ecole` finds `École`; the table doing the folding covered
-  French and the ligatures `æ` and `œ`, but stopped there. A birthday filed under `Søren`
-  was therefore reachable only by typing the ø — an o would not do — and the same for the
-  German ß and the Icelandic ð and þ. Those five letters and their capitals now fold the
-  way the rest do: `soren` finds `Søren`, `strasse` finds `Straße`, `thorbjorg` finds
-  `Þorbjörg`. One caveat, now written down beside the table: the folded copy of an event is
-  computed when the event is saved, so events created before this version keep the spelling
-  they were filed under until they are next edited. Opening one and saving it re-files it.
-  ([#24](https://github.com/d-weber/almanack/issues/24))
+- **An edited occurrence could be announced twice, and the reminder you took off it went
+  off anyway.** Moving a single swimming lesson leaves a copy of the event behind, and the
+  app files the reminder list you were shown against that copy — while the planner went on
+  firing the series' reminders for that date as well. Two rows, two reminders as far as the
+  outbox could tell, two identical pushes half an hour before the lesson, one after the
+  other. The same disagreement ran the other way on screen: the editor lists the reminders
+  on the copy, so taking the reminder off one occurrence showed an empty list and left the
+  series' one to arrive that evening regardless. "No reminder, just for this one" was not
+  something the app could be told, and it did not say so. Underneath both was one question
+  nobody had answered — does an edited occurrence inherit its series' reminders, or take a
+  copy of them and go its own way? It takes a copy. Editing an occurrence now copies every
+  member's reminders onto it, everyone's and not only yours, since otherwise your partner
+  would lose theirs because you moved the lesson; from then on that occurrence is announced
+  by its own reminders and by nothing else. Removing one there removes it there and nowhere
+  else, and changing the series afterwards leaves the occasions somebody has already edited
+  alone — which is what a whole-series edit already did with everything else about them.
+  Calendars that already have edited occurrences are brought into line when the new version
+  first opens them: each of those occurrences is given the copy of the reminders it should
+  have had, so nobody stops being reminded about a lesson they moved months ago and nobody
+  is reminded twice. The one thing that change cannot preserve is a reminder somebody had
+  cleared on a single occurrence, because clearing it was the bug: it comes back on that
+  occurrence, and clearing it now works.
+  ([#42](https://github.com/d-weber/almanack/issues/42))
 - **Renaming one occurrence of a series made it impossible to find.** Rename next Tuesday's
   swimming lesson to "Swimming (later than usual)" and searching for those words returned
   nothing at all, while searching for "swimming" returned the series with its old title and
@@ -585,32 +598,19 @@ Notable changes to this project. The format follows
   than sent a second time. Reminders and digests were never affected, since those are planned
   from the calendar rather than from the log. Nothing changed in the database.
   ([#44](https://github.com/d-weber/almanack/issues/44))
-- **An edited occurrence could be announced twice, and the reminder you took off it went
-  off anyway.** Moving a single swimming lesson leaves a copy of the event behind, and the
-  app files the reminder list you were shown against that copy — while the planner went on
-  firing the series' reminders for that date as well. Two rows, two reminders as far as the
-  outbox could tell, two identical pushes half an hour before the lesson, one after the
-  other. The same disagreement ran the other way on screen: the editor lists the reminders
-  on the copy, so taking the reminder off one occurrence showed an empty list and left the
-  series' one to arrive that evening regardless. "No reminder, just for this one" was not
-  something the app could be told, and it did not say so. Underneath both was one question
-  nobody had answered — does an edited occurrence inherit its series' reminders, or take a
-  copy of them and go its own way? It takes a copy. Editing an occurrence now copies every
-  member's reminders onto it, everyone's and not only yours, since otherwise your partner
-  would lose theirs because you moved the lesson; from then on that occurrence is announced
-  by its own reminders and by nothing else. Removing one there removes it there and nowhere
-  else, and changing the series afterwards leaves the occasions somebody has already edited
-  alone — which is what a whole-series edit already did with everything else about them.
-  Calendars that already have edited occurrences are brought into line when the new version
-  first opens them: each of those occurrences is given the copy of the reminders it should
-  have had, so nobody stops being reminded about a lesson they moved months ago and nobody
-  is reminded twice. The one thing that change cannot preserve is a reminder somebody had
-  cleared on a single occurrence, because clearing it was the bug: it comes back on that
-  occurrence, and clearing it now works.
-  ([#42](https://github.com/d-weber/almanack/issues/42))
-- `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
-  under that name.
-
+- **Running the browser tests twice failed the second time, for reasons that pointed
+  nowhere near the cause.** Two of the smoke tests created an event and never removed it, so
+  a second `make e2e` against the same seeded database found three other tests failing — the
+  offline one, the cache-cap one and the timezone one — because an extra event changes what
+  is on the screen and how many API ranges get cached. Nothing said "there is a leftover
+  event"; it looked like a broken application. CI never saw it, since that job seeds a
+  database before every run, so the whole cost fell on whoever ran the suite locally, which
+  is the case the target exists for. Both tests now delete what they created, in a `finally`
+  so that a failing assertion still tidies up, and through the API rather than by driving the
+  delete flow in a test that is about something else. On top of that the suite now looks, once
+  per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
+  run `make seed` — instead of letting three unrelated-looking tests go red.
+  ([#52](https://github.com/d-weber/almanack/issues/52))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo
