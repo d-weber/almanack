@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -178,5 +180,46 @@ func TestWatchdogIsAbsentWithoutAUnit(t *testing.T) {
 	t.Setenv("WATCHDOG_USEC", "")
 	if watchdog(30*time.Second) != nil {
 		t.Error("a watchdog callback was returned outside a unit with WatchdogSec")
+	}
+}
+
+// TestWatchdogWarnsWithTooLittleRoom pins where the warning fires.
+//
+// Pinging once per tick makes the spacing one tick only if a tick is instant. It is not:
+// the ping is emitted after Tick returns, and a tick contending for the database has
+// been observed taking seconds. So the margin that matters is systemd's own halving of
+// WATCHDOG_USEC, and warning only when the tick reached the whole deadline let
+// ALMANACK_TICK=119s against the shipped WatchdogSec=120s pass in silence and then
+// restart-loop the first time a tick ran long.
+func TestWatchdogWarnsWithTooLittleRoom(t *testing.T) {
+	cases := []struct {
+		name string
+		tick time.Duration
+		warn bool
+	}{
+		{"the shipped defaults are quiet", 30 * time.Second, false},
+		{"right up to half is quiet", 60 * time.Second, false},
+		{"a second past half warns", 61 * time.Second, true},
+		{"the case that used to slip through", 119 * time.Second, true},
+		{"a tick as long as the deadline warns", 120 * time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			newSDRecorder(t)
+			t.Setenv("WATCHDOG_USEC", "120000000") // WatchdogSec=120s
+
+			var log bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			if watchdog(tc.tick) == nil {
+				t.Fatal("no watchdog callback although WATCHDOG_USEC is set")
+			}
+			if warned := strings.Contains(log.String(), "ALMANACK_TICK"); warned != tc.warn {
+				t.Errorf("tick %s under WatchdogSec=120s warned=%v, want %v; log was %q",
+					tc.tick, warned, tc.warn, log.String())
+			}
+		})
 	}
 }

@@ -193,9 +193,17 @@ func watchdog(tick time.Duration) func() {
 	// sdWatchdogInterval halves WATCHDOG_USEC by convention; the deadline systemd
 	// actually enforces is the whole of it.
 	deadline := 2 * interval
-	if tick >= deadline {
-		slog.Warn("ALMANACK_TICK is not shorter than WatchdogSec: systemd will restart this service between ticks",
-			"tick", tick, "watchdog_sec", deadline)
+	// The warning is at half the deadline, not at the whole of it. Pinging once per
+	// tick makes the spacing one tick only if ticks are instant; a tick that takes a
+	// while pushes the next ping out by however long it took, and ticks are not
+	// instant — holding an exclusive lock on the database stretched a one-second tick
+	// to five. So the margin worth having is the one systemd itself assumes, which is
+	// why sdWatchdogInterval halves WATCHDOG_USEC in the first place. Warning only at
+	// the full deadline let ALMANACK_TICK=119s against the shipped WatchdogSec=120s
+	// pass in silence and then restart-loop on the first slow tick.
+	if tick > interval {
+		slog.Warn("ALMANACK_TICK leaves too little room under WatchdogSec: a tick that runs long will miss the deadline and systemd will restart this service",
+			"tick", tick, "watchdog_sec", deadline, "keep_tick_under", interval)
 	}
 	slog.Info("systemd watchdog active", "ping_every", tick, "watchdog_sec", deadline)
 	return sdWatchdogPing

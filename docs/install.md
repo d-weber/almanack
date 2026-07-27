@@ -322,9 +322,11 @@ and the port is bound, so a restart that is still migrating is distinguishable f
 that has died, and `systemctl restart` does not report success on a service that is about
 to exit because something else already holds the port. `WatchdogSec` restarts a scheduler
 that has hung — which otherwise means reminders quietly stop while the process still
-answers HTTP. The ping goes out once per completed scheduler tick, so keep `WatchdogSec`
-well above `ALMANACK_TICK`; 120 s against the default 30 s tick is the ratio to preserve if
-you change either, and the log says so at startup if they are set too close.
+answers HTTP. The ping goes out once per completed scheduler tick, and a tick that runs
+long delays the ping with it, so keep `ALMANACK_TICK` **under half of `WatchdogSec`** —
+120 s against the default 30 s tick leaves four times the room it needs. The process warns
+at startup when the tick passes that half, which is earlier than the point where it breaks:
+a tick anywhere near the full `WatchdogSec` restart-loops the first time it runs slowly.
 `After=time-sync.target` keeps a box that booted with a dead clock battery from either
 flushing every pending reminder at once or marking them delivered without sending them.
 

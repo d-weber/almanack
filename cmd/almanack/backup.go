@@ -125,16 +125,29 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 	}
 	defer src.Close()
 
-	if _, err := src.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
+	// A snapshot is the whole calendar: every address, every password hash. VACUUM INTO
+	// creates the file itself, under the process umask — 0022 on a stock system, which
+	// leaves it world-readable — and the off-host sync preserves the mode it finds.
+	//
+	// The umask is what makes the file private; the chmod below only makes sure of it.
+	// Chmod alone was not enough, and looked as though it were: it runs after VACUUM
+	// INTO returns, so on a large database the partial snapshot sat world-readable for
+	// the whole of the copy, and a descriptor opened during that window keeps reading
+	// the finished file afterwards — revoking the mode does not revoke an open handle.
+	// The containing directory is 0750, but MkdirAll leaves an existing directory's
+	// permissions alone, so an operator's own `mkdir -p` is all it takes for that
+	// window to be reachable.
+	err = withRestrictiveUmask(func() error {
+		_, err := src.ExecContext(ctx, "VACUUM INTO ?", tmp)
+		return err
+	})
+	if err != nil {
 		_ = os.Remove(tmp)
 		return backupResult{}, fmt.Errorf("snapshot to %s: %w", tmp, err)
 	}
 
-	// A snapshot is the whole calendar: every address, every password hash. VACUUM INTO
-	// creates it under the process umask, which is 0022 on a stock system and leaves the
-	// file world-readable — and the off-host sync preserves the mode. Tightening it here
-	// rather than in the unit means it holds however the command was invoked, and doing
-	// it before the rename means the file is never readable under its final name.
+	// Belt to the umask's braces, and the only protection on a platform without one.
+	// Before the rename, so the file is never readable under its final name either.
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		_ = os.Remove(tmp)
 		return backupResult{}, fmt.Errorf("restrict permissions on %s: %w", tmp, err)

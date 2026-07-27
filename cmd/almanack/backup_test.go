@@ -299,6 +299,43 @@ func TestBackupSnapshotIsNotReadableByOthers(t *testing.T) {
 	}
 }
 
+// TestSnapshotIsPrivateFromTheMomentItExists covers the half a chmod cannot.
+//
+// VACUUM INTO creates the file and then fills it, so the mode it is created with is the
+// mode it holds for the whole of the copy — long enough to matter on a calendar with
+// photographs in it. Tightening it afterwards leaves that window open, and does nothing
+// at all about a descriptor another process opened during it. The test above looks at
+// the finished artifact, which is why it passed while the window was there.
+//
+// Watching for the partial file mid-write would be a race that passes by seeing nothing,
+// so this asserts the mechanism instead: inside withRestrictiveUmask, a file created the
+// way SQLite creates one — mode 0666 through the umask — comes out private. The
+// deliberately permissive umask around it stands in for the stock 0022, so this fails on
+// a machine that happens to run 0077 too.
+func TestSnapshotIsPrivateFromTheMomentItExists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snapshot.db")
+
+	err := withRestrictiveUmask(func() error {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o666)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
+	if err != nil {
+		t.Fatalf("create under the restrictive umask: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if leaked := info.Mode().Perm() &^ 0o700; leaked != 0 {
+		t.Errorf("a file created the way VACUUM INTO creates one was readable by group or others (%#o); "+
+			"it is world-readable for as long as the snapshot takes to write", leaked)
+	}
+}
+
 // Two runs in quick succession share a second, and therefore a name. Both must still
 // succeed and leave a verifiable snapshot behind; an hourly timer that fires twice, or a
 // nervous operator running the command by hand, must not produce a failure.
