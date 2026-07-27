@@ -282,6 +282,27 @@ Notable changes to this project. The format follows
   anyone had scrolled to and every search anyone had typed, and now keeps the sixty most
   recent and forgets the rest.
   ([#13](https://github.com/d-weber/almanack/issues/13))
+- **One hour a year, an appointment nobody could edit — and, on the same hour, an event that
+  moved itself when you corrected its spelling.** On the night the clocks go back, 02:00 to
+  02:59 runs twice in Paris, so "02:10" that morning is the name of two different moments an
+  hour apart. The editor read an event's times off the clock face and asked which moment they
+  were, and the answer was always the second one. An event that ran from 02:50 to 02:10 across
+  the changeover — forty ordinary minutes, one on each side of it — therefore came back as one
+  that ended before it began, and the editor refused to save it. Not the change you had just
+  made: everything, including opening it and pressing Save having touched nothing at all. That
+  appointment could never be edited again. The other half was quieter and worse. An event lying
+  wholly on the first pass of the hour, 02:10 to 02:50 before the clocks went back, saved
+  without a murmur and came out an hour later than it went in. The screen gives nothing away,
+  because 02:10 is what both moments are called and the form reads exactly as it did — what
+  moves is when the appointment actually happens, so the reminder arrives an hour late and a
+  member reading the calendar from another country sees it in the wrong place. Correcting a
+  typo was enough to do it. The editor now keeps the moments it loaded an event with for as
+  long as the date and time boxes still read what they read when it opened; type into one and
+  it resolves off the clock face as before, to the later of the two passes. Carrying the
+  event's duration through the editor instead would have changed what the editor means —
+  moving the start would drag the end along with it — and still would not have given back the
+  moment the event began at.
+  ([#15](https://github.com/d-weber/almanack/issues/15))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

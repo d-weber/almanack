@@ -81,6 +81,17 @@ timestamp.
 preference is display only and never reaches `internal/recur`; if it did, two members
 would see different occurrences of the same event.
 
+**The hour that happens twice is not a name for a moment.** When the clocks go back, a wall
+time inside the repeated hour describes two instants, and `wallToInstant()` in the browser
+answers the later one. That is the right default for a time somebody has just typed and the
+wrong one for a time merely read back off a form, so the event editor keeps the instants it
+loaded an event with for as long as the corresponding date and time fields are untouched.
+Opening an event in that hour and saving it therefore cannot move it, and an event lying
+across the changeover — whose wall clock runs backwards — is still editable. Type into a
+field and the wall clock wins again, later pass and all. The rule is asserted end to end in
+`e2e/dst-fallback.spec.js`, which is where browser date behaviour gets tested: the frontend
+takes no dependencies, so there is no JavaScript unit runner to put it in.
+
 ### The recurrence policy table
 
 These were decided deliberately, because every one of them has a plausible opposite:

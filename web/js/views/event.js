@@ -234,6 +234,7 @@ function blankForm(presetDate, calendarId) {
     reminders: [],
     occurrence_date: day,
     is_series: false,
+    pristine: null,
   };
 }
 
@@ -272,7 +273,33 @@ function formFromOccurrence(occ, rec, reminders) {
     })),
     occurrence_date: occ.occurrence_date,
     is_series: Boolean(rec),
+    // The instants this form was built from, beside the wall clock they produced. See
+    // instantFor(): once a year that wall clock does not name them back.
+    pristine: {
+      start: startWall ? { at: occ.starts_at, date: startWall.date, time: startWall.time } : null,
+      end: endWall ? { at: occ.ends_at, date: endWall.date, time: endWall.time } : null,
+    },
   };
+}
+
+/**
+ * The instant an endpoint stands for: the one it was loaded with, while the fields
+ * still read as they did.
+ *
+ * When the clocks go back, a wall time inside the repeated hour names two instants and
+ * `wallToInstant()` answers the later one, always. Re-deriving an endpoint nobody
+ * touched therefore moves it: a start on the first pass lands after an end on the
+ * second, so a save that changed nothing is refused, and an event lying wholly on the
+ * first pass moves an hour later with nothing on screen to say so. An endpoint that was
+ * actually edited has only its wall clock to go on and resolves as before, to the
+ * second pass.
+ */
+function instantFor(form, which) {
+  const was = form.pristine && form.pristine[which];
+  const date = form[`${which}_date`];
+  const time = form[`${which}_time`];
+  if (was && was.date === date && was.time === time) return was.at;
+  return wallToInstant(date, time);
 }
 
 export async function renderEventEditor({ id, date, query }) {
@@ -342,8 +369,8 @@ export async function renderEventEditor({ id, date, query }) {
     if (form.all_day) {
       if (form.end_date < form.start_date) return t('event.endBeforeStart');
     } else {
-      const s = wallToInstant(form.start_date, form.start_time);
-      const e = wallToInstant(form.end_date, form.end_time);
+      const s = instantFor(form, 'start');
+      const e = instantFor(form, 'end');
       if (e < s) return t('event.endBeforeStart');
     }
     return null;
@@ -363,8 +390,8 @@ export async function renderEventEditor({ id, date, query }) {
       out.start_date = form.start_date;
       out.end_date = form.end_date;
     } else {
-      out.starts_at = wallToInstant(form.start_date, form.start_time);
-      out.ends_at = wallToInstant(form.end_date, form.end_time);
+      out.starts_at = instantFor(form, 'start');
+      out.ends_at = instantFor(form, 'end');
     }
     return out;
   };
