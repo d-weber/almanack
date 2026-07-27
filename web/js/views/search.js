@@ -7,13 +7,23 @@ import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 import { api } from '../api.js';
 import { state, allMembers, calendarById, labelById, labelsOf } from '../state.js';
-import { formatDateShort } from '../dates.js';
+import { formatDateShort, instantDate } from '../dates.js';
 import { eventRowWithDate } from '../eventui.js';
 import { select, emptyState, errorBox, spinner } from '../ui.js';
 
 const DEBOUNCE_MS = 300;
 
-/** Search returns Events, not Occurrences: fill in what the row renderer needs. */
+/**
+ * Search returns Events, not Occurrences: fill in what the row renderer needs.
+ *
+ * The occurrence date is the one field with no answer to copy. Two of the three sources
+ * are handed over as dates already — the next occurrence the server worked out, and an
+ * all-day event's own start — and the third has to be derived, which happens only for a
+ * timed event whose series has ended and so has no next occurrence left to name. Derived
+ * means instantDate(): the day an instant falls on for the family, never the day its
+ * text begins with. The two are different days for the hour either side of midnight, and
+ * this date is what the row links to and what the detail screen asks the API for.
+ */
 function asOccurrence(ev, nextDate) {
   const cal = calendarById(ev.calendar_id);
   const label = labelById(ev.calendar_id, ev.label_id);
@@ -27,7 +37,7 @@ function asOccurrence(ev, nextDate) {
     ends_at: ev.ends_at,
     start_date: ev.start_date,
     end_date: ev.end_date,
-    occurrence_date: nextDate || ev.start_date || (ev.starts_at ? ev.starts_at.slice(0, 10) : ''),
+    occurrence_date: nextDate || ev.start_date || (ev.starts_at ? instantDate(ev.starts_at) : ''),
     location: ev.location,
     label_id: ev.label_id,
     label_color: label ? label.color : null,

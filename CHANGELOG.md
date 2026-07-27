@@ -662,6 +662,22 @@ Notable changes to this project. The format follows
   can be announced twice, an hour apart, which is the trade this application always makes in
   that direction. Nothing changed in the database.
   ([#57](https://github.com/d-weber/almanack/issues/57))
+- **Searching for a late-night activity that has finished, and tapping it, said "Not
+  found."** Search lists events rather than occurrences, so the results screen has to work
+  out which day each row should open on. For a series that has already ended there is no
+  next occurrence to open on, and for that one case it fell back to reading the day
+  straight off the stored text — which is in UTC. Anything between midnight and one in the
+  morning in France is stored under the previous day there, so the row linked to a date the
+  series never happened on, and the screen behind it reported the event as missing. It
+  needed a repeat that had run out and a start time in that one hour — a shift handover, a
+  babysitter booked past midnight, the last train — so most families would never have met
+  it, and the ones who did could not tell it from the event having been deleted. The
+  window is wider the further east the family is, and is the whole evening in Tokyo. The
+  day is now read in the family's own timezone, as everywhere else in the app. The expiry
+  date on an invite link was reading UTC the same way and showed the day before for a link
+  made late in the evening; that is corrected too. Nothing was ever stored wrongly, so no
+  calendar needs repairing — the events were always there, on the day they always were.
+  ([#64](https://github.com/d-weber/almanack/issues/64))
 
 ## [0.2.0] — 2026-07-27
 
