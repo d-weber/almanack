@@ -49,7 +49,25 @@ func SummarySourceRef(day domain.Date) string {
 	return fmt.Sprintf("summary:%s", day)
 }
 
-// ActivitySourceRef identifies a single activity notification.
-func ActivitySourceRef(activityID int64) string {
-	return fmt.Sprintf("activity:%d", activityID)
+// ActivitySourceRef identifies a single activity notification: the change it announces
+// rather than the row number that change happens to occupy.
+//
+// The two are not the same thing. activity_log.id is INTEGER PRIMARY KEY without
+// AUTOINCREMENT, so a deleted row's id is handed out again, and a reference built from
+// the number alone said the same thing about the row that took it as about the row it
+// replaced. Since the outbox keys on the reference and the instant, and instants are
+// stored to the second, a replacement made in the same second was taken for the
+// announcement already made and dropped. The name the store gives each change
+// (domain.Activity.ChangeUID) is the part a reused id cannot imitate.
+//
+// A change logged before the log gave out names keeps the old spelling. That is not a
+// concession: its notification is already in the outbox under it, the row itself is
+// what is re-read whenever this is asked again, and nothing logged since can produce
+// that spelling — so the old rows keep being recognised and the new ones cannot be
+// mistaken for them.
+func ActivitySourceRef(a domain.Activity) string {
+	if a.ChangeUID == "" {
+		return fmt.Sprintf("activity:%d", a.ID)
+	}
+	return fmt.Sprintf("activity:%d:%s", a.ID, a.ChangeUID)
 }

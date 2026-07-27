@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -619,12 +620,13 @@ func (s *Store) DeleteUnsentBySourcePrefix(ctx context.Context, prefix string) (
 // Activity log
 // ---------------------------------------------------------------------------
 
-const activityCols = `id, calendar_id, user_id, action, event_id, title, at`
+const activityCols = `id, calendar_id, user_id, action, event_id, title, at, change_uid`
 
 func scanActivity(row rowScanner) (domain.Activity, error) {
 	var a domain.Activity
 	var eventID sql.NullInt64
-	err := row.Scan(&a.ID, &a.CalendarID, &a.UserID, &a.Action, &eventID, &a.Title, instantCol{&a.At})
+	err := row.Scan(&a.ID, &a.CalendarID, &a.UserID, &a.Action, &eventID, &a.Title,
+		instantCol{&a.At}, &a.ChangeUID)
 	if err != nil {
 		return domain.Activity{}, mapErr(err)
 	}
@@ -632,16 +634,30 @@ func scanActivity(row rowScanner) (domain.Activity, error) {
 	return a, nil
 }
 
-// LogActivity appends to the change log. The store timestamps it; a.At is ignored.
+// LogActivity appends to the change log. The store timestamps the entry and names it;
+// a.At and a.ChangeUID are ignored.
+//
+// The name is minted here, beside the timestamp, because it has exactly one job — to
+// be unlike every other — and a caller is the wrong place to rely on for that. It is
+// what the notification outbox files the entry under, since id will not do: SQLite
+// reissues the ids of deleted rows, and an announcement filed under a reused one is
+// taken for the announcement already made under it (migration 0006).
+//
+// crypto/rand.Text is 130 bits and has no error to return; the second half is what
+// decides it. A few thousand changes a decade needs nothing like that width, whereas an
+// error here would have to travel up through the edit's transaction and fail the edit —
+// an appointment that could not be saved because the machine was briefly short of
+// randomness.
 //
 // Title is stored denormalized on purpose: "Claire deleted Dentiste" has to keep
 // reading that way after the event is gone, and activity_log.event_id is deliberately
 // not a foreign key for the same reason.
 func (s *Store) LogActivity(ctx context.Context, a domain.Activity) error {
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO activity_log (calendar_id, user_id, action, event_id, title, at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		a.CalendarID, a.UserID, string(a.Action), putInt64Ptr(a.EventID), a.Title, mustInstant(s.now()))
+		INSERT INTO activity_log (calendar_id, user_id, action, event_id, title, at, change_uid)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.CalendarID, a.UserID, string(a.Action), putInt64Ptr(a.EventID), a.Title,
+		mustInstant(s.now()), rand.Text())
 	if err != nil {
 		return fmt.Errorf("log activity %s on calendar %d: %w", a.Action, a.CalendarID, mapErr(err))
 	}

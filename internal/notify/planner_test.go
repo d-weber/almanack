@@ -747,7 +747,7 @@ func (e *env) failFanOutOf(a domain.Activity) {
 		CREATE TRIGGER test_fan_out_failure BEFORE INSERT ON notification_queue
 		WHEN NEW.source_ref = '%s'
 		BEGIN SELECT RAISE(ABORT, 'the database is briefly unavailable'); END`,
-		events.ActivitySourceRef(a.ID)))
+		events.ActivitySourceRef(a)))
 	if err != nil {
 		e.t.Fatalf("install the failure: %v", err)
 	}

@@ -693,6 +693,32 @@ Notable changes to this project. The format follows
   date, as before. Nothing was stored wrongly, so nothing needs repairing.
   ([#69](https://github.com/d-weber/almanack/issues/69))
 
+- **Tidying up and then adding something straight afterwards could tell nobody about it.**
+  A notification waiting to go out is filed under what it is for, and for a change to a
+  calendar that was the number of the entry in the change log — a number SQLite hands out
+  again as soon as the row holding it has been deleted. So delete the holiday calendar and
+  add something to the family one in the same second, and the entry recording what you added
+  takes the number of an entry that has gone; the outbox already held a notification filed
+  under that number, took the new one for the same announcement arriving twice, and dropped
+  it. Nothing looked wrong: the change is in the activity feed, everyone else's notifications
+  carried on as normal, and a notification that was never prepared leaves nothing to find.
+  This is the third thing that number was being asked to do that it cannot — the marker that
+  ran past the end of the log ([#44](https://github.com/d-weber/almanack/issues/44)) was the
+  second — and it is a separate fault from that one: finding the change again is no use if
+  the announcement of it is then discarded. Each change is now given a name of its own when
+  it is logged, and its notification is filed under that name, so a number handed out twice
+  no longer files two changes as one. In a household this needed the deletion and the change
+  after it to land inside the same second, which is narrow but is exactly what tidying up and
+  then adding the thing you tidied up for looks like. On a development server it was not
+  narrow at all: dev mode runs a clock that moves only when it is told to, so every entry in
+  the log shares one instant and every reused number was this fault — which matters most for
+  whoever reproduces a notification problem there and takes this for the bug they were
+  chasing. This one does change the database: an existing calendar gains a column holding
+  that name, and upgrades in place with nothing to do. Notifications already queued are left
+  exactly as they are and go out as they always would; the changes already logged keep the
+  name they never had, on purpose, so that the first pass after the upgrade recognises what
+  it has already announced instead of announcing it a second time.
+  ([#59](https://github.com/d-weber/almanack/issues/59))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

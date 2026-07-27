@@ -1134,3 +1134,29 @@ func TestSourceRefPrefixesNest(t *testing.T) {
 		t.Errorf("prefix %q wrongly matches a reference for event 12", other)
 	}
 }
+
+// TestActivitySourceRefNamesTheChangeNotTheID: the ids of deleted activity rows are
+// handed out again, so two different changes reach the outbox under one number. What
+// tells them apart there is the name the store gave each of them.
+func TestActivitySourceRefNamesTheChangeNotTheID(t *testing.T) {
+	gone := domain.Activity{ID: 42, CalendarID: 2, ChangeUID: "MZXW6YTBOI2A4TVOJUXA5DQR7Y"}
+	took := domain.Activity{ID: 42, CalendarID: 1, ChangeUID: "PB2XG3DPMFZGK5DFNZSGKZLHOR"}
+	if ActivitySourceRef(gone) == ActivitySourceRef(took) {
+		t.Errorf("a change that took the reused id %d is queued under %q, the same reference as the "+
+			"change it replaced: the outbox will read it as an announcement it has already made",
+			took.ID, ActivitySourceRef(took))
+	}
+
+	// A change logged before the log gave out names keeps the spelling its
+	// notification is already queued under, so a re-walk still recognises it.
+	old := domain.Activity{ID: 42, CalendarID: 2}
+	if got, want := ActivitySourceRef(old), "activity:42"; got != want {
+		t.Errorf("a change with no name of its own is queued under %q, want %q: the notification "+
+			"already in the outbox for it would be announced a second time", got, want)
+	}
+	if ref := ActivitySourceRef(took); len(ref) <= len(ActivitySourceRef(old)) ||
+		ref[:len(ActivitySourceRef(old))+1] != ActivitySourceRef(old)+":" {
+		t.Errorf("%q does not extend the old spelling %q: the layout is meant to nest",
+			ref, ActivitySourceRef(old))
+	}
+}

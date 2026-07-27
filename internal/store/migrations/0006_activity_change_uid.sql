@@ -1,0 +1,33 @@
+-- A name for each logged change that no later change can take.
+--
+-- A queued notification is identified by (user, kind, source_ref, due_at), and the
+-- reference for an activity notification was built out of activity_log.id alone. That
+-- column is INTEGER PRIMARY KEY without AUTOINCREMENT, so SQLite hands the id of a
+-- deleted row out again: delete the calendar holding the newest entries and the next
+-- change made takes the id one of them had. Land it in the same second and the outbox
+-- cannot tell the two apart — INSERT OR IGNORE reads the announcement of the new change
+-- as a repeat of the announcement already made under that id, drops it, and nobody is
+-- told. Under a clock that only moves when it is told to, which is what dev mode runs
+-- on, every entry in the log shares one instant and so every reuse is that collision.
+--
+-- The other way to fix it was to stop reusing the ids: AUTOINCREMENT. SQLite has no
+-- ALTER for that, so it would mean rebuilding the table — copying a family's whole
+-- history into a new one, dropping the original and renaming — which is the opposite of
+-- the expand-only rule migrations here follow (CONVENTIONS §8), and much the larger
+-- thing to do to a calendar that already exists. It would also fix nothing that the
+-- reference itself does not: the outbox would still be keyed on a number whose meaning
+-- comes from another table's DDL, and a row that has already been given a reused id
+-- would still carry it. A column of its own answers the question where the question is.
+--
+-- Adding a column with a constant default is expand-only: every statement the previous
+-- binary issues against activity_log names its columns, so it keeps running against this
+-- schema unchanged, and the default reads back as "this change has no name of its own" —
+-- which is the truth for every row written before this migration.
+--
+-- Those rows are deliberately not backfilled. Their notifications are already in the
+-- outbox under the old spelling, "activity:{id}", and leaving the column empty is what
+-- keeps that spelling theirs: a pass that re-walks the last day of the log recognises
+-- what it has already announced instead of announcing it a second time. Nothing logged
+-- from here on can collide with them, because every such row has a name and therefore a
+-- reference the old spelling cannot produce.
+ALTER TABLE activity_log ADD COLUMN change_uid TEXT NOT NULL DEFAULT '';

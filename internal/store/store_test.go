@@ -639,8 +639,9 @@ var releaseFixtures = []releaseFixture{
 	{
 		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
 		// Nothing: no migration between 0002 and head writes a row of this
-		// household's data. 0004 creates a table and 0005 rewrites a derived
-		// search column in place, neither of which changes a count. The swimming
+		// household's data. 0004 creates a table, 0005 rewrites a derived search
+		// column in place and 0006 adds a column with a default, none of which
+		// changes a count. The swimming
 		// lesson this family moved to the evening of 4 August keeps being announced
 		// because the occurrence goes on inheriting the series' reminder, not
 		// because anything was copied onto it — see checkV020Family.
@@ -1136,6 +1137,17 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if len(activity) > 0 && (activity[0].Action != domain.ActionMemberJoined || activity[0].Title != "Gran") {
 		t.Errorf("newest activity = %+v; want Gran joining", activity[0])
+	}
+	// 0006 gives each change a name and leaves the ones already logged without one,
+	// which is not an oversight: their notifications are queued under a reference
+	// built from the id alone, and naming them here would change that reference and
+	// have the next pass announce them a second time. The absence is load-bearing, so
+	// it is asserted rather than assumed.
+	for _, a := range activity {
+		if a.ChangeUID != "" {
+			t.Errorf("%q came out of the upgrade named %q; entries logged before 0006 keep no name",
+				a.Title, a.ChangeUID)
+		}
 	}
 
 	sess, sessUser, err := s.SessionByToken(ctx(),
@@ -3909,6 +3921,55 @@ func TestActivityByIDSeesAReusedID(t *testing.T) {
 	// caller did not ask about is not there.
 	if _, err := s.ActivityByID(ctx(), nil, reused.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ActivityByID with no calendars = %v; want ErrNotFound", err)
+	}
+
+	// And the two entries that shared the id are still told apart by the name each
+	// was logged with, which is the only thing here a reused id cannot imitate: the
+	// calendar can be reissued the same way and the instant is the same second.
+	if reused.ChangeUID == "" || cursor.ChangeUID == "" {
+		t.Fatalf("a logged change came back with no name: %q and %q", cursor.ChangeUID, reused.ChangeUID)
+	}
+	if reused.ChangeUID == cursor.ChangeUID {
+		t.Errorf("the entry that took the reused id is named %q, the same as the one it replaced: "+
+			"the outbox has nothing left to tell them apart by", reused.ChangeUID)
+	}
+}
+
+// TestEveryLoggedChangeIsNamedForItself: the names have exactly one job, so the test
+// is the obvious one. A family's decade of changes is a few thousand rows, and
+// crypto/rand.Text is 130 bits, so a repeat here means the name is not being generated
+// per row at all — a constant, or one read of the clock, both of which would look fine
+// in a single-row test.
+func TestEveryLoggedChangeIsNamedForItself(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+
+	clk.Set(baseTime) // stopped, as dev mode's is: the names cannot come from it
+	const changes = 200
+	for i := range changes {
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated,
+			Title: fmt.Sprintf("Sortie %d", i),
+			// Whatever a caller puts here is ignored: the store names the entry.
+			ChangeUID: "chosen-by-the-caller",
+		}); err != nil {
+			t.Fatalf("LogActivity %d: %v", i, err)
+		}
+	}
+	rows, err := s.ListActivity(ctx(), []int64{cal.ID}, changes, 0)
+	if err != nil || len(rows) != changes {
+		t.Fatalf("ListActivity = %d rows, %v; want %d", len(rows), err, changes)
+	}
+	seen := map[string]bool{}
+	for _, a := range rows {
+		if a.ChangeUID == "" || a.ChangeUID == "chosen-by-the-caller" {
+			t.Fatalf("%q is named %q; want a name the store minted", a.Title, a.ChangeUID)
+		}
+		if seen[a.ChangeUID] {
+			t.Fatalf("two changes are both named %q", a.ChangeUID)
+		}
+		seen[a.ChangeUID] = true
 	}
 }
 

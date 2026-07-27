@@ -572,6 +572,148 @@ func TestActivityCursorSurvivesAReusedIDOnAStoppedClock(t *testing.T) {
 	}
 }
 
+// The half of a reused id the test above deliberately steps around, by keeping the
+// doomed calendar to the actor alone: what happens when the outbox *does* hold a
+// notification under the id that is about to be handed out again.
+//
+// The planner finds the new change — that is the fix above — and then the outbox threw
+// it away. A queued activity notification was identified by (user, activity id,
+// instant), so the announcement of a change that took a reused id in the same second as
+// the row it replaced looked to INSERT OR IGNORE like the announcement already made,
+// and was dropped. Nothing looked wrong afterwards: the feed listed the change, the
+// notification about it had never existed, and the row absorbing it names an event in a
+// calendar that no longer exists.
+//
+// The clock stands still here for the same reason as above — dev mode runs on a stopped
+// one, where every entry shares an instant and reuse is therefore always a collision.
+// In a household it needs the tidying-up and the change that follows it to fall inside
+// the one second the last announced change was made in.
+func TestAChangeTakingAReusedActivityIDIsStillAnnounced(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	trip := e.calendar("Vacances", actor.ID)
+	e.join(family.ID, watcher.ID)
+	// This is the difference: the watcher is in the calendar that is about to be
+	// deleted, so its change is announced to them and that notification is still in
+	// the outbox under the id the next change will take.
+	e.join(trip.ID, watcher.ID)
+	e.noDigests()
+
+	newestIn := func(calendarID int64) domain.Activity {
+		t.Helper()
+		rows, err := e.st.ListActivity(ctx, []int64{calendarID}, 1, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("read the newest change in calendar %d: %v", calendarID, err)
+		}
+		return rows[0]
+	}
+
+	e.plan() // the first pass only takes the high-water mark
+
+	e.timedEvent(trip, actor.ID, "Ferry", 2027, time.June, 3, 9, 0, time.Hour, nil)
+	ferry := newestIn(trip.ID)
+	e.plan()
+	if n := len(e.queueOfKind(domain.KindActivity)); n != 1 {
+		t.Fatalf("the change in the calendar about to be deleted produced %d notifications, want 1", n)
+	}
+
+	// Deleting the calendar takes its log entries with it and leaves the notification
+	// where it is: only reminders are pruned with a calendar, because the outbox is
+	// also the record of what was sent.
+	if err := e.st.DeleteCalendar(ctx, trip.ID); err != nil {
+		t.Fatalf("delete the calendar holding the newest change: %v", err)
+	}
+	e.timedEvent(family, actor.ID, "Piscine", 2027, time.June, 4, 17, 0, time.Hour, nil)
+
+	piscine := newestIn(family.ID)
+	if piscine.ID != ferry.ID {
+		t.Fatalf("the replacement change took id %d and the row it replaced had %d: this SQLite is "+
+			"not reusing the ids of deleted rows, so this test no longer reproduces the fault",
+			piscine.ID, ferry.ID)
+	}
+	if !piscine.At.Equal(ferry.At) {
+		t.Fatalf("the replacement change is at %s and the row it replaced at %s: the clock has moved, "+
+			"and this test no longer reproduces the fault", piscine.At, ferry.At)
+	}
+
+	e.plan()
+
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindActivity) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	if byTitle["Piscine"] != 1 {
+		t.Errorf("the change that took the reused id %d is queued %d times, want 1: it was made in the "+
+			"same second as the row it replaced, whose notification is still in the outbox",
+			piscine.ID, byTitle["Piscine"])
+	}
+	// The notification about the deleted calendar's change stays exactly as it is:
+	// it was announced once and it is not announced again.
+	if byTitle["Ferry"] != 1 {
+		t.Errorf("the change announced before the deletion is queued %d times, want 1", byTitle["Ferry"])
+	}
+}
+
+// The other side of naming the changes: what becomes of the notifications a database
+// already holds, filed under the spelling that carried the id alone.
+//
+// They are left exactly where they are, and the rows they announce are deliberately not
+// given names by the migration, so that the two go on agreeing. The alternative — a
+// migration that rewrites either half — would have to decide what an old reference's id
+// means today, and after a deletion it may already mean a different change; getting
+// that wrong files a stale announcement against a change nobody has been told about
+// yet, which is the fault being fixed here, reintroduced by the fix. So the old rows
+// keep the old spelling for as long as they exist, and the repair pass that walks the
+// last day of the log recognises its own work rather than sending it again.
+func TestAChangeLoggedBeforeTheUpgradeIsNotAnnouncedTwice(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	e.join(family.ID, watcher.ID)
+	e.noDigests()
+
+	e.plan() // the first pass only takes the high-water mark
+	e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+
+	// What the previous release left in the log: entries with no name of their own.
+	// This reaches past the store API through Store.DB, which exists for exactly the
+	// states no supported call can produce.
+	if _, err := e.st.DB().ExecContext(ctx, `UPDATE activity_log SET change_uid = ''`); err != nil {
+		t.Fatalf("take the names off the changes already logged: %v", err)
+	}
+	e.plan()
+
+	rows := e.queueOfKind(domain.KindActivity)
+	if len(rows) != 1 {
+		t.Fatalf("the change produced %d notifications, want 1", len(rows))
+	}
+	if want := fmt.Sprintf("activity:%d", e.payloadOf(rows[0]).ActivityID); rows[0].SourceRef != want {
+		t.Fatalf("it is queued as %q, want the old spelling %q: a change from before the upgrade "+
+			"must keep the reference its notification is already filed under", rows[0].SourceRef, want)
+	}
+
+	// A database from that release has a cursor with nothing to vouch for it, so the
+	// first pass after the upgrade walks the last day of the log again.
+	for _, key := range []string{MetaActivityCursorAt, MetaActivityCursorCalendar} {
+		if err := e.st.SetMeta(ctx, key, ""); err != nil {
+			t.Fatalf("clear %s: %v", key, err)
+		}
+	}
+	e.plan()
+
+	if n := len(e.queueOfKind(domain.KindActivity)); n != 1 {
+		t.Errorf("the re-walk left %d notifications about one change, want 1: the family is told "+
+			"a second time about something it has already been told about", n)
+	}
+}
+
 // A database written by the release before this one has a cursor but no instant beside
 // it, so nothing can vouch for the number — least of all the possibility that it is
 // already stranded, which is the state this bug leaves behind and the state an upgrade

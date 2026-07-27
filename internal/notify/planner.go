@@ -806,7 +806,7 @@ func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs
 	if a.EventID != nil {
 		p.EventID = *a.EventID
 	}
-	ref := events.ActivitySourceRef(a.ID)
+	ref := events.ActivitySourceRef(a)
 
 	var errs []error
 	for _, m := range members {

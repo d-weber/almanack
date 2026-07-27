@@ -273,6 +273,15 @@ type Activity struct {
 	EventID    *int64         `json:"event_id,omitempty"`
 	Title      string         `json:"title"` // denormalized: survives the event's deletion
 	At         time.Time      `json:"at"`
+
+	// ChangeUID names this change and no other, for as long as the row exists. ID
+	// does not: SQLite reissues the ids of deleted rows, and the notification outbox
+	// — which recognises what it has already announced by the reference it filed it
+	// under — then cannot tell a change that took a reused id from the one it
+	// replaced. The store assigns it; a change logged before the column existed
+	// carries none. It answers a question the outbox asks and nobody else does, so it
+	// is not part of the API the browser sees.
+	ChangeUID string `json:"-"`
 }
 
 // Session is a logged-in browser. Tokens are stored hashed; the plaintext exists only
