@@ -112,6 +112,20 @@ Notable changes to this project. The format follows
   was. The activity entry is part of it too: an edit can no longer be saved while the
   notification that tells everyone about it is lost.
   ([#3](https://github.com/d-weber/almanack/issues/3))
+- **Deleting a calendar, and removing somebody from one, left rows behind.** Deleting a
+  calendar took its events with it but not the repeat patterns behind them, nor the
+  reminders hanging off those, nor — the half anyone would notice — the notifications
+  already prepared for the next two days: a reminder for a swimming lesson could still
+  arrive from a calendar that had been deleted the day before. Removing a member, or
+  leaving a calendar, deleted the membership and nothing else, so an ex-member stayed
+  listed on other people's events, where the app itself refuses to put someone who is not
+  a member, and their reminders sat dormant until somebody invited them back, at which
+  point they started firing again. Both are now a single transaction that clears out what
+  the calendar or the membership was holding up, and both stay scoped: the same person's
+  events and reminders in the calendars they are still in are untouched, and notifications
+  that have already gone out are left alone, because the outbox is also the record of what
+  was sent. Neither needed a change to the database.
+  ([#4](https://github.com/d-weber/almanack/issues/4))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

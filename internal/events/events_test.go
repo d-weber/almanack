@@ -718,6 +718,45 @@ func TestEditingPrunesQueuedNotifications(t *testing.T) {
 	}
 }
 
+// TestDeletingACalendarPrunesTheOutbox holds two packages together. The store deletes a
+// deleted calendar's undelivered notifications by matching source_ref against the ids of
+// its events, which means it has to spell out the layout ReminderSourceRef writes — and
+// it cannot call it, because internal/events depends on the store rather than the other
+// way round. This is the test that fails if the two ever disagree.
+func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	day := domain.MustParseDate("2026-04-10")
+	ev := f.timed(t, "Dentiste", "2026-04-10", 16, 30, nil)
+
+	queued := domain.QueuedNotification{
+		UserID: f.maman, Kind: domain.KindReminder,
+		SourceRef: ReminderSourceRef(ev.ID, day, 1),
+		Payload:   `{}`, DueAt: f.at("2026-04-10", 15, 30),
+	}
+	if err := f.st.EnqueueNotification(ctx, queued); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// A reference for an event in another calendar, to prove the prune is scoped by
+	// event id rather than merely emptying the outbox.
+	elsewhere := queued
+	elsewhere.SourceRef = ReminderSourceRef(ev.ID+1000, day, 1)
+	if err := f.st.EnqueueNotification(ctx, elsewhere); err != nil {
+		t.Fatalf("enqueue elsewhere: %v", err)
+	}
+
+	if err := f.st.DeleteCalendar(ctx, f.cal); err != nil {
+		t.Fatalf("delete calendar: %v", err)
+	}
+	pending, err := f.st.ListUnsentBefore(ctx, f.at("2026-04-11", 0, 0))
+	if err != nil {
+		t.Fatalf("list unsent: %v", err)
+	}
+	if len(pending) != 1 || pending[0].SourceRef != elsewhere.SourceRef {
+		t.Fatalf("pending after the calendar went = %+v; want only %q", pending, elsewhere.SourceRef)
+	}
+}
+
 func TestSourceRefPrefixesNest(t *testing.T) {
 	d := domain.MustParseDate("2026-08-04")
 	ref := ReminderSourceRef(12, d, 7)
