@@ -1717,8 +1717,10 @@ func TestEventsInRange(t *testing.T) {
 		t.Fatalf("SetOverride (cancel): %v", err)
 	}
 
-	// A series that ended before the window, and one that starts after it.
-	endedUntil := domain.MustParseDate("2026-07-15")
+	// A series that ended before the window, and one that starts after it. The ended
+	// one stops well before it rather than just before it: a series is read back for
+	// seriesTailDays afterwards in case its last occurrence reaches into the window.
+	endedUntil := domain.MustParseDate("2026-06-15")
 	if _, err := s.CreateEvent(ctx(), domain.Event{
 		CalendarID: cal.ID, Title: "Fini", StartsAt: timedStart, EndsAt: timedStart.Add(time.Hour),
 		LabelID: label.ID, CreatedBy: u.ID,
@@ -1823,6 +1825,116 @@ func TestEventsInRange(t *testing.T) {
 	}
 	if _, err := s.EventsInRange(ctx(), []int64{cal.ID}, to, from); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("inverted window = %v; want domain.ErrInvalid", err)
+	}
+}
+
+// TestEventsInRangeKeepsSeriesWhoseOccurrenceMovedOutside is the store half of the
+// disappearing occurrence. An override can put an occurrence outside the series' own
+// dtstart..until envelope, and the copy carrying it is deliberately kept out of the
+// singles query — so if this query drops the series, nothing in the application ever
+// sees that occurrence again.
+func TestEventsInRangeKeepsSeriesWhoseOccurrenceMovedOutside(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	// A series and one moved occurrence, described by the dates the override uses.
+	mk := func(title string, rec domain.Recurrence, occDate, movedTo string) int64 {
+		t.Helper()
+		start := rec.DTStart.At(17, 30, s.loc).UTC()
+		series, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: start, EndsAt: start.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, &rec)
+		if err != nil {
+			t.Fatalf("create series %q: %v", title, err)
+		}
+		moved := domain.MustParseDate(movedTo).At(17, 30, s.loc).UTC()
+		copyEv, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title + " (déplacé)", StartsAt: moved, EndsAt: moved.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("create override copy for %q: %v", title, err)
+		}
+		if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate(occDate), &copyEv.ID); err != nil {
+			t.Fatalf("SetOverride for %q: %v", title, err)
+		}
+		return *series.RecurrenceID
+	}
+
+	endOfTerm := domain.MustParseDate("2026-06-30")
+	// Ended in June, last occurrence moved forward into July.
+	after := mk("Piscine", domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		DTStart: domain.MustParseDate("2026-06-02"), Until: &endOfTerm,
+	}, "2026-06-30", "2026-07-07")
+	// Starts in August, first occurrence moved back into July.
+	before := mk("Danse", domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		DTStart: domain.MustParseDate("2026-08-04"),
+	}, "2026-08-04", "2026-07-28")
+
+	res, err := s.EventsInRange(ctx(), []int64{cal.ID},
+		domain.MustParseDate("2026-07-01"), domain.MustParseDate("2026-07-31"))
+	if err != nil {
+		t.Fatalf("EventsInRange: %v", err)
+	}
+	got := map[int64]SeriesRow{}
+	for _, row := range res.Series {
+		got[row.Recurrence.ID] = row
+	}
+	if _, ok := got[after]; !ok {
+		t.Error("the series whose last occurrence moved past its until is missing")
+	}
+	if _, ok := got[before]; !ok {
+		t.Error("the series whose first occurrence moved before its dtstart is missing")
+	}
+	for id, row := range got {
+		if len(row.OverrideEvents) != 1 {
+			t.Errorf("series %d came back without the copy that carries the moved occurrence: %v", id, row.OverrideEvents)
+		}
+	}
+	// The copies stay out of Singles: they belong to their series, and drawing them
+	// twice is what the NOT EXISTS there prevents.
+	if len(res.Singles) != 0 {
+		t.Errorf("Singles = %+v; the override copies must arrive inside their series", res.Singles)
+	}
+}
+
+// TestEventsInRangeIgnoresCancellationsOutsideTheWindow is the other side of that
+// widening. A cancellation removes an occurrence, so it can never make one appear in a
+// window the series does not reach — and a series that ended long ago must not be read
+// back on every month view for the rest of the family's life because someone once
+// skipped a lesson.
+func TestEventsInRangeIgnoresCancellationsOutsideTheWindow(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	start := domain.MustParseDate("2026-01-06").At(17, 30, s.loc).UTC()
+	until := domain.MustParseDate("2026-01-27")
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Piscine", StartsAt: start, EndsAt: start.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+		ByWeekday: []time.Weekday{time.Tuesday}, DTStart: domain.MustParseDate("2026-01-06"), Until: &until})
+	if err != nil {
+		t.Fatalf("create series: %v", err)
+	}
+	if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate("2026-01-20"), nil); err != nil {
+		t.Fatalf("SetOverride (cancel): %v", err)
+	}
+
+	res, err := s.EventsInRange(ctx(), []int64{cal.ID},
+		domain.MustParseDate("2026-07-01"), domain.MustParseDate("2026-07-31"))
+	if err != nil {
+		t.Fatalf("EventsInRange: %v", err)
+	}
+	if len(res.Series) != 0 {
+		t.Errorf("Series = %+v; a series that ended in January with a cancellation in it has nothing to show in July", res.Series)
 	}
 }
 

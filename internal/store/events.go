@@ -554,6 +554,23 @@ type SeriesRow struct {
 	OverrideEvents map[int64]domain.Event
 }
 
+// seriesTailDays is how far before the window a series may have ended and still be
+// read back.
+//
+// An occurrence that starts before the window can still reach into it — a three-day
+// trip beginning on the last day of the series is the ordinary case — and how far it
+// reaches depends on the event, not on the pattern. Working that out in SQL would mean
+// doing family-tz day arithmetic over two different column pairs, which is the
+// off-by-one-day bug this schema exists to prevent. So the query is deliberately a
+// coarse filter: too wide costs a handful of rows that expansion then discards, too
+// narrow loses events, and only one of those is a bug. Expansion in internal/events is
+// the exact test, and it already reaches back by the event's own span.
+//
+// A month of tail covers every occurrence a family plausibly creates. One longer than
+// that, belonging to a series that has also ended, is still missed; that is a known
+// limit rather than an oversight.
+const seriesTailDays = 31
+
 // EventsInRange returns everything visible in the window [from, to] (both inclusive,
 // interpreted as family-tz dates) across the given calendars.
 //
@@ -562,9 +579,10 @@ type SeriesRow struct {
 // timezone — which is why the store holds a *time.Location: doing this comparison in
 // UTC is the off-by-one-day bug this schema exists to prevent.
 //
-// A series is included when it could possibly produce an occurrence in the window:
-// dtstart <= to and (until is null or until >= from). Whether it actually does is
-// internal/recur's business, and it has everything it needs to decide.
+// A series is included when it could plausibly produce an occurrence in the window:
+// dtstart <= to and it had not ended more than seriesTailDays before from, or it has an
+// override, which can put an occurrence anywhere at all. Whether it actually produces
+// one is internal/recur's business, and it has everything it needs to decide.
 //
 // Participants are loaded for every event returned, templates and override copies
 // included.
@@ -609,14 +627,23 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	}
 
 	// Series templates joined to their pattern.
-	seriesArgs := append(append([]any{}, calArgs...), to, from)
+	//
+	// The EXISTS is not an optimisation: an override can move an occurrence outside the
+	// series' own dtstart..until envelope, in either direction, and the copy carrying it
+	// is kept out of the singles query above by design. A series dropped here therefore
+	// takes that occurrence with it — the last lesson of term, dragged into the
+	// following month, simply stops existing. Only a copy can do that; a cancellation
+	// removes an occurrence and can never make one appear, so it does not widen
+	// anything.
+	seriesArgs := append(append([]any{}, calArgs...), to, from.AddDays(-seriesTailDays))
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT `+eventColsE+`, `+prefixedRecurrenceCols+`
 		  FROM events e
 		  JOIN recurrences r ON r.id = e.recurrence_id
 		 WHERE e.calendar_id IN (`+calIn+`)
-		   AND r.dtstart <= ?
-		   AND (r.until IS NULL OR r.until >= ?)
+		   AND ( (r.dtstart <= ? AND (r.until IS NULL OR r.until >= ?))
+		      OR EXISTS (SELECT 1 FROM event_overrides o
+		                  WHERE o.recurrence_id = r.id AND o.override_event_id IS NOT NULL) )
 		 ORDER BY r.dtstart, e.id`, seriesArgs...)
 	if err != nil {
 		return res, fmt.Errorf("events in range: %w", mapErr(err))

@@ -86,6 +86,19 @@ Notable changes to this project. The format follows
   from the month view, silent, and repeatable. An edited occurrence is now resolved back
   to the date in the series it stands for before anything is changed.
   ([#1](https://github.com/d-weber/almanack/issues/1))
+- **An occurrence you moved out of its series' own dates vanished.** Drag the last lesson
+  of term into the following month and it was simply gone: not on the new date, not on the
+  old one, not anywhere. A series was read back only for the window between its first
+  occurrence and its last, and an edited occurrence lives outside that window as soon as
+  you move it past either end — the copy holding it is deliberately hidden as an event of
+  its own, because it belongs to its series, and the series was no longer being asked.
+  Both ends were affected, so bringing the first occurrence of next term forward into this
+  month lost it the same way, and no reminder was ever queued for it either — the planner
+  reads the calendar through the same window. A series with an exception is now read
+  whatever its own dates say. The related case with no edit involved is fixed too: a recurring three-day
+  trip that started on the series' last day and ran into the next month disappeared from
+  that month, where the same trip as a one-off event would have been shown.
+  ([#2](https://github.com/d-weber/almanack/issues/2))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

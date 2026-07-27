@@ -132,6 +132,11 @@ The main read. `from`/`to` are inclusive family-tz dates; `calendar_ids` is opti
 `occurrence_date` identifies the instance within its series and is required by every
 scoped edit. For non-recurring events it is the start date.
 
+It may fall outside the window you asked for. An edited occurrence keeps the date it has
+in the series it belongs to, and what decides whether it is returned is where it was
+*moved to* — so a request for July can legitimately answer with an occurrence dated 30
+June. Place occurrences on the calendar by `starts_at`/`start_date`.
+
 An edited occurrence is stored as a standalone copy of the event, and `event_id` is that
 copy's id — `series_event_id` is the series it belongs to. Sending the copy's id back to
 any of the routes below addresses **that occurrence**: the server resolves it to its
