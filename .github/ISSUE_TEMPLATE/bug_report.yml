@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         For anything security-related, please use
-        [the security policy](https://github.com/../../security/policy) instead of a public issue.
+        [the security policy](https://github.com/d-weber/almanack/security/policy) instead of a public issue.
 
   - type: textarea
     id: what

@@ -90,6 +90,7 @@ into whatever you already use.
 | [docs/development.md](docs/development.md) | Running and testing locally, including notifications with no push service and no mail server |
 | [docs/architecture.md](docs/architecture.md) | How it is built and why, the data model, and the rules that keep dates correct |
 | [docs/api.md](docs/api.md) | The HTTP API, normative for both the server and the browser |
+| [docs/known-issues.md](docs/known-issues.md) | What is broken or missing, reproduced and written down — the list to help from |
 | [docs/deployment.md](docs/deployment.md) | What an operator must provide |
 | [docs/migrating-from-timetree.md](docs/migrating-from-timetree.md) | Getting your data out of TimeTree, which has no export |
 | [CONVENTIONS.md](CONVENTIONS.md) | Binding rules for code in this repo |

@@ -95,4 +95,5 @@ First working version: in use by one household, not yet by anyone else.
 - Never upgraded in place: expand/contract migrations are implemented and tested, but
   no release has yet followed another on a live database.
 
-[Unreleased]: https://keepachangelog.com/
+[Unreleased]: https://github.com/d-weber/almanack/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/d-weber/almanack/releases/tag/v0.1.0
