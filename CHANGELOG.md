@@ -6,6 +6,12 @@ Notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Released binaries.** Pushing a `v*` tag now builds and publishes linux amd64, arm64
+  and armv7, plus macOS amd64 and arm64, with a `SHA256SUMS` file and the version's
+  changelog section as the release notes. Running it is no longer the only way to get it.
+
 ### Changed
 
 - **The demo seed is in English.** `make seed` now creates Mum, Dad, Leo and Gran with

@@ -1,0 +1,119 @@
+name: Release
+
+# Pushing a v* tag publishes a release. Everything else is a rehearsal: run this from
+# the Actions tab with no tag and it does the whole job — builds every platform,
+# writes the checksums, renders the notes, proves it is allowed to publish — and then
+# throws the result away instead of creating anything permanent.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# The default token for this repository is read-only. A tag push needs to create a
+# release, which is a write to contents; nothing here needs any other scope.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `make build-all` stamps the binary from `git describe`, which needs tags
+          # and history. A shallow clone would produce a version of "dev".
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          # Same floor as ci.yml and go.mod. A release must not be the thing that
+          # silently moves the toolchain.
+          go-version: '1.25'
+          check-latest: true
+
+      # A tag is a promise. Re-run the suite against the exact commit being published
+      # rather than trusting that CI was green on the branch it came from.
+      - name: Test
+        run: go test ./...
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build every platform
+        run: make build-all VERSION='${{ steps.version.outputs.version }}'
+
+      # Cross-compiled binaries are easy to get subtly wrong — an armv7 build that is
+      # really arm64 runs nowhere and looks fine in a file listing. Assert the shape of
+      # each one, and that the version really was stamped in.
+      - name: Check the binaries are what they claim
+        run: |
+          set -eu
+          v='${{ steps.version.outputs.version }}'
+          check() {
+            f="dist/almanack-$v-$1"
+            [ -f "$f" ] || { echo "missing: $f"; exit 1; }
+            file -b "$f" | grep -q "$2" || { echo "$f: expected $2, got: $(file -b "$f")"; exit 1; }
+            echo "ok  $f"
+          }
+          check linux-amd64  'ELF 64-bit.*x86-64.*statically linked'
+          check linux-arm64  'ELF 64-bit.*ARM aarch64.*statically linked'
+          check linux-armv7  'ELF 32-bit.*ARM.*statically linked'
+          check darwin-amd64 'Mach-O 64-bit x86_64'
+          check darwin-arm64 'Mach-O 64-bit arm64'
+          (cd dist && sha256sum -c SHA256SUMS)
+          # The runner is linux/amd64, so this one can actually be asked its version.
+          got=$(./dist/almanack-"$v"-linux-amd64 version)
+          [ "$got" = "almanack $v" ] || { echo "version reports '$got', want 'almanack $v'"; exit 1; }
+          echo "ok  version stamp: $got"
+
+      # Fails when the tag has no changelog section, before anything is published.
+      - name: Render the release notes
+        run: |
+          python3 .github/scripts/release_notes.py '${{ steps.version.outputs.version }}' \
+            > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ steps.version.outputs.version }}' \
+            --title '${{ steps.version.outputs.version }}' \
+            --notes-file /tmp/notes.md \
+            --verify-tag \
+            dist/*
+
+      # The rehearsal path. Creating and deleting a draft is the only way to find out
+      # whether this workflow may publish without publishing: a draft is invisible to
+      # anyone without write access and creates no tag.
+      - name: Rehearse publishing
+        if: steps.version.outputs.publish != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          probe="rehearsal-${{ github.run_id }}"
+          gh release create "$probe" --draft --title "$probe" --notes-file /tmp/notes.md dist/*
+          echo "draft created — the token can publish"
+          # No --cleanup-tag: a draft has no tag to clean up. GitHub only creates the
+          # git tag when a release is published, and this one never will be.
+          gh release delete "$probe" --yes
+          echo "draft deleted — nothing was left behind"
+
+      - name: Keep the binaries on the run
+        if: steps.version.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: almanack-${{ steps.version.outputs.version }}
+          path: dist/
+          retention-days: 7

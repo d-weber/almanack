@@ -17,6 +17,19 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 DEVDATA := devdata
 
+# The platforms a release ships, as GOOS/name. Linux is where this actually runs — a
+# VPS, a mini PC, a Raspberry Pi — and armv7 is there because a Pi 3 or a Zero 2 W on
+# 32-bit Raspberry Pi OS is exactly the cheap box in a cupboard this is for. macOS is
+# for trying it on a laptop before committing a box to it.
+#
+# CGO is off and modernc.org/sqlite is pure Go, so every one of these cross-compiles
+# from any of them: `make build-all` produces the whole set on a developer's machine
+# and in CI alike, and the release workflow runs this exact target.
+RELEASE_TARGETS := linux/amd64 linux/arm64 linux/armv7 darwin/amd64 darwin/arm64
+
+# sha256sum on Linux, shasum on macOS. Same output format either way.
+SHASUM := $(shell command -v sha256sum 2>/dev/null || echo "shasum -a 256")
+
 # Local development environment. Dev mode gives you: the /dev endpoints (mail sink,
 # notification inbox, time travel), cookies without Secure so http://localhost works,
 # and emails written to files instead of sent.
@@ -78,10 +91,18 @@ build: ## Build the static binary for this machine
 	@echo "built ./almanack ($(VERSION))"
 
 .PHONY: build-all
-build-all: ## Build release binaries for amd64 and arm64 (hardware changes over 20 years)
-	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/almanack-$(VERSION)-linux-amd64 ./cmd/almanack
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/almanack-$(VERSION)-linux-arm64 ./cmd/almanack
+build-all: ## Build every release binary, plus SHA256SUMS, into dist/
+	@rm -rf dist && mkdir -p dist
+	@for t in $(RELEASE_TARGETS); do \
+		os=$${t%/*}; name=$${t#*/}; arch=$$name; goarm=; \
+		if [ "$$name" = "armv7" ]; then arch=arm; goarm=7; fi; \
+		out=dist/almanack-$(VERSION)-$$os-$$name; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch GOARM=$$goarm \
+			$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $$out ./cmd/almanack || exit 1; \
+		echo "built $$out"; \
+	done
+	@cd dist && $(SHASUM) almanack-* > SHA256SUMS
+	@echo
 	@ls -lh dist/
 
 .PHONY: dev

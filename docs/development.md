@@ -107,3 +107,32 @@ devdata/backups/         snapshots from `make backup`
 
 Everything under `devdata/` is disposable and git-ignored. `make clean` removes it along with
 build output.
+
+## Cutting a release
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. There is
+nothing to run by hand and no artefact to upload yourself.
+
+```sh
+# 1. Move the Unreleased section of CHANGELOG.md under a new "## [0.2.0] — YYYY-MM-DD"
+#    heading, and add the two link definitions at the foot of the file.
+# 2. Commit that, then:
+git tag -a v0.2.0 -m "Almanack 0.2.0"
+git push origin main --follow-tags
+```
+
+The workflow re-runs the test suite against the tagged commit, cross-compiles the five
+binaries in `RELEASE_TARGETS` (see the Makefile), checks each one really is the
+architecture its name claims and that the version was stamped into it, verifies the
+checksums, and publishes a release whose notes are that version's changelog section.
+
+**The changelog is the release notes.** `.github/scripts/release_notes.py` extracts them,
+and exits non-zero when the tag has no section — so tagging a version you forgot to write
+down fails before anything is published, rather than shipping an empty release page.
+
+To rehearse without releasing, run the workflow from the Actions tab with no tag. It does
+every step, proves it is permitted to publish by creating and immediately deleting a draft,
+and leaves the binaries on the run as an artefact instead of creating a release.
+
+`make build-all` produces exactly the same set of binaries locally, which is the quickest
+way to check that a change has not broken a platform nobody here runs.
