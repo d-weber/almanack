@@ -228,12 +228,45 @@ function modalRoot() {
   return root;
 }
 
+// Everything inside a panel that the keyboard can reach. Deliberately a superset of
+// what the app builds today, because openOverlay is handed arbitrary content.
+const FOCUSABLE = [
+  'a[href]', 'area[href]', 'button', 'input', 'select', 'textarea',
+  '[tabindex]', '[contenteditable="true"]',
+].join(', ');
+
+/**
+ * The panel's focusable elements, in tab order.
+ *
+ * Asked again on every Tab rather than once when the overlay opens: panels repaint
+ * themselves — the colour grid redraws its swatches on every pick, the member pills on
+ * every toggle — so a list captured at open time would send the keyboard to buttons
+ * that no longer exist. A hidden or disabled control is not reachable and must not be
+ * counted, or Tab appears to do nothing at the ends of the cycle.
+ */
+function focusableIn(panel) {
+  return Array.from(panel.querySelectorAll(FOCUSABLE)).filter((el) => (
+    !el.disabled
+    && el.getAttribute('tabindex') !== '-1'
+    && el.getAttribute('aria-hidden') !== 'true'
+    && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0)
+  ));
+}
+
 /**
  * Bottom sheet / centred dialog. Returns a close() function.
  * Escape and a backdrop tap both dismiss unless `dismissible` is false.
+ *
+ * Modal here means modal to the keyboard as well as to the eye: Tab cycles inside the
+ * panel instead of walking into the page behind it, the control that opened the overlay
+ * gets the keyboard back whichever way the overlay is closed, and `role="dialog"` is
+ * given the name it is meaningless without.
  */
 export function openOverlay(content, { onClose, dismissible = true, variant = 'sheet' } = {}) {
   const root = modalRoot();
+  // Whatever asked the question — a Delete button, a day cell, a row. Read before the
+  // panel exists, because opening one moves the focus into it.
+  const opener = document.activeElement;
   let closed = false;
 
   const close = () => {
@@ -242,6 +275,11 @@ export function openOverlay(content, { onClose, dismissible = true, variant = 's
     document.removeEventListener('keydown', onKey, true);
     overlay.remove();
     if (!root.firstChild) document.body.classList.remove('has-overlay');
+    // Every way out lands here — Escape, the backdrop, and the panel's own buttons all
+    // call close() — so the keyboard is handed back once, in one place. `isConnected`
+    // is the guard for the case where answering rebuilt the screen underneath: the
+    // opener is gone, and there is nothing to give it back to.
+    if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus();
     if (onClose) onClose();
   };
 
@@ -249,11 +287,60 @@ export function openOverlay(content, { onClose, dismissible = true, variant = 's
     if (e.key === 'Escape' && dismissible) {
       e.stopPropagation();
       close();
+      return;
     }
+    if (e.key !== 'Tab') return;
+    // Only the overlay on top traps. Every open overlay has a listener on the document,
+    // and one underneath must not drag the keyboard out of the panel in front of it.
+    const stack = root.querySelectorAll('.overlay');
+    if (stack.length && stack[stack.length - 1] !== overlay) return;
+
+    const items = focusableIn(panel);
+    if (items.length === 0) {
+      // A panel with nothing to focus still holds the keyboard, on itself: letting Tab
+      // through would leave the reader in a page they cannot see past the backdrop.
+      e.preventDefault();
+      panel.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (!panel.contains(active)) {
+      // The focused element was repainted away, or a backdrop click cleared it.
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    } else if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+    // With a single focusable element first and last are the same one, so both of those
+    // branches refocus it: Tab stays put rather than escaping.
   };
 
-  const panel = h('div', { class: `overlay-panel overlay-${variant}`, role: 'dialog', 'aria-modal': 'true' },
-    typeof content === 'function' ? content(close) : content);
+  const panel = h('div', {
+    class: `overlay-panel overlay-${variant}`,
+    role: 'dialog',
+    'aria-modal': 'true',
+    // So the panel can hold the keyboard itself when it has no focusable content.
+    tabindex: '-1',
+  }, typeof content === 'function' ? content(close) : content);
+
+  // A dialog with no accessible name is announced as "dialog" and nothing else. Every
+  // overlay in this app draws its question as a heading, so the name is that heading
+  // rather than a second copy of it that could drift from what is on screen. An overlay
+  // built without one — none today, but this takes arbitrary content — falls back to a
+  // generic name from the catalogue, which is still an answer to "what is this?".
+  const heading = panel.querySelector('h1, h2, h3, h4, h5, h6');
+  if (heading) {
+    if (!heading.id) heading.id = nextId('overlay-title');
+    panel.setAttribute('aria-labelledby', heading.id);
+  } else {
+    panel.setAttribute('aria-label', t('a11y.dialog'));
+  }
 
   const overlay = h('div', {
     class: 'overlay',
@@ -263,8 +350,9 @@ export function openOverlay(content, { onClose, dismissible = true, variant = 's
   root.appendChild(overlay);
   document.body.classList.add('has-overlay');
   document.addEventListener('keydown', onKey, true);
-  const focusable = panel.querySelector('button, [href], input, select, textarea');
-  if (focusable && focusable.focus) focusable.focus();
+  // Focus once the panel is in the document, so that a control hidden by CSS is not
+  // mistaken for a reachable one.
+  (focusableIn(panel)[0] || panel).focus();
   return close;
 }
 

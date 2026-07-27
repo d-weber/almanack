@@ -319,6 +319,28 @@ Notable changes to this project. The format follows
   "Début, heure"). All-day events were never affected, in either place.
   ([#16](https://github.com/d-weber/almanack/issues/16),
   [#18](https://github.com/d-weber/almanack/issues/18))
+- **Tab walked straight out of every dialog, and answering one left you at the top of the
+  page.** The day sheet, the yes/no confirmations and the *this / this and following / the
+  whole series* question are one function between them, and it announced each of them as a
+  modal dialog while behaving like nothing of the sort. Four presses of Tab inside the scope
+  question — the one the app insists on before it will change anything that repeats — and the
+  keyboard was out of the panel and off into the month grid behind it, on controls the
+  backdrop covers and nobody can see, with no way back except Shift+Tab counted blind. The
+  other half was the way out: the panel closed and the keyboard went to the top of the
+  document with it, so answering "just this one" about a swimming lesson meant tabbing the
+  whole way back down the page to reach anything at all — and the same after every
+  confirmation, and after every day sheet. Then the name, or the absence of one:
+  `role="dialog"` was set with nothing to label it, so all three announced themselves as
+  "dialog" and no more. The question itself — the words that make *this*, *this and
+  following* and *the whole series* mean anything — was left to be found by browsing the page
+  the dialog was blocking. All three faults are in one function, `openOverlay()`, so all three
+  overlays are fixed at once: Tab cycles within the panel and Shift+Tab cycles back through
+  it, whatever opened the overlay gets the keyboard back when it closes — by Escape, by
+  tapping the backdrop, or by a button in the panel — and the dialog takes its name from the
+  heading it already draws, so the two cannot drift apart. An overlay with no heading falls
+  back to a plain "dialog" from the catalogue, and one with nothing to focus at all keeps the
+  keyboard on itself rather than letting it out into a page the reader cannot see.
+  ([#17](https://github.com/d-weber/almanack/issues/17))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
