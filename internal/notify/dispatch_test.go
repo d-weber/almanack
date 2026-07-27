@@ -248,7 +248,10 @@ func TestDigestPayloadStaysUnderTheCeiling(t *testing.T) {
 		t.Fatal("no digest was planned")
 	}
 	row := rows[0]
-	p := e.payloadOf(row)
+	p, err := e.n.fillDigest(e.ctx, u.ID, e.payloadOf(row))
+	if err != nil {
+		t.Fatalf("fill digest: %v", err)
+	}
 	if p.Total != 24 {
 		t.Fatalf("digest total = %d, want 24", p.Total)
 	}
@@ -510,6 +513,75 @@ func TestUndeliverableRowIsRetired(t *testing.T) {
 	}
 	if !rows[0].SentAt.IsZero() {
 		t.Error("a retired row must not be recorded as sent")
+	}
+}
+
+// TestDigestIsResolvedAtDelivery: the morning digest describes the day as it
+// stands when it goes out, not as it stood up to 48 hours earlier when its row
+// was materialized. The outbox is INSERT OR IGNORE on (user, kind, source_ref,
+// due_at), so no later pass can rewrite a payload once it is written — a digest
+// carrying its agenda would be frozen against every edit made in between, which
+// on a family calendar is most days.
+func TestDigestIsResolvedAtDelivery(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 3, 0, 0, 0, time.UTC)) // 05:00 Paris
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	e.setPrefs(domain.NotificationPrefs{
+		UserID: u.ID, DigestEnabled: true, DigestTime: "07:30", SummaryTime: "20:00",
+		EmailReminders: true, EmailDigest: true,
+	})
+
+	// Tomorrow already has something on it, which is what makes this the case that
+	// bites: a day that was empty heals itself, because there was no row to freeze.
+	tomorrow := date(2027, 6, 2)
+	e.timedEvent(cal, u.ID, "Piscine", 2027, 6, 2, 10, 0, time.Hour, nil)
+	dentiste := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 2, 14, 0, time.Hour, nil)
+	judo := e.timedEvent(cal, u.ID, "Judo", 2027, 6, 2, 17, 0, time.Hour, nil)
+	e.plan()
+	if _, ok := findRow(e.queueOfKind(domain.KindDigest), events.DigestSourceRef(tomorrow)); !ok {
+		t.Fatal("no digest was queued for tomorrow, so this proves nothing about a frozen one")
+	}
+
+	// The day then changes, as a day does: two things added, one cancelled, one
+	// renamed.
+	e.timedEvent(cal, u.ID, "Cirque", 2027, 6, 2, 9, 0, 2*time.Hour, nil)
+	e.timedEvent(cal, u.ID, "Goûter chez Camille", 2027, 6, 2, 16, 0, time.Hour, nil)
+	if err := e.ev.Delete(e.ctx, u.ID, dentiste.ID, "", domain.Date{}); err != nil {
+		t.Fatalf("cancel the appointment: %v", err)
+	}
+	if _, err := e.ev.Update(e.ctx, u.ID, judo.ID, "", domain.Date{}, events.Input{
+		CalendarID: cal.ID, Title: "Judo à Vincennes", StartsAt: judo.StartsAt, EndsAt: judo.EndsAt,
+		LabelID: judo.LabelID, Participants: []int64{u.ID},
+	}); err != nil {
+		t.Fatalf("rename the lesson: %v", err)
+	}
+	e.plan() // and a later pass cannot rewrite the row an earlier one wrote
+
+	e.mail.reset()
+	e.push.reset()
+	e.clk.Set(time.Date(2027, 6, 2, 5, 30, 0, 0, time.UTC)) // 07:30 Paris, the slot
+	e.dispatch()
+
+	row, ok := findRow(e.queueOfKind(domain.KindDigest), events.DigestSourceRef(tomorrow))
+	if !ok || row.SentAt.IsZero() {
+		t.Fatalf("the digest for %s was not delivered: %+v", tomorrow, row)
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Fatalf("digest pushes = %d, want 1", got)
+	}
+	msgs := e.mail.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("digest emails = %d, want 1", len(msgs))
+	}
+	text := msgs[0].Text
+	for _, want := range []string{"4 événements", "Cirque", "Goûter chez Camille", "Judo à Vincennes"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the delivered digest does not carry %q; it describes the day as it was when the row was planned:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Dentiste") {
+		t.Errorf("the delivered digest still announces an appointment cancelled the day before:\n%s", text)
 	}
 }
 

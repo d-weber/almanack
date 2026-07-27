@@ -168,6 +168,15 @@ notices and summaries. A `UNIQUE` constraint on `(user, kind, source_ref, due_at
 re-planning free rather than duplicating, so idempotency is structural rather than a
 property somebody has to remember to preserve.
 
+**A row says what it is for, not what it will say.** Structural idempotency cuts both ways:
+a later pass over the same window produces the same key and therefore cannot rewrite a
+payload it has already written. So anything that is still changing when the row is written
+is left out of it. A reminder names an event that exists now and carries it; a digest and a
+summary name only the day they cover, and their contents — the day's agenda, the count of
+changes, whether a quiet day is worth sending at all — are read from the calendar at
+delivery, along with the wording, per recipient and in their language. Two days is long
+enough for a day to be rearranged twice.
+
 **Delivery is at-least-once.** `sent_at` is set only after a push service or the MTA
 accepts the message. A crash between sending and marking may duplicate a notification —
 that is the correct trade, because a duplicate reminder is annoying and a missed one is the

@@ -187,6 +187,25 @@ Notable changes to this project. The format follows
   that entry and the ones behind it go thirty seconds later on the next tick. Nothing
   changed in the database.
   ([#10](https://github.com/d-weber/almanack/issues/10))
+- **The morning digest could describe a day that had since changed.** Tomorrow's digest is
+  prepared up to two days before it is sent, and it was prepared with that day's agenda
+  already written into it. From that moment the message was fixed: an appointment added to
+  the day, moved, renamed or cancelled afterwards made no difference to what arrived at
+  07:30. Nothing could correct it either — the outbox is keyed on who is being told, what
+  about, and when, so a later pass recognises the message it has already prepared and leaves
+  it exactly as it stands. It announced the dentist you had cancelled the evening before,
+  and said nothing about the swimming lesson you had added in its place. One case healed
+  itself, which is worth naming because it is the one anybody would have tried first: a day
+  with nothing on it at all produced no digest, so filling it in afterwards worked as
+  expected — unless "even on days with no events" was on, in which case the empty message
+  was already waiting. Everything else was frozen, on any day edited within forty-eight
+  hours, which is most days. The digest now reads the day at the moment it goes out, exactly
+  as the daily summary of changes already did, and "even on days with no events" is answered
+  then too, since whether a day is quiet is not known until you look. The planner is
+  markedly cheaper for it: it had been expanding everyone's next two days on every
+  thirty-second tick and throwing the result away, and a household of six with the digest on
+  now plans a pass in about an eighth of the time. Nothing changed in the database.
+  ([#8](https://github.com/d-weber/almanack/issues/8))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

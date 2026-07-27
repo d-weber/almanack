@@ -385,8 +385,15 @@ func (n *Notifier) reminderDue(occ domain.Occurrence, r domain.Reminder) (time.T
 // Digests
 // ---------------------------------------------------------------------------
 
-// planDigests queues one row per enabled user per day, at their chosen local
-// time, carrying that day's occurrences.
+// planDigests queues one row per enabled user per day, at their chosen local time.
+//
+// Its payload names the day and nothing else, for the same reason a summary's
+// does: the row is materialized up to 48 hours ahead, and the day it announces
+// keeps changing until the moment it is announced. An agenda written in here
+// could never be corrected — the outbox is INSERT OR IGNORE on
+// (user, kind, source_ref, due_at), so a later pass produces the same key and
+// changes nothing. The agenda, and the question of whether a quiet day is worth
+// a push at all, are resolved at delivery.
 func (n *Notifier) planDigests(ctx context.Context, from, to time.Time, prefs []domain.NotificationPrefs) error {
 	var errs []error
 	days := daysCovering(from, to, n.loc)
@@ -407,38 +414,13 @@ func (n *Notifier) planDigests(ctx context.Context, from, to time.Time, prefs []
 			if due.Before(from) || due.After(to) {
 				continue
 			}
-			occs, err := n.ev.UserOccurrences(ctx, p.UserID, day, day)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("digest for user %d on %s: %w", p.UserID, day, err))
-				continue
-			}
-			if len(occs) == 0 && !p.DigestOnEmpty {
-				continue
-			}
-			if err := n.enqueue(ctx, p.UserID, domain.KindDigest, events.DigestSourceRef(day), digestPayload(day, occs), due); err != nil {
+			pl := payload{Kind: domain.KindDigest, Day: day}
+			if err := n.enqueue(ctx, p.UserID, domain.KindDigest, events.DigestSourceRef(day), pl, due); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// digestPayload keeps a count and the first few truncated titles. The client
-// fetches the rest on notificationclick, which is what keeps the encrypted body
-// under the aes128gcm ceiling on a busy Saturday.
-func digestPayload(day domain.Date, occs []domain.Occurrence) payload {
-	p := payload{Kind: domain.KindDigest, Day: day, Total: len(occs)}
-	for i, occ := range occs {
-		if i >= maxDigestItems {
-			break
-		}
-		it := digestItem{Title: truncateRunes(occ.Title, maxTitleRunes), AllDay: occ.AllDay}
-		if !occ.AllDay {
-			it.StartsAt = occ.StartsAt.UTC()
-		}
-		p.Items = append(p.Items, it)
-	}
-	return p
 }
 
 // ---------------------------------------------------------------------------
