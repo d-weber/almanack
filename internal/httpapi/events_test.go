@@ -185,6 +185,216 @@ func TestAllDayEventKeepsItsDates(t *testing.T) {
 	}).expect(http.StatusBadRequest)
 }
 
+// remindersOf reads back one event's reminders for the caller, as their shapes and
+// sorted. Sorted because the stored list is a set and says so: saving the same
+// reminders in another order does not store that order (#65), so an assertion that
+// depended on the order would be asserting something the app does not promise.
+func (e *env) remindersOf(eventID int64, date string) []string {
+	e.t.Helper()
+	var detail eventDetail
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", eventID, date)).
+		expect(http.StatusOK).decode(&detail)
+	out := make([]string, 0, len(detail.MyReminders))
+	for _, r := range detail.MyReminders {
+		out = append(out, r.Shape())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// timedReminders is n distinct offsets, and doubled writes every entry of a list twice.
+func timedReminders(n int) []map[string]any {
+	out := make([]map[string]any, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, map[string]any{"offset_minutes": i})
+	}
+	return out
+}
+
+func doubled(list []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, 2*len(list))
+	for _, r := range list {
+		out = append(out, r, r)
+	}
+	return out
+}
+
+// A reminder list arriving over the wire is a set, and a bounded one.
+//
+// Neither half is reachable by clicking: the editor will not offer a shape the list is
+// already holding, and its whole menu is ten timed shapes and five all-day ones. Both
+// therefore arrive only from a hand-built request, and both used to be stored as sent —
+// a duplicate as two rows falling due at the same instant, queued under two different
+// references and pushing the same sentence twice for every occurrence until somebody
+// edited the list by hand, and a 2 MiB body as on the order of a hundred thousand
+// reminders re-expanded per occurrence on every planning pass (#70).
+//
+// Driven through the handlers rather than through parseReminders, because the fault was
+// that the API accepted these. All three doors are walked: creating an event, editing
+// one, and saving the reminder list on its own.
+func TestARemindersListIsASetAndIsBounded(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	// Creating an event. Two of one shape are one warning, and the third is its own.
+	timed := e.createEvent(map[string]any{
+		"calendar_id": cal.ID,
+		"title":       "Dentiste",
+		"starts_at":   "2026-08-04T14:30:00Z",
+		"ends_at":     "2026-08-04T15:15:00Z",
+		"label_id":    labels[3].ID,
+		"reminders": []map[string]any{
+			{"offset_minutes": 30}, {"offset_minutes": 30}, {"offset_minutes": 60},
+		},
+	})
+	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, []string{"m30", "m60"}) {
+		t.Errorf("creating an event with 30, 30 and 60 minutes stored %v, want one row per shape", got)
+	}
+
+	// Saving the list on its own. Distinct shapes all survive; the repeat does not.
+	var replaced struct {
+		Reminders []domain.Reminder `json:"reminders"`
+	}
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
+		"reminders": []map[string]any{
+			{"offset_minutes": 60}, {"offset_minutes": 30}, {"offset_minutes": 60}, {"offset_minutes": 0},
+		},
+	}).expect(http.StatusOK).decode(&replaced)
+	if len(replaced.Reminders) != 3 {
+		t.Errorf("PUT answered with %d reminders for three shapes: %+v", len(replaced.Reminders), replaced.Reminders)
+	}
+	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, []string{"m0", "m30", "m60"}) {
+		t.Errorf("saving 60, 30, 60 and 0 stored %v", got)
+	}
+
+	// Editing an event carries a reminder list too, and it is the same list.
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d", timed.ID), map[string]any{
+		"calendar_id": cal.ID,
+		"title":       "Dentiste Léo",
+		"starts_at":   "2026-08-04T14:30:00Z",
+		"ends_at":     "2026-08-04T15:15:00Z",
+		"label_id":    labels[3].ID,
+		"reminders":   []map[string]any{{"offset_minutes": 15}, {"offset_minutes": 15}},
+	}).expect(http.StatusOK)
+	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, []string{"m15"}) {
+		t.Errorf("editing an event with 15 and 15 minutes stored %v", got)
+	}
+
+	// The all-day shape is two fields, and both of them count: the same day at another
+	// time is a different warning, and so is the same time on another day. Only the
+	// pair repeated verbatim is the same reminder twice.
+	allDay := e.createEvent(map[string]any{
+		"calendar_id": cal.ID,
+		"title":       "Vacances",
+		"all_day":     true,
+		"start_date":  "2026-08-10",
+		"end_date":    "2026-08-16",
+		"label_id":    labels[7].ID,
+		"reminders": []map[string]any{
+			{"days_before": 1, "at_time_local": "09:00"},
+			{"days_before": 1, "at_time_local": "09:00"},
+		},
+	})
+	if got := e.remindersOf(allDay.ID, "2026-08-10"); !slices.Equal(got, []string{"d1@09:00"}) {
+		t.Errorf("creating an all-day event with the same warning twice stored %v", got)
+	}
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", allDay.ID), map[string]any{
+		"reminders": []map[string]any{
+			{"days_before": 1, "at_time_local": "09:00"},
+			{"days_before": 1, "at_time_local": "20:00"},
+			{"days_before": 1, "at_time_local": "09:00"},
+			{"days_before": 2, "at_time_local": "09:00"},
+			{"days_before": 0, "at_time_local": "09:00"},
+		},
+	}).expect(http.StatusOK)
+	want := []string{"d0@09:00", "d1@09:00", "d1@20:00", "d2@09:00"}
+	if got := e.remindersOf(allDay.ID, "2026-08-10"); !slices.Equal(got, want) {
+		t.Errorf("all-day reminders stored %v, want %v", got, want)
+	}
+
+	// The cap, at the boundary. Exactly the limit saves.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
+		"reminders": timedReminders(maxReminders),
+	}).expect(http.StatusOK)
+	atTheCap := e.remindersOf(timed.ID, "2026-08-04")
+	if len(atTheCap) != maxReminders {
+		t.Fatalf("a list of exactly %d stored %d of them", maxReminders, len(atTheCap))
+	}
+
+	// One over is refused, with the code the client shows a message for — and refused
+	// before anything is written, so what is stored is still the list that was accepted.
+	res := e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
+		"reminders": timedReminders(maxReminders + 1),
+	}).expect(http.StatusBadRequest)
+	if code := res.errorCode(); code != codeInvalid {
+		t.Errorf("a list of %d was refused as %q, want %q", maxReminders+1, code, codeInvalid)
+	}
+	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, atTheCap) {
+		t.Errorf("a refused list changed what was stored: %v, want the %d that were accepted", got, maxReminders)
+	}
+
+	// Creating an event with too many is refused the same way, and the event with it:
+	// the list is parsed before anything is written.
+	e.post("/api/v1/events", map[string]any{
+		"calendar_id": cal.ID,
+		"title":       "Trop",
+		"starts_at":   "2026-08-05T14:30:00Z",
+		"ends_at":     "2026-08-05T15:15:00Z",
+		"label_id":    labels[3].ID,
+		"reminders":   timedReminders(maxReminders + 1),
+	}).expect(http.StatusBadRequest)
+	if occs := e.listEvents("2026-08-05", "2026-08-05").Occurrences; len(occs) != 0 {
+		t.Errorf("the event was created anyway: %+v", occs)
+	}
+
+	// The cap counts warnings, not lines: a list that says the same twenty things twice
+	// is asking for twenty, and a hundred thousand copies of one is asking for one.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
+		"reminders": doubled(timedReminders(maxReminders)),
+	}).expect(http.StatusOK)
+	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, atTheCap) {
+		t.Errorf("%d shapes sent twice each stored %d rows", maxReminders, len(got))
+	}
+}
+
+// A household that saved a duplicate through the API before there was a rule against it
+// still has both rows: no migration goes looking, and nothing rewrites what is stored.
+// What the rule must not do is strand them — their event has to open, and a save has to
+// go through. It does, and it heals: the editor sends back the list it was given, that
+// list folds to one, and reconciliation drops the row that is no longer in it.
+func TestADuplicateSavedBeforeTheRuleStillOpensAndHealsOnTheNextSave(t *testing.T) {
+	e := newEnv(t)
+	user, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	created := e.createEvent(map[string]any{
+		"calendar_id": cal.ID,
+		"title":       "Dentiste",
+		"starts_at":   "2026-08-04T14:30:00Z",
+		"ends_at":     "2026-08-04T15:15:00Z",
+		"label_id":    labels[3].ID,
+	})
+	// Written through the store, which is now the only way to produce the row: the
+	// store stores exactly the list it is handed, and it is the API that has the rule.
+	thirty := 30
+	if err := e.store.ReplaceReminders(t.Context(), &created.ID, nil, user.ID,
+		[]domain.Reminder{{OffsetMinutes: &thirty}, {OffsetMinutes: &thirty}}); err != nil {
+		t.Fatalf("seed a duplicate: %v", err)
+	}
+	if got := e.remindersOf(created.ID, "2026-08-04"); len(got) != 2 {
+		t.Fatalf("the duplicate was not stored, so this proves nothing: %v", got)
+	}
+
+	// What the editor sends is what it loaded, duplicate and all.
+	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", created.ID), map[string]any{
+		"reminders": []map[string]any{{"offset_minutes": 30}, {"offset_minutes": 30}},
+	}).expect(http.StatusOK)
+	if got := e.remindersOf(created.ID, "2026-08-04"); !slices.Equal(got, []string{"m30"}) {
+		t.Errorf("saving the duplicate list back stored %v, want the one warning it asks for", got)
+	}
+}
+
 func TestHolidaysAreLocalizedAndCanShareADate(t *testing.T) {
 	e := newEnv(t)
 	e.family()

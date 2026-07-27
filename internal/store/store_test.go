@@ -3611,7 +3611,7 @@ func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 		}
 		out := make([]string, 0, len(rs))
 		for _, r := range rs {
-			out = append(out, fmt.Sprintf("%d:%s", r.ID, reminderShape(r)))
+			out = append(out, fmt.Sprintf("%d:%s", r.ID, r.Shape()))
 		}
 		return out
 	}

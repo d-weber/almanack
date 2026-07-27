@@ -48,30 +48,6 @@ func reminderScope(eventID, recurrenceID *int64, userID int64) (string, []any, e
 	}
 }
 
-// reminderShape is everything a reminder says: "30 minutes before", or "09:00 on the day
-// before". There is no name, no note and no other column, so two reminders of the same
-// shape are the same reminder — they fall due at the same instant, carry the same
-// payload and cannot be told apart by anything that reads them. It is also the identity
-// the editor already works in: web/js/views/event.js keys its picker on these fields and
-// will not offer a shape the list is holding.
-//
-// The values are compared as they are stored, byte for byte; normalising "9:00" to
-// "09:00" belongs to the caller that accepts it (internal/httpapi.parseReminders).
-//
-// Neither branch can be missed: ReplaceReminders rejects a reminder with neither shape
-// and the table's CHECK says the same about the rows. The default is there so that a
-// database someone has taken the constraint off cannot panic this.
-func reminderShape(r domain.Reminder) string {
-	switch {
-	case r.OffsetMinutes != nil:
-		return fmt.Sprintf("m%d", *r.OffsetMinutes)
-	case r.DaysBefore != nil:
-		return fmt.Sprintf("d%d@%s", *r.DaysBefore, r.AtTimeLocal)
-	default:
-		return ""
-	}
-}
-
 // ListReminders returns one user's reminders for one event or one series.
 //
 // Reminders are per user by design: creating an event never pushes reminders onto
@@ -156,15 +132,18 @@ func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrence
 		}
 		// ListReminders orders by id, so each shape's candidates arrive lowest first
 		// and stay that way — the whole of what makes the matching below repeatable.
+		// The shape is domain's, not this package's: it is what a reminder is rather
+		// than how this table stores one, and the boundary that accepts a list bounds
+		// it by the same notion (internal/httpapi.parseReminders).
 		byShape := map[string][]int64{}
 		for _, r := range stored {
-			shape := reminderShape(r)
+			shape := r.Shape()
 			byShape[shape] = append(byShape[shape], r.ID)
 		}
 		keep := map[int64]bool{}
 		var add []domain.Reminder
 		for _, r := range rs {
-			shape := reminderShape(r)
+			shape := r.Shape()
 			if ids := byShape[shape]; len(ids) > 0 {
 				keep[ids[0]] = true
 				byShape[shape] = ids[1:]

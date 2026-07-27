@@ -5,6 +5,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -195,6 +196,37 @@ type Reminder struct {
 	OffsetMinutes *int   `json:"offset_minutes,omitempty"`
 	DaysBefore    *int   `json:"days_before,omitempty"`
 	AtTimeLocal   string `json:"at_time_local,omitempty"` // "HH:MM" family tz
+}
+
+// Shape is what a reminder says — "30 minutes before", or "09:00 on the day before" —
+// and it is the whole of what a reminder is. There is no name, no note and no other
+// field, so two reminders of one shape fall due at the same instant, carry the same
+// sentence, and cannot be told apart by anything that reads them. They are therefore
+// the same reminder, which is why a list holding one twice is one warning written
+// twice rather than two warnings, and why matching a saved list against the rows
+// already stored can be done on this alone (#65).
+//
+// It is the identity the rest of the app already works in: web/js/views/event.js keys
+// its picker on exactly these fields and will not offer a shape the list is holding,
+// and its reminderSignature compares two lists the same way to decide whether a save
+// is worth sending at all.
+//
+// The fields are compared as they are written, character for character; normalising
+// "9:00" to "09:00" belongs to whatever accepts the request.
+//
+// A reminder with neither shape has none, and the empty string is what it gets: the
+// reminders table's CHECK refuses to store one and internal/store refuses to write
+// one, so this arises only on a database somebody has taken the constraint off — where
+// it must still be a value rather than a panic.
+func (r Reminder) Shape() string {
+	switch {
+	case r.OffsetMinutes != nil:
+		return fmt.Sprintf("m%d", *r.OffsetMinutes)
+	case r.DaysBefore != nil:
+		return fmt.Sprintf("d%d@%s", *r.DaysBefore, r.AtTimeLocal)
+	default:
+		return ""
+	}
 }
 
 // PushSubscription is one browser profile on one device. A user has as many as they

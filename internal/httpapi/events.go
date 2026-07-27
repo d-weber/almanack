@@ -18,6 +18,21 @@ import (
 // mistake or an attempt to pull the database through the JSON encoder.
 const maxRangeDays = 750
 
+// maxReminders bounds one person's reminder list for one event, counted after the
+// duplicates have been folded together.
+//
+// Nobody clicking can reach it: the editor's whole menu is ten timed shapes and five
+// all-day ones, and it does not offer one the list already holds. The API is
+// deliberately wider than that menu — any offset up to thirty days, any of the sixty
+// days before at any minute of the clock — so the cap is set at twice what the menu can
+// produce, which leaves room for the widest thing a household could plausibly ask for
+// by hand and cannot express by clicking: a warning each morning of the fortnight
+// before a departure, with a few more on the day itself. Past that it is not a
+// household warning itself about an appointment, and the cost is not one request:
+// every entry is expanded again for every occurrence on every planning pass, for as
+// long as the event exists. Twenty is saved, twenty-one is refused.
+const maxReminders = 20
+
 type eventRequest struct {
 	CalendarID   int64              `json:"calendar_id"`
 	Title        string             `json:"title"`
@@ -96,8 +111,31 @@ func (req eventRequest) reminders(userID int64) ([]domain.Reminder, error) {
 	return parseReminders(*req.Reminders, req.AllDay, userID)
 }
 
+// parseReminders turns a request's reminder list into the set of warnings it asks for.
+//
+// A set, because a reminder is its shape and nothing besides (domain.Reminder.Shape),
+// so a list holding one twice asks for one warning written twice rather than for two
+// warnings. It used to be stored as two: two rows, two queued notifications under
+// different references falling due at the same instant, and the same sentence pushed
+// twice for every occurrence, for good, until somebody edited the list by hand (#70).
+// The second entry is folded into the first rather than refused, because it says
+// nothing the first did not — the request is stored in full, not in part. That is also
+// how the participant list arriving in this same body has always been treated, one
+// layer down in internal/store, and one endpoint should not answer the same redundancy
+// two ways. Refusing it would have had a cost besides: a household that saved a
+// duplicate through the API before this existed would find that list rejected on the
+// way back in, so the only way to edit an event would be to first spot which of two
+// identical lines to delete. Folding heals it on the next save instead.
+//
+// The length is a different matter and is refused rather than trimmed: dropping the
+// twenty-first warning would store less than was asked for, silently, which is the one
+// thing folding a duplicate does not do.
 func parseReminders(list []reminderRequest, allDay bool, userID int64) ([]domain.Reminder, error) {
-	out := make([]domain.Reminder, 0, len(list))
+	// Sized by the cap rather than by the request: a 2 MiB body holds on the order of a
+	// hundred thousand reminders, and neither of these should be allocated for a list
+	// this is going to refuse.
+	out := make([]domain.Reminder, 0, min(len(list), maxReminders+1))
+	seen := make(map[string]bool, maxReminders+1)
 	for i, r := range list {
 		offsetSet := r.OffsetMinutes != nil
 		allDaySet := r.DaysBefore != nil || r.AtTimeLocal != ""
@@ -128,7 +166,19 @@ func parseReminders(list []reminderRequest, allDay bool, userID int64) ([]domain
 			rem.DaysBefore = r.DaysBefore
 			rem.AtTimeLocal = at
 		}
+		shape := rem.Shape()
+		if seen[shape] {
+			continue
+		}
+		seen[shape] = true
 		out = append(out, rem)
+		// Checked here rather than on len(list), so that a list saying the same thing
+		// a hundred times is the one warning it asks for rather than a refusal, and so
+		// that a long one is refused on the entry that crosses the line instead of
+		// after the whole body has been walked.
+		if len(out) > maxReminders {
+			return nil, invalidf("an event may not have more than %d reminders", maxReminders)
+		}
 	}
 	return out, nil
 }

@@ -778,6 +778,25 @@ Notable changes to this project. The format follows
   anything it would no longer prepare. Nothing about the database changes, and nothing
   already queued or already sent is disturbed.
   ([#65](https://github.com/d-weber/almanack/issues/65))
+- **The same warning asked for twice was set up twice, and nothing limited how many an
+  appointment could carry.** A reminder is the moment it goes off and nothing else — there
+  is no name and no note to tell two of them apart — so asking for "30 minutes before"
+  twice is asking for one warning, written twice. It was set up as two: two of everything
+  prepared, and the same sentence pushed to every phone twice for every occurrence, for
+  good, until somebody opened the list and deleted one of two identical lines. And there
+  was no limit at all: a single request could put something like a hundred thousand
+  reminders on one appointment, each of them worked out again for every occurrence every
+  time the app looks ahead. Neither was reachable by using the app — the editor will not
+  offer a warning the list is already holding, and its whole menu is fifteen — so both
+  needed a request built by hand, but a household running its own server is exactly who
+  might write one. A repeat is now folded into the warning it repeats, so what is saved is
+  what was asked for, and a list of more than twenty is refused with a message rather than
+  quietly shortened. Twenty is far more than the editor can produce and more than anyone
+  plausibly wants: a warning every morning of the fortnight before a holiday, with a few
+  more on the day, still fits. A household that had already saved a repeat keeps both until
+  the next time they save that list, which now heals it; nothing about the database
+  changes, and nothing already queued or already sent is disturbed.
+  ([#70](https://github.com/d-weber/almanack/issues/70))
 
 - **A timezone the server was perfectly happy with could leave the browser unable to show
   anything at all.** The two halves of this application read different copies of the timezone
