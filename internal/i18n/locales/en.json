@@ -75,6 +75,8 @@
   "event.allDay": "All day",
   "event.start": "Starts",
   "event.end": "Ends",
+  "event.dateOf": "{field}, date",
+  "event.timeOf": "{field}, time",
   "event.location": "Location",
   "event.url": "Link",
   "event.notes": "Notes",

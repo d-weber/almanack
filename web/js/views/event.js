@@ -553,9 +553,19 @@ function whenSection(form, paint) {
     onchange: (e) => { form.end_time = e.target.value || form.end_time; },
   });
 
-  const pair = (labelText, dateInput, timeInput) => h('div', { class: 'field' },
-    h('span', { class: 'field-label' }, labelText),
-    h('div', { class: 'field-pair' }, dateInput, timeInput));
+  // Two controls under one word, and the word cannot say which of them is the date and
+  // which is the time — so each names itself. The name begins with the word that is
+  // written above it, so what is heard still starts with what is read. It is an
+  // aria-label rather than a <label for>, which is what the all-day rows above use:
+  // a label element can only name one control, and there is no second word on screen
+  // for it to name the other with.
+  const pair = (labelText, dateInput, timeInput) => {
+    dateInput.setAttribute('aria-label', t('event.dateOf', { field: labelText }));
+    timeInput.setAttribute('aria-label', t('event.timeOf', { field: labelText }));
+    return h('div', { class: 'field' },
+      h('span', { class: 'field-label' }, labelText),
+      h('div', { class: 'field-pair' }, dateInput, timeInput));
+  };
 
   return section(null, allDayRow,
     pair(t('event.start'), startDate, startTime),

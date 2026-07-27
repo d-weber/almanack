@@ -76,6 +76,12 @@ export function eventBar(occ, { isStart = true, isEnd = true, onclick } = {}) {
     class: ['bar', isStart ? 'is-start' : '', isEnd ? 'is-end' : ''].filter(Boolean).join(' '),
     type: 'button',
     style: chipStyle(colors),
+    // The title is written once, in the week the event begins, because a 20px bar has
+    // room for it once. Every segment is a button of its own, though, so a segment
+    // without a name of its own is announced as "button" and says nothing on hover —
+    // which is what a week-long holiday looked like from its second week onwards.
+    title: occ.title,
+    'aria-label': occ.title,
     onclick: onclick || (() => openOccurrence(occ)),
   },
   h('span', { class: 'bar-title' }, isStart ? occ.title : ''));

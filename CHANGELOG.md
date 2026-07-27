@@ -303,6 +303,22 @@ Notable changes to this project. The format follows
   moving the start would drag the end along with it — and still would not have given back the
   moment the event began at.
   ([#15](https://github.com/d-weber/almanack/issues/15))
+- **A week-long holiday was announced as, simply, "button".** A multi-day event is drawn as
+  one bar per week of the grid it crosses, and only the first of them was given the title —
+  the rest were buttons wrapped around an empty label. So the second week of a seaside
+  holiday read out as "button" to anyone using a screen reader, and said nothing at all on
+  hover, on a bar 20 pixels tall that is too narrow to show its own title anyway. Trips and
+  holidays are exactly what somebody scrolls back through a calendar to find. Every segment
+  of a bar now answers to the name of its event and carries it as a tooltip, the way the
+  holiday bars beside them already did; the title is still written once, in the week the
+  event begins, because that is what there is room for. The editor had the quieter version
+  of the same fault: the date and time boxes of a **timed** event sit in pairs under a single
+  word, "Starts" or "Ends", which belongs to neither of them and cannot say which is which,
+  so all four were announced as nothing but their type — two of them "date" and two of them
+  "time", in one form. Each now gives its own name in both languages ("Starts, date",
+  "Début, heure"). All-day events were never affected, in either place.
+  ([#16](https://github.com/d-weber/almanack/issues/16),
+  [#18](https://github.com/d-weber/almanack/issues/18))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
