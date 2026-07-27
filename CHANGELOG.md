@@ -426,6 +426,18 @@ Notable changes to this project. The format follows
   per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
   run `make seed` — instead of letting three unrelated-looking tests go red.
   ([#52](https://github.com/d-weber/almanack/issues/52))
+- **A failed backup could leave an empty calendar where the family's used to be.** Every
+  run records its outcome where `/healthz` can read it, and that breadcrumb is written by
+  opening the database — which creates and fully migrates the file when it is not there. So
+  a backup taken while the data volume had failed to mount did the right thing twice over,
+  refusing to back up nothing and exiting non-zero, and then left a fresh, empty, 217 KB
+  Almanack database sitting at the data path. The next start came up on it without
+  complaint, the health check went green, and the real calendar was still on the volume
+  nobody had noticed was missing — which is a bad way to discover that the hourly timer had
+  been running against an unmounted disk since the reboot. The outcome is now recorded only
+  when there is a database to record it against; when there is not, the non-zero exit and
+  the failure mail are the whole signal, as the deployment contract has always said.
+  ([#29](https://github.com/d-weber/almanack/issues/29))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

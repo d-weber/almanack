@@ -593,6 +593,32 @@ func TestRunBackupRecordsFailureForHealthz(t *testing.T) {
 	}
 }
 
+// Recording the outcome must not bring a database into existence. store.Open creates and
+// fully migrates the file when it is not there, and the breadcrumb was written on the
+// failure path too — so a backup run against a data volume that had failed to mount
+// exited non-zero, correctly, and then left a fresh empty calendar at the path the
+// family's used to be at. The next `almanack serve` started on it happily and /healthz
+// went green. It also defeated the stat in takeBackup, whose whole purpose is to refuse
+// to back up nothing.
+func TestFailedBackupDoesNotRecreateAMissingDatabase(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+	cfg := config.Config{
+		DataPath: filepath.Join(dataDir, "almanack.db"),
+		FamilyTZ: testTZ(t),
+	}
+
+	if _, err := runBackup(context.Background(), cfg, filepath.Join(root, "snapshots"), false); err == nil {
+		t.Fatal("runBackup succeeded with no database to back up")
+	}
+	if got := remaining(t, dataDir); len(got) != 0 {
+		t.Errorf("a failed run left %v where the database should be", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------

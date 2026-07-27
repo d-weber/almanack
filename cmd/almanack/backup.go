@@ -58,6 +58,17 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 	if err != nil {
 		outcome = err.Error()
 	}
+	// No database, no breadcrumb. store.Open creates and fully migrates the file when it
+	// is not there, so recording an outcome against a data path that has gone — the
+	// unmounted volume takeBackup stats for a few lines above — used to leave a fresh
+	// empty calendar exactly where the family's had been, and the next `almanack serve`
+	// started on it without complaint. The non-zero exit is the whole signal in that
+	// case, and the deployment contract already says to alert on it.
+	if _, statErr := os.Stat(cfg.DataPath); statErr != nil {
+		slog.Warn("not recording the backup result: there is no database at the data path",
+			"path", cfg.DataPath, "error", statErr)
+		return res, err
+	}
 	if noteErr := recordBackupOutcome(ctx, cfg, outcome); noteErr != nil {
 		slog.Warn("could not record the backup result for /healthz", "error", noteErr)
 	}

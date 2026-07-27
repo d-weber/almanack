@@ -20,7 +20,7 @@ a unit or as `almanack --config <path>`.
 |---|---|
 | `almanack serve` | Long-running process. Listens on `ALMANACK_LISTEN`. Exits non-zero on a configuration or migration failure, with the problems listed on stderr. |
 | `almanack bootstrap --email <address> --name <name>` | Creates the first account and calendar on an empty database and prints an invite link. Signup is invite-only and there is no HTTP route to the first account, deliberately: the bootstrap window is never reachable from the internet. Refuses to run once any account exists. |
-| `almanack backup <dir> [--prune]` | Takes a verified snapshot (`VACUUM INTO` → `PRAGMA integrity_check` on the output → fsync → atomic rename). **Exits non-zero if the snapshot is not intact**, which is the signal to alert on. `--prune` applies the generational retention from the config. |
+| `almanack backup <dir> [--prune]` | Takes a verified snapshot (`VACUUM INTO` → `PRAGMA integrity_check` on the output → fsync → atomic rename), written `0600`. **Exits non-zero if the snapshot is not intact**, which is the signal to alert on. It never brings a database into existence: if the data path is not there — an unmounted volume — the run fails and leaves the path as it found it, rather than starting the family on a new empty calendar. `--prune` applies the generational retention from the config. |
 | `almanack gen-vapid` | Prints a fresh VAPID keypair. Run once, ever, at first deployment. |
 | `almanack seed` | Creates a demo family. Development only. |
 | `almanack version` | Prints the build version. |
