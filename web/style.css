@@ -1805,10 +1805,6 @@ a { color: var(--accent); }
   .app-bar { padding-left: 24px; padding-right: 24px; }
 }
 
-@media (min-width: 1200px) {
-  .month-grid { padding: 0 12px 12px; }
-}
-
 /* ------------------------------------------------------ reduced motion */
 
 @media (prefers-reduced-motion: reduce) {
