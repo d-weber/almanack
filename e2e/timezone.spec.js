@@ -23,9 +23,13 @@ test('events render in the family timezone, not the device one', async ({ page }
 
   // The seeded dentist appointment is at 16:30 Paris time. A device-timezone bug
   // would render it as 15:30.
+  //
+  // 16:30 matches more than once — the chip behind the overlay still shows it — so
+  // take the first. The load-bearing assertion is the second one: 15:30 must appear
+  // nowhere at all, and that is what a device-timezone regression would trip.
   const card = page.getByText("Leo's dentist").first();
   await card.click();
-  await expect(page.getByText('16:30')).toBeVisible();
+  await expect(page.getByText('16:30').first()).toBeVisible();
   await expect(page.getByText('15:30')).toHaveCount(0);
 });
 
