@@ -832,6 +832,32 @@ Notable changes to this project. The format follows
   file `unknown-tz.spec.js` so that it would not collide. The patterns are now anchored to
   the whole basename.
   ([#63](https://github.com/d-weber/almanack/issues/63))
+- **Running the browser suite a few times in a row failed at the password box, and nothing
+  on the screen said why.** The login endpoint is rate limited per address — a burst of eight
+  attempts, refilling at one per twenty seconds — and the suite signs in twice a run: once
+  through the real form, and once more in the project that tests signing out, which needs a
+  session of its own to destroy. Nothing gave those tokens back between runs, since the
+  buckets are in memory and only a restart empties them, so five `make e2e` runs inside a
+  minute spent the burst and the sixth failed in two specs with
+  `expect(locator).toBeVisible() failed` against a button that was never going to appear —
+  a real limit, working exactly as designed, reported as an application that had stopped
+  rendering. Only the server's log mentioned 429. CI never saw it, because it starts a fresh
+  process every run, so the whole cost fell on whoever runs the suite locally, which is the
+  case that target exists for. The limiter itself is unchanged: the same burst and the same
+  refill in dev mode as in production, and dev mode still answers 429 on the ninth attempt.
+  What dev mode gains is a way to empty the buckets without restarting the server —
+  `POST /dev/ratelimits/reset`, with a button for it on the dev dashboard, which is also the
+  answer for a developer who has just mistyped their own password eight times. The suite
+  calls it once at the start of every run, before it spends anything: `make seed` gives the
+  run a clean database and this gives it a clean bucket. The route is registered only when
+  `ALMANACK_DEV` is set, as every `/dev` route is — not registered and guarded — so in
+  production there is no path to guess at and the clock is still the only thing that refills
+  a bucket; a test holds that down by emptying the burst on a non-dev server, trying the
+  route and three spellings of it, and finding the next attempt still refused. The symptom
+  names itself now as well: the suite checks what the login request answered rather than
+  waiting on what should have appeared afterwards, so a 429 fails as a 429, with the reason
+  and the remedy in the failure.
+  ([#66](https://github.com/d-weber/almanack/issues/66))
 
 ## [0.2.0] — 2026-07-27
 

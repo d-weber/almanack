@@ -8,24 +8,42 @@
 // it ten times to assert something about the month grid is not.
 //
 // So this file is also the one place the real login form is exercised. Everything else
-// starts already authenticated, which is why the specs no longer call signIn().
+// starts already authenticated, which is why only this file and logout.spec.js — which
+// needs a session it is allowed to destroy — call signIn().
+//
+// Two sign-ins a run was still too many, though, because the bucket does not empty
+// between runs and refills at one token per twenty seconds: five `make e2e` runs inside
+// a minute spent the burst of eight, and the sixth failed here and in logout.spec.js at
+// the password box, with `toBeVisible() failed` and nothing anywhere saying 429 (#66).
+// Restarting the server cleared it, since the buckets are in memory. So this step now
+// asks the server for a restart's effect on the buckets without the restart, before
+// spending anything: `make seed` gives the run a clean database, and this gives it a
+// clean bucket. The limits themselves are untouched — the endpoint is registered only in
+// dev mode, which is what the suite runs against, and emptying a bucket on request is a
+// developer's affordance, not a weaker limiter.
 //
 // It is also where the run says, once, whether the database it has been pointed at is
 // the one `make seed` makes. See below for why that is worth a step of its own.
 
 import { test as setup, expect } from '@playwright/test';
-import { FIXTURE_TITLES } from './fixtures.js';
+import { FIXTURE_TITLES, HEADERS, RATE_LIMIT_RESET_PATH, signIn } from './fixtures.js';
 
 const STATE_PATH = '.auth/state.json';
 
 const CREDENTIALS = { email: 'mum@example.org', password: 'password' };
 
 setup('sign in through the login form, on a database nobody has run this on before', async ({ page }) => {
-  await page.goto('/');
+  const reset = await page.request.post(RATE_LIMIT_RESET_PATH, { headers: HEADERS });
+  expect(
+    reset.status(),
+    `${RATE_LIMIT_RESET_PATH} answered ${reset.status()}.\n` +
+      'This suite runs against `make seed && make dev`, which sets ALMANACK_DEV=1; a server ' +
+      'started without it registers no /dev routes at all, and the login bucket this run is ' +
+      'about to spend two tokens of can then only be emptied by restarting the server.',
+  ).toBe(200);
 
-  await page.getByLabel(/Email address/i).fill(CREDENTIALS.email);
-  await page.getByLabel(/Password/i).fill(CREDENTIALS.password);
-  await page.getByRole('button', { name: /Sign in/i }).click();
+  await page.goto('/');
+  await signIn(page, CREDENTIALS);
 
   // The month view's Today button is the first thing that only exists once the
   // session cookie has been accepted and /api/v1/me has answered.

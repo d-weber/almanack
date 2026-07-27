@@ -123,6 +123,15 @@ answer — `make seed` — rather than letting three unrelated-looking tests fai
 Fixtures are deleted through the API, never through the UI: deleting an event in the browser is a
 flow of its own, and a test about something else is the wrong place to exercise it.
 
+What the suite spends on the server it gives back too. It signs in twice a run — once through the
+real login form, and once more in the sign-out project, which needs a session of its own to
+destroy — and the login endpoint's bucket holds eight attempts per address, refills at one per
+twenty seconds and does not empty between runs, so five runs inside a minute used to end at the
+password box with a failure that pointed at the month view. The setup step now empties the buckets
+before it spends anything (`POST /dev/ratelimits/reset`, dev mode only, with a button for it on
+the dev dashboard — which is also the answer when you have just mistyped your own password eight
+times). The limits are the production ones in dev as well: what dev mode adds is the emptying.
+
 **These run in CI**, in their own job, which seeds a demo family and starts a server first. They
 are not optional there, and that is deliberate: three of the bugs 0.2.0 fixed were reachable only
 through a real browser — an upload the app's own CSP forbade, an invite link that never opened the

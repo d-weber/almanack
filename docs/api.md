@@ -271,4 +271,6 @@ for notification text. `fr` and `en`; anything else is a 404.
 - Dev mode only (`ALMANACK_DEV=1`), never mounted in production:
   `GET /dev/` (dashboard), `GET /dev/mail`, `GET /dev/notifications`,
   `POST /dev/clock {"advance":"26h"}` or `{"set":"2026-08-04T06:00:00Z"}`,
-  `POST /dev/tick` (run planner + scheduler immediately), `POST /dev/seed`.
+  `POST /dev/tick` (run planner + scheduler immediately), `POST /dev/seed`,
+  `POST /dev/ratelimits/reset` (empty the login, signup and password-reset buckets, which
+  otherwise refill on a timer and are cleared only by a restart).

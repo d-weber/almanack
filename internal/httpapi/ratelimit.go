@@ -79,6 +79,18 @@ func (l *limiterSet) allow(name, client string) bool {
 	return true
 }
 
+// forget empties every bucket, exactly as restarting the process does. Nothing in the
+// application calls it: the one caller is the dev-mode endpoint in dev.go, which is
+// registered only when cfg.Dev is set, so outside dev mode the buckets still drain and
+// refill on the clock alone.
+func (l *limiterSet) forget() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(l.buckets)
+	clear(l.buckets)
+	return n
+}
+
 // gc drops buckets nobody has touched in a while. Called under the lock.
 func (l *limiterSet) gc(now time.Time) {
 	if now.Sub(l.lastGC) < l.gcPeriod {
