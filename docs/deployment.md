@@ -24,9 +24,9 @@ a unit or as `almanack --config <path>`.
 | `almanack gen-vapid` | Prints a fresh VAPID keypair. Run once, ever, at first deployment. |
 | `almanack seed` | Creates a demo family. Development only. |
 | `almanack version` | Prints the build version. |
-| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, scheduler heartbeat age, last backup age and result, consecutive SMTP failures, how many push subscriptions are failing (`push.failing`) and how many have gone quiet, and disk usage. Because it needs no session it reports no push service *names*: which one is failing is in the daily heartbeat mail, where there is a recipient rather than a URL. |
-| systemd readiness | If `NOTIFY_SOCKET` is set, the process sends `READY=1` **after** migrations complete, so a health check can distinguish "still migrating" from "dead". Use `Type=notify`. |
-| systemd watchdog | If `WATCHDOG_USEC` is set, the scheduler loop pings the watchdog. Set `WatchdogSec` so that a hung scheduler is restarted rather than silently ceasing to send reminders. |
+| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, whether the database file is still at the configured path (`disk.database_exists` — a pool that already has the file open answers a ping long after the volume has gone), scheduler heartbeat age, last backup age and result, consecutive SMTP failures, how many push subscriptions are failing (`push.failing`) and how many have gone quiet, and disk usage. Because it needs no session it reports no push service *names*: which one is failing is in the daily heartbeat mail, where there is a recipient rather than a URL. |
+| systemd readiness | If `NOTIFY_SOCKET` is set, the process sends `READY=1` **after** migrations complete *and* the listener is bound, so a health check can distinguish "still migrating" from "dead", and a unit systemd reports as active is one that is answering rather than one about to exit on a busy port. Use `Type=notify`. |
+| systemd watchdog | If `WATCHDOG_USEC` is set, the scheduler pings the watchdog once per completed tick. `WatchdogSec` must therefore be comfortably longer than `ALMANACK_TICK`, and longer than the worst-case boot catch-up as well: systemd starts the watchdog clock at `READY=1`, and catching up a long outage's reminders happens after that. The shipped defaults — `WatchdogSec=120s` against a 30 s tick — leave room for both; raise `WatchdogSec` if you raise the tick, and the process says so in its log at startup when the two are set too close. |
 | Signals | `SIGTERM`/`SIGINT` drain in-flight requests and stop cleanly. |
 | Logs | Structured, to stdout only. Nothing to rotate. |
 
@@ -64,8 +64,11 @@ alerting.
 
 **Backups on a timer.** Run `almanack backup <dir> --prune` hourly, as the service user. Sync the
 directory off-host at least daily, ordered after the snapshot, copying only `almanack-*.db` and
-never `*.tmp`. Alert on non-zero exit — that is a failed integrity check, i.e. the database is
-damaged and the clock is running on how long the good generations survive.
+never `*.tmp` — a partial file is left in place for an hour, so that a run overtaken by the next
+one is not destroyed by it. Each snapshot is a complete copy of the calendar and is written
+`0600`; keep it as restrictive off-host. Alert on non-zero exit — that is a failed integrity
+check, i.e. the database is damaged and the clock is running on how long the good generations
+survive.
 
 **Failure alerting.** Wire a mail-on-failure hook to the service unit and to both timers. This
 is the single most important thing in the deployment: everything else in this system fails

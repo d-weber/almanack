@@ -95,8 +95,11 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 
 	stamp := time.Now().UTC().Format(backupTimeLayout)
 	final := filepath.Join(dir, "almanack-"+stamp+".db")
-	tmp := final + ".tmp"
-	// VACUUM INTO refuses to overwrite, and a same-minute rerun would otherwise fail
+	// The PID is in the temporary name so that two runs starting in the same second —
+	// the hourly timer and an operator at a shell — cannot end up writing to, and
+	// removing, one file.
+	tmp := fmt.Sprintf("%s.%d.tmp", final, os.Getpid())
+	// VACUUM INTO refuses to overwrite, and a same-second rerun would otherwise fail
 	// on the leftover from the previous attempt.
 	_ = os.Remove(tmp)
 
@@ -114,6 +117,16 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 	if _, err := src.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
 		_ = os.Remove(tmp)
 		return backupResult{}, fmt.Errorf("snapshot to %s: %w", tmp, err)
+	}
+
+	// A snapshot is the whole calendar: every address, every password hash. VACUUM INTO
+	// creates it under the process umask, which is 0022 on a stock system and leaves the
+	// file world-readable — and the off-host sync preserves the mode. Tightening it here
+	// rather than in the unit means it holds however the command was invoked, and doing
+	// it before the rename means the file is never readable under its final name.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return backupResult{}, fmt.Errorf("restrict permissions on %s: %w", tmp, err)
 	}
 
 	if err := verify(ctx, tmp); err != nil {
@@ -307,8 +320,20 @@ func pruneBackups(dir string, cfg config.Config, keepAlways string) (int, error)
 	return removed, nil
 }
 
+// staleTempAfter is how long a partial file must have gone untouched before it is taken
+// for abandoned rather than in progress. A snapshot of a family calendar takes seconds;
+// an hour is generous enough that only a killed run qualifies.
+const staleTempAfter = time.Hour
+
 // removeStaleTemps clears partial files left by an interrupted run, so they can never
 // be mistaken for a snapshot or shipped off-host by a sync job.
+//
+// Only files that have not been written to for an hour: a partial belonging to a run
+// that is still going is not stale, and deleting it used to break that run in the worst
+// way available. VACUUM INTO carried on filling the unlinked inode, verify then opened
+// the path and created a fresh empty database there — which passes integrity_check — and
+// the run failed at the schema count. The operator got a failure mail and a 503 from
+// /healthz over a backup that was doing nothing wrong.
 func removeStaleTemps(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -318,13 +343,23 @@ func removeStaleTemps(dir string) error {
 		return err
 	}
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".db.tmp") {
-			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
-				return fmt.Errorf("remove stale partial %s: %w", e.Name(), err)
-			}
+		if e.IsDir() || !isPartialSnapshot(e.Name()) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < staleTempAfter {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("remove stale partial %s: %w", e.Name(), err)
 		}
 	}
 	return nil
+}
+
+// isPartialSnapshot recognises this command's own temporary files, in both the current
+// spelling (almanack-<stamp>.db.<pid>.tmp) and the one that carried no PID.
+func isPartialSnapshot(name string) bool {
+	return strings.HasPrefix(name, "almanack-") && strings.HasSuffix(name, ".tmp")
 }
 
 func fsyncFile(path string) error {

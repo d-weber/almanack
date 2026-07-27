@@ -162,8 +162,7 @@ type Options struct {
 	Horizon time.Duration
 	// Tick defaults to DefaultTick.
 	Tick time.Duration
-	// MinPlausibleTime is the clock floor described above. Zero means 2026-01-01;
-	// main may raise it to the build timestamp.
+	// MinPlausibleTime is the clock floor described above. Zero means 2026-01-01.
 	MinPlausibleTime time.Time
 
 	// OwnerEmail and HeartbeatTime configure the daily note to whoever runs the

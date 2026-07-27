@@ -142,7 +142,9 @@ ALMANACK_PUSH_HOSTS=
 # sooner. The catch-up logic on boot backfills whatever a downtime skipped.
 ALMANACK_PLAN_HORIZON=48h
 
-# How often the outbox is drained.
+# How often the outbox is drained. This is also how often the systemd watchdog is
+# fed, so a unit with WatchdogSec must keep it comfortably above this value — the
+# shipped example is WatchdogSec=120s against the 30s below (docs/deployment.md).
 ALMANACK_TICK=30s
 
 

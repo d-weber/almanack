@@ -34,9 +34,10 @@ import sys
 # no explanation reads as neglect and gets "fixed" by someone writing shallow tests.
 FLOORS: dict[str, float] = {
     # The subcommands. backup and bootstrap are the data-safety paths and are well
-    # covered; serve.go and seed.go are mostly wiring that the e2e tests exercise for
-    # real, which is why the package total is lower than its important halves.
-    "almanack/cmd/almanack": 37.0,
+    # covered, and serve.go is now started for real by its own tests — readiness
+    # signalling and the watchdog are operational contracts a browser cannot check.
+    # seed.go remains wiring the e2e tests exercise instead.
+    "almanack/cmd/almanack": 52.0,
     # Passwords and token minting. The uncovered remainder is the crypto/rand failure
     # branches, which need a seam that does not exist.
     "almanack/internal/auth": 93.0,

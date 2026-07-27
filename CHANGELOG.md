@@ -383,6 +383,36 @@ Notable changes to this project. The format follows
   one event is refused until the stray character is taken out of the link box, which is the
   price of the check and is said in those words rather than as a failure to save.
   ([#20](https://github.com/d-weber/almanack/issues/20))
+- **The unit, the timer and `/healthz` now behave the way the deployment contract says they
+  do.** Four operational faults, none of them visible from a browser and all of them visible
+  on the morning something goes wrong. Two backups running at once destroyed each other: the
+  sweep that clears partial files from an interrupted run took every one it found, whatever
+  its age, so a snapshot of a large database overtaken by the next hourly run had its file
+  deleted underneath it — and what followed was worse than a lost file, because `VACUUM INTO`
+  went on writing to the unlinked inode while the verification step opened the path afresh,
+  created an empty database there, and failed it at the schema check. The household saw a
+  "your backups are failing" mail and a 503 from `/healthz` until the next hour, about a
+  backup that was never in trouble. Partial files are now left alone for an hour and carry
+  the writing process's id, so two runs cannot meet at all; the hour is also why the off-host
+  sync must keep skipping `*.tmp`, as it always should have. Snapshots are written `0600`
+  rather than under whatever umask the timer's unit happened to have — the file is a complete
+  copy of the calendar, every address and every password hash, and an off-host sync preserves
+  the mode it finds. The systemd watchdog was a trap for anyone who tuned the scheduler: the
+  ping was throttled to once per half of `WatchdogSec`, but it is only reached when a tick
+  completes, so the real spacing was that half *plus* a whole tick against a deadline of the
+  whole `WatchdogSec` — 30 seconds of margin at the defaults, and a restart loop for whoever
+  set `ALMANACK_TICK=90s` to reduce load on a small box. The throttle is gone: a datagram
+  costs nothing, the spacing is now exactly one tick, and the process warns at startup if the
+  two settings are close enough to matter. Readiness was signalled before anything had bound
+  the port, so `systemctl restart` returned success — and the install guide's "confirm the
+  readiness signal arrived" passed — on a service that was about to die because a second copy
+  of the unit, or a proxy, already held the address; the listener is opened before `READY=1`
+  now, making the order migrations, bind, ready, serve. And `/healthz` reported a field named
+  `database_exists` that only checked the configuration string was not empty, while the
+  connection pool went on answering pings from a file that had been unlinked or a volume that
+  never mounted, so a server whose calendar had gone reported itself healthy indefinitely: it
+  stats the path now, and a database that is not there degrades the server.
+  ([#23](https://github.com/d-weber/almanack/issues/23))
 - **Running the browser tests twice failed the second time, for reasons that pointed
   nowhere near the cause.** Two of the smoke tests created an event and never removed it, so
   a second `make e2e` against the same seeded database found three other tests failing — the

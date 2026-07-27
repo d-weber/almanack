@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -595,6 +596,35 @@ func TestHealthz(t *testing.T) {
 func TestHealthzNeedsNoSession(t *testing.T) {
 	e := newEnv(t)
 	e.request(e.newClient(), http.MethodGet, "/healthz", nil).expect(http.StatusOK)
+}
+
+// A database that is no longer on disk — a volume that failed to mount after a reboot,
+// a file deleted by hand — used to be invisible here. The connection pool holds the file
+// open, so Ping keeps answering for as long as the process lives, and the one field that
+// looked like it was about to say otherwise, database_exists, only reported that the
+// *setting* was not the empty string. So /healthz stayed green on a server whose calendar
+// had gone, which is the longest possible way to find out.
+func TestHealthzDegradesWhenTheDatabaseFileHasGone(t *testing.T) {
+	e := newEnv(t)
+	e.get("/healthz").expect(http.StatusOK)
+
+	if err := os.Remove(e.cfg.DataPath); err != nil {
+		t.Fatalf("remove the database file: %v", err)
+	}
+
+	res := e.get("/healthz").expect(http.StatusServiceUnavailable)
+	var health healthResponse
+	res.decode(&health)
+	disk, ok := health.Checks["disk"].(map[string]any)
+	if !ok {
+		t.Fatalf("disk check = %#v", health.Checks["disk"])
+	}
+	if disk["database_exists"] != false {
+		t.Errorf("database_exists = %v with no database on disk", disk["database_exists"])
+	}
+	if disk["ok"] != false {
+		t.Errorf("disk check reports ok = %v, so nothing in the response says which check degraded the server", disk["ok"])
+	}
 }
 
 // Because it needs no session, /healthz must not answer questions about a

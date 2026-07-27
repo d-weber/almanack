@@ -235,6 +235,12 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("half a database"), 0o600); err != nil {
 		t.Fatalf("write the stale partial: %v", err)
 	}
+	// Old enough that no run could still be writing it. Age is the whole distinction
+	// between a leftover and a colleague — see the test below.
+	aged := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(stale, aged, aged); err != nil {
+		t.Fatalf("age the stale partial: %v", err)
+	}
 
 	res, err := takeBackup(context.Background(), cfg, "", false)
 	if err != nil {
@@ -245,6 +251,51 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 	}
 	if got := remaining(t, cfg.BackupDir); len(got) != 1 || got[0] != filepath.Base(res.Path) {
 		t.Errorf("backup directory holds %v, want only the new snapshot", got)
+	}
+}
+
+// The sweep above used to take every *.db.tmp regardless of age, which made two backups
+// running at once destroy each other. A snapshot of a large database can easily outlast
+// the gap to the next hourly run, and the failure was worse than a deleted file: VACUUM
+// INTO went on writing to the unlinked inode, verify then opened the *path* — creating a
+// fresh, empty database, which passes integrity_check — and the run failed at the schema
+// count. Exit non-zero, OnFailure= mail to the owner, /healthz at 503 until the next
+// hour, over a backup that was never in trouble.
+func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
+	_, cfg, _ := liveDatabase(t)
+	if err := os.MkdirAll(cfg.BackupDir, 0o750); err != nil {
+		t.Fatalf("create backup directory: %v", err)
+	}
+	// Named for an hour ago, but written now: an earlier run still working on it.
+	inFlight := filepath.Join(cfg.BackupDir, "almanack-"+time.Now().UTC().Add(-time.Hour).Format(backupTimeLayout)+".db.tmp")
+	if err := os.WriteFile(inFlight, []byte("a snapshot in progress"), 0o600); err != nil {
+		t.Fatalf("write the in-flight partial: %v", err)
+	}
+
+	if _, err := takeBackup(context.Background(), cfg, "", false); err != nil {
+		t.Fatalf("takeBackup: %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("a partial file younger than an hour was deleted out from under the run writing it: %v", err)
+	}
+}
+
+// A snapshot is a complete copy of the family's calendar — every event, every address,
+// every password hash. VACUUM INTO creates it under the process umask, which on the
+// backup timer's unit is the system default, and the off-host sync preserves the mode.
+func TestBackupSnapshotIsNotReadableByOthers(t *testing.T) {
+	_, cfg, _ := liveDatabase(t)
+
+	res, err := takeBackup(context.Background(), cfg, "", false)
+	if err != nil {
+		t.Fatalf("takeBackup: %v", err)
+	}
+	info, err := os.Stat(res.Path)
+	if err != nil {
+		t.Fatalf("stat the snapshot: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("snapshot mode = %#o, want %#o", got, 0o600)
 	}
 }
 

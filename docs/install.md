@@ -317,12 +317,16 @@ WantedBy=multi-user.target
 EOF
 ```
 
-`Type=notify` is not decoration: the process signals readiness **after** migrations finish,
-so a restart that is still migrating is distinguishable from one that has died.
-`WatchdogSec` restarts a scheduler that has hung — which otherwise means reminders quietly
-stop while the process still answers HTTP. `After=time-sync.target` keeps a box that booted
-with a dead clock battery from either flushing every pending reminder at once or marking
-them delivered without sending them.
+`Type=notify` is not decoration: the process signals readiness **after** migrations finish
+and the port is bound, so a restart that is still migrating is distinguishable from one
+that has died, and `systemctl restart` does not report success on a service that is about
+to exit because something else already holds the port. `WatchdogSec` restarts a scheduler
+that has hung — which otherwise means reminders quietly stop while the process still
+answers HTTP. The ping goes out once per completed scheduler tick, so keep `WatchdogSec`
+well above `ALMANACK_TICK`; 120 s against the default 30 s tick is the ratio to preserve if
+you change either, and the log says so at startup if they are set too close.
+`After=time-sync.target` keeps a box that booted with a dead clock battery from either
+flushing every pending reminder at once or marking them delivered without sending them.
 
 ### 7. Make failure loud
 
