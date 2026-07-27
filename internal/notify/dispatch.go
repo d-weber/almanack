@@ -345,14 +345,11 @@ func (n *Notifier) fillSummary(ctx context.Context, userID int64, p payload) (pa
 
 	dayStart := p.Day.In(n.loc)
 	dayEnd := p.Day.AddDays(1).In(n.loc)
-	acts, err := n.st.ListActivity(ctx, ids, 500, dayEnd)
+	acts, err := n.st.ListActivityBetween(ctx, ids, dayStart, dayEnd, 500)
 	if err != nil {
 		return p, err
 	}
 	for _, a := range acts {
-		if a.At.Before(dayStart) {
-			break // the feed is newest-first, so this is the end of the day
-		}
 		if a.UserID == userID {
 			continue
 		}

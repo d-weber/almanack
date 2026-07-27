@@ -482,6 +482,12 @@ func (n *Notifier) planSummaries(ctx context.Context, from, to time.Time, prefs 
 // Activity
 // ---------------------------------------------------------------------------
 
+// activityCatchUpLimit caps one pass. Between two 30-second ticks a family produces
+// a handful of rows; the number is for the pass that follows a long outage. Rows past
+// it are not lost — the cursor stops at the last one handled, so the next tick picks
+// up exactly where this one left off.
+const activityCatchUpLimit = 2000
+
 // planActivity turns new activity_log rows into notifications for the members they
 // concern.
 //
@@ -509,7 +515,7 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 	if raw == "" {
 		// First ever pass. Start from the present: replaying a decade of history
 		// into everyone's notification tray is not a welcome.
-		newest, err := n.st.ListActivity(ctx, cals, 1, time.Time{})
+		newest, err := n.st.ListActivity(ctx, cals, 1, 0)
 		if err != nil {
 			return err
 		}
@@ -524,7 +530,7 @@ func (n *Notifier) planActivity(ctx context.Context, prefs map[int64]domain.Noti
 		return fmt.Errorf("activity cursor %q is unreadable: %w", raw, err)
 	}
 
-	acts, err := n.activitySince(ctx, cals, cursor)
+	acts, err := n.st.ListActivityAfter(ctx, cals, cursor, activityCatchUpLimit)
 	if err != nil {
 		return err
 	}
@@ -622,51 +628,6 @@ func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// activitySince returns log entries newer than cursor, oldest first.
-//
-// The store exposes ListActivity as a newest-first, time-cursored feed for the
-// activity screen, so this pages backwards until it meets the cursor. Between two
-// 30-second ticks a family produces a handful of rows and the first page is always
-// enough; the loop exists for the catch-up case.
-func (n *Notifier) activitySince(ctx context.Context, cals []int64, cursor int64) ([]domain.Activity, error) {
-	const page = 200
-	var out []domain.Activity
-	seen := map[int64]bool{}
-	var before time.Time
-
-	for pass := 0; pass < 50; pass++ {
-		batch, err := n.st.ListActivity(ctx, cals, page, before)
-		if err != nil {
-			return nil, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		reached := false
-		for _, a := range batch {
-			if a.ID <= cursor {
-				reached = true
-				continue
-			}
-			if !seen[a.ID] {
-				seen[a.ID] = true
-				out = append(out, a)
-			}
-		}
-		oldest := batch[len(batch)-1].At
-		if reached || len(batch) < page {
-			break
-		}
-		if !before.IsZero() && !oldest.Before(before) {
-			break // the cursor stopped moving; stop rather than loop forever
-		}
-		before = oldest
-	}
-
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
 }
 
 // allCalendarIDs is the union of every user's calendars.

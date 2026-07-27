@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/png"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -936,7 +937,55 @@ func TestActivityFeed(t *testing.T) {
 		t.Errorf("deleted entry title = %q", feed.Activity[0].Title)
 	}
 	e.get("/api/v1/activity?limit=0").expect(http.StatusBadRequest)
+	e.get("/api/v1/activity?before_id=yesterday").expect(http.StatusBadRequest)
+
+	// before= is the instant cursor this endpoint shipped with. It is still answered,
+	// so a client written against the older documentation is not broken by the fix.
+	var legacy struct {
+		Activity []domain.Activity `json:"activity"`
+	}
+	after := e.clk.Now().Add(time.Hour).Format(time.RFC3339)
+	e.get("/api/v1/activity?limit=10&before=" + after).expect(http.StatusOK).decode(&legacy)
+	if len(legacy.Activity) != 2 {
+		t.Errorf("the instant cursor returned %+v, want both entries", legacy.Activity)
+	}
 	e.get("/api/v1/activity?before=yesterday").expect(http.StatusBadRequest)
+}
+
+// TestActivityFeedPagesThroughASharedSecond: the clock is frozen for the whole test,
+// so the creation and the deletion carry the same instant. Paging on the instant
+// stepped over everything that shared the boundary second — the entry was gone from
+// the feed for good. The cursor is an entry id, which is unique.
+func TestActivityFeedPagesThroughASharedSecond(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	created := e.createEvent(map[string]any{
+		"calendar_id": cal.ID, "title": "Dentiste", "label_id": labels[0].ID,
+		"starts_at": "2026-08-04T14:30:00Z", "ends_at": "2026-08-04T15:15:00Z",
+	})
+	e.do(http.MethodDelete, fmt.Sprintf("/api/v1/events/%d", created.ID), nil).
+		expect(http.StatusNoContent)
+
+	// One entry per page, exactly as the infinite scroll asks for them.
+	var seen []domain.ActivityAction
+	cursor := ""
+	for range 3 {
+		var page struct {
+			Activity []domain.Activity `json:"activity"`
+		}
+		e.get("/api/v1/activity?limit=1" + cursor).expect(http.StatusOK).decode(&page)
+		if len(page.Activity) == 0 {
+			break
+		}
+		seen = append(seen, page.Activity[0].Action)
+		cursor = fmt.Sprintf("&before_id=%d", page.Activity[len(page.Activity)-1].ID)
+	}
+	want := []domain.ActivityAction{domain.ActionEventDeleted, domain.ActionEventCreated}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("paging one at a time saw %v, want %v", seen, want)
+	}
 }
 
 // ---------------------------------------------------------------------------

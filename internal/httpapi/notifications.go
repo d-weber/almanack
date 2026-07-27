@@ -277,8 +277,21 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
+	var beforeID int64
+	if raw := strings.TrimSpace(q.Get("before_id")); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			fail(w, r, invalidf("before_id must be an activity id"))
+			return
+		}
+		beforeID = id
+	}
+	// before= is the instant cursor this endpoint shipped with. It cannot page
+	// through a shared second — that is the bug before_id exists to fix — but it is
+	// still answered, exactly as it always was, so that a client written against the
+	// older documentation is not broken by the fix.
 	var before time.Time
-	if raw := strings.TrimSpace(q.Get("before")); raw != "" {
+	if raw := strings.TrimSpace(q.Get("before")); raw != "" && beforeID == 0 {
 		t, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
 			fail(w, r, invalidf("before must be an RFC 3339 instant"))
@@ -294,7 +307,12 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	entries, err := s.store.ListActivity(ctx, calendarIDs(cals), limit, before)
+	var entries []domain.Activity
+	if before.IsZero() {
+		entries, err = s.store.ListActivity(ctx, calendarIDs(cals), limit, beforeID)
+	} else {
+		entries, err = s.store.ListActivityBetween(ctx, calendarIDs(cals), time.Time{}, before, limit)
+	}
 	if err != nil {
 		fail(w, r, err)
 		return
