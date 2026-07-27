@@ -50,8 +50,31 @@ export function luminance(hex) {
 }
 
 /** Text colour to put on a fully saturated swatch. */
+/**
+ * Ink for text drawn on a coloured background.
+ *
+ * Picks whichever of the two actually contrasts better, rather than choosing by a
+ * luminance threshold. A fixed cutoff reads as reasonable and is not: it preferred
+ * white on mid-tone colours where black is the far better choice, so a mid orange
+ * carried white text at 2.4:1 — well under the 4.5:1 that makes small text legible —
+ * while the same rule gave black on lime at 11.7:1.
+ */
 export function readableOn(hex) {
-  return luminance(hex) > 0.42 ? '#16181d' : '#ffffff';
+  // True black rather than the interface's near-black: on a saturated fill the
+  // difference is imperceptible, but it is worth about 0.7 of a contrast ratio, which
+  // is exactly what carries mid-tone reds and blues over the 4.5:1 line.
+  const dark = '#000000';
+  const light = '#ffffff';
+  return contrastRatio(hex, dark) >= contrastRatio(hex, light) ? dark : light;
+}
+
+/** WCAG relative-luminance contrast ratio between two colours, 1:1 to 21:1. */
+export function contrastRatio(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  const hi = Math.max(la, lb);
+  const lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
 }
 
 /**

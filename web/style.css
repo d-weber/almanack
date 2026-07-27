@@ -321,34 +321,50 @@ a { color: var(--accent); }
 
   .app-title { font-size: 18px; }
 
-  /* Squeezed onto one line at 390px the month and year ellipsed away to nothing,
-     which is the one label on this screen that has to be readable. It takes the
-     first line of its own, with the navigation buttons beneath it. */
-  .app-bar-nav { flex-wrap: wrap; }
-
-  .app-bar-nav .app-title {
-    order: -1;
-    flex: 1 0 100%;
-    margin-left: 2px;
+  /* The month, Today and the two arrows are one thought — where you are and how to
+     move — so they share a line. Below this width they take the whole first row and
+     the view switch pairs up with the actions on the second, which fits everything
+     without the three-row bar the old layout produced on a phone. */
+  .app-bar-nav {
+    order: 1;
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    min-width: 0;
   }
 
-  /* The two icons take exactly their own width here. Letting them claim an equal
-     share of the row (which is what centres the view switch on a wide screen) left
-     the navigation group too narrow and broke the arrows onto separate lines. */
-  .app-bar-actions { flex: 0 0 auto; }
-
-  .app-bar-actions {
-    order: 2;
-    margin-left: auto;
+  .app-bar-nav .app-title {
+    order: 0;
+    flex: 0 1 auto;
+    margin-left: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .view-switch {
-    order: 3;
-    flex: 1 0 100%;
+    order: 2;
+    flex: 1 1 auto;
     margin-left: 0;
   }
 
   .view-switch .segment { flex: 1 1 0; }
+
+  .app-bar-actions { order: 3; flex: 0 0 auto; }
+}
+
+/* The narrowest phones still in use (and any 640px window at 200% zoom) are about
+   30px short of fitting that line. Trimming the gaps and the button padding buys it
+   back; the tap targets stay at 40px, which is still comfortable. */
+@media (max-width: 359px) {
+  .app-bar { padding-left: 10px; padding-right: 10px; }
+  .app-bar-row { gap: 4px; }
+  .app-bar-nav { gap: 2px; }
+  .app-bar-nav .app-title { font-size: 17px; margin-left: 2px; }
+  .app-bar-nav .icon-btn { min-width: 40px; }
+  .app-bar-nav .btn-small { padding-left: 8px; padding-right: 8px; }
+  /* Let the switch shrink so it shares its row with the actions rather than
+     pushing them onto a third line. */
+  .view-switch { flex: 1 1 0; }
+  .view-switch .segment { padding: 6px 6px; }
 }
 
 .cal-chips {
@@ -866,6 +882,9 @@ a { color: var(--accent); }
 
 /* ------------------------------------------------------- events: chips */
 
+/* An event is drawn in the colour that was chosen for it, not a wash of it. The
+   text colour comes from readableOn() in colors.js, which picks black or white by
+   luminance, so a pale yellow label and a deep purple one are both legible. */
 .chip,
 .bar,
 .event-row {
@@ -874,8 +893,8 @@ a { color: var(--accent); }
   align-items: center;
   width: 100%;
   border: 0;
-  background: rgba(var(--c-rgb), var(--chip-alpha));
-  color: var(--text);
+  background: var(--c);
+  color: var(--c-on);
   text-align: left;
   overflow: hidden;
 }
@@ -902,7 +921,10 @@ a { color: var(--accent); }
 
 .chip-time {
   font-variant-numeric: tabular-nums;
-  color: var(--text-dim);
+  /* Inherited rather than a grey, because the background is now a real colour;
+     the slight transparency keeps the title dominant. */
+  color: inherit;
+  opacity: 0.75;
   flex: 0 0 auto;
 }
 
@@ -982,7 +1004,7 @@ a { color: var(--accent); }
 
 .event-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .event-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-meta { font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-meta { font-size: 12.5px; color: inherit; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .event-people { display: inline-flex; flex: 0 0 auto; }
 .event-people .avatar + .avatar { margin-left: -6px; }
 
