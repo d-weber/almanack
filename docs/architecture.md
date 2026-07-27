@@ -128,6 +128,16 @@ a month is deliberately coarse in the same direction: it also reads series that 
 shortly before the window, in case a multi-day occurrence reaches into it. Expansion
 decides what is actually visible. Too wide costs a few rows; too narrow loses events.
 
+Search is the one place that "a copy is not an event of its own" bends, because search
+answers *find the thing I typed*. Renaming a single occurrence puts the new title on the
+copy and nowhere else, so hiding it makes the words the family typed unfindable; returning
+every copy shows one series once per exception it has. So a copy is returned exactly when
+it matches the query and its own template does not — no duplicates and no silent misses,
+in one condition. Search deliberately has no window: it is over the whole calendar, past
+and finished series included, which is also why a series result sorts under the date its
+pattern began. The occurrence-relative date beside each result (`next_occurrence`) is
+computed per result by the handler, because only expansion knows it and SQL cannot ask.
+
 That standalone event is the id the API then publishes for the occurrence, so the *second*
 thing anyone does to an edited occurrence arrives addressed to the copy rather than to the
 series — and a copy carries no pattern of its own. Every operation therefore resolves an id

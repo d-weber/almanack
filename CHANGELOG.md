@@ -520,6 +520,22 @@ Notable changes to this project. The format follows
   computed when the event is saved, so events created before this version keep the spelling
   they were filed under until they are next edited. Opening one and saving it re-files it.
   ([#24](https://github.com/d-weber/almanack/issues/24))
+- **Renaming one occurrence of a series made it impossible to find.** Rename next Tuesday's
+  swimming lesson to "Swimming (later than usual)" and searching for those words returned
+  nothing at all, while searching for "swimming" returned the series with its old title and
+  its old time. The renamed occurrence is stored as a separate copy of the event, and search
+  hid every such copy on the grounds that a series should appear once rather than once per
+  exception — which is right until the copy is the only place the words you typed exist.
+  Search now answers "find the thing I typed": a copy is returned when it matches and the
+  series it belongs to does not, so the renamed lesson is findable by its new name, and a
+  series with a dozen moved occurrences is still one result. The renamed occurrence also
+  arrives dated the day it actually happens; before, the only thing search could offer was
+  the series, sorted under the date the pattern began, so a lesson next week sorted among
+  2019. Two limits are unchanged and now written down rather than left to be discovered:
+  search covers the whole calendar with no date filter, so a series that finished years ago
+  still matches, and a series result is still sorted by the date its pattern began — the
+  date shown beside it is the next occurrence, which is the useful one.
+  ([#43](https://github.com/d-weber/almanack/issues/43))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

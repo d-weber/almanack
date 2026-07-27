@@ -191,7 +191,10 @@ Replaces **the caller's** reminders for the event or its series.
 `{ "reminders": [ { "offset_minutes": 30 } ] }` → `{ "reminders": [Reminder] }`
 
 ### `GET /api/v1/search?q=&participant=&label_id=&calendar_id=`
-Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once.
+Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once, as
+its template — unless one occurrence was edited to carry text the series does not, in which
+case that occurrence answers for itself. No date filter: a series matches whether or not it
+still runs, and `next_occurrence` is the date to show.
 → `{ "results": [ { "event": Event, "next_occurrence": "2026-09-01" } ] }`
 
 ## Notifications

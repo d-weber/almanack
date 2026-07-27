@@ -78,6 +78,16 @@ func mustCalendar(t *testing.T, s *Store, creator int64, name string) domain.Cal
 	return c
 }
 
+// idsOf is the ids of a slice of events, in the order they came back, for the assertions
+// that care about which events a query returned and in what order.
+func idsOf(events []domain.Event) []int64 {
+	out := make([]int64, 0, len(events))
+	for _, e := range events {
+		out = append(out, e.ID)
+	}
+	return out
+}
+
 // firstLabel returns a calendar's first seeded label, which every test event is filed
 // under.
 func firstLabel(t *testing.T, s *Store, calID int64) domain.Label {
@@ -674,6 +684,25 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if len(found) != 1 || found[0].ID != dentistID {
 		t.Errorf("searching for \"dentist\" found %d events, want just the dentist", len(found))
+	}
+
+	// And on rows a v0.2.0 binary wrote, the renamed occurrence is findable by the
+	// words only it carries. The fixture's "Swimming (later than usual)" is the copy
+	// standing in for one occurrence of the Swimming series, with a search_norm the old
+	// binary computed; searching for the series' own word must still answer with the
+	// series, once, rather than with both.
+	allCals := []int64{familyCal, parentsCal, kidsCal}
+	if found, err = s.SearchEvents(ctx(), allCals, "later than usual", nil, nil); err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	} else if len(found) != 1 || found[0].ID != movedSwimID {
+		t.Errorf("searching for \"later than usual\" found %v, want just the moved occurrence %d",
+			idsOf(found), movedSwimID)
+	}
+	if found, err = s.SearchEvents(ctx(), allCals, "swimming", nil, nil); err != nil {
+		t.Fatalf("SearchEvents: %v", err)
+	} else if len(found) != 1 || found[0].ID != swimmingID {
+		t.Errorf("searching for \"swimming\" found %v, want just the series template %d",
+			idsOf(found), swimmingID)
 	}
 
 	// --- the series, its override and its cancellation -------------------------
@@ -2789,6 +2818,101 @@ func TestSearchIsAccentInsensitive(t *testing.T) {
 	}
 	if got := find("piscine", nil, nil); len(got) != 1 || got[0] != series.ID {
 		t.Errorf("SearchEvents(\"piscine\") = %v; want just the template %d", got, series.ID)
+	}
+}
+
+// TestSearchFindsARenamedOccurrence pins the rule SearchEvents settles on: a search
+// answers "find the thing I typed", so the copy carrying a renamed occurrence has to be
+// findable by its own title — without a series turning into one hit per exception.
+func TestSearchFindsARenamedOccurrence(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	mk := func(title string, at time.Time) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: at, EndsAt: at.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("create event %q: %v", title, err)
+		}
+		return e
+	}
+	mkSeries := func(title string, at time.Time) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: at, EndsAt: at.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+		}, &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1,
+			ByWeekday: []time.Weekday{at.Weekday()}, DTStart: domain.DateIn(at, s.loc)})
+		if err != nil {
+			t.Fatalf("create series %q: %v", title, err)
+		}
+		return e
+	}
+	find := func(q string, participant, label *int64) []domain.Event {
+		t.Helper()
+		events, err := s.SearchEvents(ctx(), []int64{cal.ID}, q, participant, label)
+		if err != nil {
+			t.Fatalf("SearchEvents(%q): %v", q, err)
+		}
+		return events
+	}
+
+	// A piano lesson that has run every Thursday since 2019, with next week's
+	// occurrence renamed — the copy is the only row carrying the new words.
+	piano := mkSeries("Cours de piano", time.Date(2019, 9, 12, 17, 0, 0, 0, time.UTC))
+	audition := mk("Cours de piano — audition", time.Date(2026, 8, 6, 17, 0, 0, 0, time.UTC))
+	if err := s.SetOverride(ctx(), *piano.RecurrenceID, domain.MustParseDate("2026-08-06"), &audition.ID); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+
+	// The words only the copy has: the copy, once, and not its template.
+	if got := idsOf(find("audition", nil, nil)); len(got) != 1 || got[0] != audition.ID {
+		t.Errorf("SearchEvents(%q) = %v; want the renamed occurrence [%d]", "audition", got, audition.ID)
+	}
+	// Words both of them have: the series, once. The copy is an occurrence-level edit
+	// of an event that is already a hit, so returning it too would say "twice".
+	if got := idsOf(find("piano", nil, nil)); len(got) != 1 || got[0] != piano.ID {
+		t.Errorf("SearchEvents(%q) = %v; want just the template [%d]", "piano", got, piano.ID)
+	}
+
+	// An ordinary series with several exceptions that kept the title stays one hit,
+	// however many of them there are: this is the trap in including copies at all.
+	judo := mkSeries("Judo", time.Date(2026, 1, 5, 18, 0, 0, 0, time.UTC))
+	for _, d := range []domain.Date{
+		domain.MustParseDate("2026-02-02"),
+		domain.MustParseDate("2026-03-02"),
+		domain.MustParseDate("2026-04-06"),
+	} {
+		moved := mk("Judo", d.At(19, 30, time.UTC))
+		if err := s.SetOverride(ctx(), *judo.RecurrenceID, d, &moved.ID); err != nil {
+			t.Fatalf("SetOverride %s: %v", d, err)
+		}
+	}
+	if got := idsOf(find("judo", nil, nil)); len(got) != 1 || got[0] != judo.ID {
+		t.Errorf("SearchEvents(%q) = %v; want just the template [%d]", "judo", got, judo.ID)
+	}
+
+	// A copy sorts on the date it actually happens, not on the date its series began.
+	// The template would put next week's lesson under 2019 and behind this.
+	old := mk("Audition de fin d'année", time.Date(2020, 6, 20, 15, 0, 0, 0, time.UTC))
+	got := find("audition", nil, nil)
+	if want := []int64{audition.ID, old.ID}; !slices.Equal(idsOf(got), want) {
+		t.Fatalf("SearchEvents(%q) = %v; want %v, newest occurrence first", "audition", idsOf(got), want)
+	}
+	if y := got[0].StartsAt.Year(); y != 2026 {
+		t.Errorf("the renamed occurrence came back dated %d; want the date it happens, 2026", y)
+	}
+
+	// With nothing typed there is no text a copy could carry that its template does
+	// not, so a filter on its own still sees a series as its template, once: the two
+	// templates and the one-off, and none of the four copies.
+	if want := []int64{judo.ID, old.ID, piano.ID}; !slices.Equal(idsOf(find("", nil, &label.ID)), want) {
+		t.Errorf("label filter = %v; want the templates and the one-off %v", idsOf(find("", nil, &label.ID)), want)
 	}
 }
 
