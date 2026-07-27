@@ -20,6 +20,7 @@
   "action.confirm": "Confirm",
   "action.copy": "Copy",
   "action.loading": "Loading…",
+  "a11y.dialog": "Dialog",
   "auth.login.title": "Sign in",
   "auth.email": "Email address",
   "auth.password": "Password",

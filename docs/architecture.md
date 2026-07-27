@@ -267,6 +267,15 @@ nodes and attaches handlers with `addEventListener`; the CSP ships without `unsa
 so an inline `onclick` is a dead button rather than a shortcut, and `innerHTML` with server
 data is forbidden outright.
 
+Every sheet and dialog in the app is the same function, `openOverlay()` in `js/ui.js`, and
+modal there means modal to the keyboard as well as to the eye: Tab cycles inside the panel
+rather than walking into the page behind it, whatever opened the overlay gets the focus back
+on every way out — Escape, the backdrop, a button in the panel — and `role="dialog"` is
+labelled by the heading the panel already draws, falling back to a generic name from the
+catalogue for one built without a heading. That is why the day sheet, the confirmations and
+the recurrence scope question all behave alike; an overlay assembled by hand somewhere else
+would not, so new ones go through this function.
+
 The service worker precaches the shell keyed by a build hash the server computes from the
 embedded assets, and serves `/api/` network-first with a cache fallback so the last-seen
 calendar is readable offline. Its push handler always displays a notification, including a
