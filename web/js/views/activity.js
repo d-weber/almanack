@@ -106,8 +106,14 @@ export function renderActivity() {
 
   load();
 
-  return h('div', { class: 'activity screen' },
+  const wrap = h('div', { class: 'activity screen' },
     h('header', { class: 'screen-bar' },
       h('h1', { class: 'screen-title' }, t('activity.title'))),
     h('div', { class: 'screen-body scroll' }, list, footer));
+
+  // The feed stops paging on its own at the last page and disconnects there. Leaving
+  // the screen first is the other way it ends, and only app.js knows about that one.
+  wrap.cleanup = () => { if (observer) observer.disconnect(); };
+
+  return wrap;
 }

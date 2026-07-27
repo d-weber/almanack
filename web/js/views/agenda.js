@@ -100,6 +100,10 @@ export function renderAgenda({ date }) {
     }, t('action.loading')));
   }
 
+  // The list stops paging on its own at MAX_CHUNKS and disconnects there. Leaving the
+  // screen first is the other way it ends, and only app.js knows about that one.
+  wrap.cleanup = () => { if (observer) observer.disconnect(); };
+
   loadMore();
   return wrap;
 }
