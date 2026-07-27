@@ -746,6 +746,18 @@ Notable changes to this project. The format follows
   onwards has a name, so an appointment made today can never be mistaken for one that has
   been deleted.
   ([#60](https://github.com/d-weber/almanack/issues/60))
+- **Deleting a calendar could go on announcing its changes for a day afterwards.**
+  Deleting a calendar clears out the notifications it was about to produce, so that a
+  reminder for something nobody has any more does not go off two days later. It only ever
+  cleared out half of them. The reminders were found through the events being deleted; the
+  notifications that announce a change — "Claire added Piscine" — name the change and never
+  the calendar it was made in, so nothing matched them and they went out as normal: news
+  about a calendar the reader no longer has, and tapping it opens an event that went with
+  it. At most a day's worth, because an announcement more than a day late is dropped rather
+  than sent, and nothing was lost either way. It is written down because the note above
+  that query claimed it was already doing this, which is the kind of thing that misleads
+  whoever reads it next.
+  ([#61](https://github.com/d-weber/almanack/issues/61))
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

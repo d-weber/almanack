@@ -624,9 +624,17 @@ func TestAChangeTakingAReusedActivityIDIsStillAnnounced(t *testing.T) {
 		t.Fatalf("the change in the calendar about to be deleted produced %d notifications, want 1", n)
 	}
 
-	// Deleting the calendar takes its log entries with it and leaves the notification
-	// where it is: only reminders are pruned with a calendar, because the outbox is
-	// also the record of what was sent.
+	// The announcement goes out before the calendar does, which is what leaves it in
+	// the outbox to be collided with. Deleting a calendar prunes the notifications it
+	// has not delivered yet and keeps the ones it has, because a delivered row is the
+	// record that the family was told — and a row that keeps its slot in the UNIQUE
+	// index for good is what makes the reused id below a collision rather than a near
+	// miss.
+	for _, row := range e.queueOfKind(domain.KindActivity) {
+		if err := e.st.MarkSent(ctx, row.ID, e.clk.Now()); err != nil {
+			t.Fatalf("deliver the announcement made before the deletion: %v", err)
+		}
+	}
 	if err := e.st.DeleteCalendar(ctx, trip.ID); err != nil {
 		t.Fatalf("delete the calendar holding the newest change: %v", err)
 	}
@@ -655,7 +663,7 @@ func TestAChangeTakingAReusedActivityIDIsStillAnnounced(t *testing.T) {
 			piscine.ID, byTitle["Piscine"])
 	}
 	// The notification about the deleted calendar's change stays exactly as it is:
-	// it was announced once and it is not announced again.
+	// it was delivered once and it is not delivered again.
 	if byTitle["Ferry"] != 1 {
 		t.Errorf("the change announced before the deletion is queued %d times, want 1", byTitle["Ferry"])
 	}
@@ -1102,5 +1110,65 @@ func TestBothPrunesStillReachAReferenceCarryingAName(t *testing.T) {
 	if refs := pending(); len(refs) != 0 {
 		t.Errorf("%v survived the deletion of the series: the event prune no longer reaches a "+
 			"reference carrying a name, so a deleted series goes on reminding the family", refs)
+	}
+}
+
+// Deleting a calendar prunes the outbox of the notifications it was about to produce,
+// which is what stops a reminder for an appointment nobody has any more going off two
+// days later. It only ever pruned half of them: the query matched reminder references
+// alone, and an activity reference names the change rather than the calendar, so it
+// matched nothing. Every announcement of a change made in the calendar stayed queued and
+// went out — telling somebody about a calendar they no longer have, with a click-through
+// to an event that no longer exists.
+//
+// The window is a day at most, since delivery drops an activity notification more than
+// maxActivityLateness behind its slot, and nothing is lost by it. It is here because the
+// comment above the query said it was already doing this.
+func TestDeletingACalendarTakesItsQueuedAnnouncementsWithIt(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	trip := e.calendar("Vacances", actor.ID)
+	e.join(family.ID, watcher.ID)
+	e.join(trip.ID, watcher.ID)
+	e.subscribe(watcher.ID, "iphone")
+	e.noDigests()
+
+	e.plan() // the first pass only takes the high-water mark
+
+	e.timedEvent(trip, actor.ID, "Ferry", 2027, time.June, 3, 9, 0, time.Hour, nil)
+	e.clk.Advance(time.Second)
+	e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+	e.plan()
+	if n := len(e.queueOfKind(domain.KindActivity)); n != 2 {
+		t.Fatalf("two changes in two calendars produced %d announcements, want 2", n)
+	}
+
+	if err := e.st.DeleteCalendar(ctx, trip.ID); err != nil {
+		t.Fatalf("delete the calendar: %v", err)
+	}
+	e.dispatch()
+
+	var sent []string
+	for _, row := range e.queueOfKind(domain.KindActivity) {
+		if !row.SentAt.IsZero() {
+			sent = append(sent, e.payloadOf(row).Title)
+		}
+	}
+	if slices.Contains(sent, "Ferry") {
+		t.Errorf("the change in the deleted calendar was announced anyway (delivered: %v): the family "+
+			"is told about a calendar it no longer has, and the notification opens an event that has "+
+			"gone with it", sent)
+	}
+	// The other calendar's announcement is not collateral: the prune is scoped.
+	if !slices.Contains(sent, "Dentiste") {
+		t.Errorf("the surviving calendar's change was not announced (delivered: %v): deleting one "+
+			"calendar has emptied the outbox of another's", sent)
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("%d pushes went out, want 1 — the surviving calendar's", got)
 	}
 }

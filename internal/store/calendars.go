@@ -140,6 +140,13 @@ func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
 // never re-checks that the event is still there: a reminder already materialised for
 // the next two days goes out for a calendar that no longer exists. Only undelivered
 // rows go; sent and skipped ones are history.
+//
+// Both kinds a calendar can produce go, and they are found in different ways. A
+// reminder's reference begins with the id of the event it warns about, so the events
+// being deleted name their own rows. A change's does not mention the calendar at all —
+// it names the change — so there is no prefix that means "this calendar's", and the log
+// rows are what has to be asked instead. They are still here to be asked: the cascade
+// that takes them runs on the DELETE below, after this.
 func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -158,6 +165,22 @@ func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 			   AND EXISTS (SELECT 1 FROM events e
 			                WHERE e.calendar_id = ?
 			                  AND notification_queue.source_ref LIKE 'reminder:' || e.id || ':%')`, id); err != nil {
+			return mapErr(err)
+		}
+		// The two spellings internal/events.ActivitySourceRef writes, matched whole
+		// rather than by prefix: 'activity:1' is a prefix of 'activity:12', so a
+		// prefix would take eleven other changes' announcements with it, from
+		// calendars nobody has deleted. Both spellings are listed rather than
+		// reasoned about, because which one a given row carries depends on whether
+		// its change was logged before 0006.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM notification_queue
+			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND EXISTS (SELECT 1 FROM activity_log a
+			                WHERE a.calendar_id = ?
+			                  AND notification_queue.source_ref IN (
+			                        'activity:' || a.id,
+			                        'activity:' || a.id || ':' || a.change_uid))`, id); err != nil {
 			return mapErr(err)
 		}
 		return affected(tx.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))

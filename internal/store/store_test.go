@@ -1789,6 +1789,96 @@ func TestDeletingACalendarLeavesNothingBehind(t *testing.T) {
 	}
 }
 
+// TestDeletingACalendarPrunesItsQueuedAnnouncements is the other half of the outbox the
+// test above covers. A reminder's reference begins with the id of the event it warns
+// about, so the events being deleted find their own rows; a change's reference names the
+// change and never the calendar, so nothing about it can be matched by prefix and the
+// log rows have to be asked instead — while they are still there to be asked.
+//
+// Both spellings the reference has had are seeded, because a household upgrading from
+// 0.2.0 has changes logged before 0006 with no name of their own, queued under the id
+// alone, sitting beside changes logged since.
+func TestDeletingACalendarPrunesItsQueuedAnnouncements(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	log := func(cal domain.Calendar, title string) domain.Activity {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity %q: %v", title, err)
+		}
+		rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 1, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("read back the change %q: %v", title, err)
+		}
+		return rows[0]
+	}
+	// The format internal/events.ActivitySourceRef writes, which cannot be called here
+	// (that package depends on this one) — the same standing arrangement as for
+	// reminders, and the same reason to spell it out.
+	ref := func(a domain.Activity) string {
+		if a.ChangeUID == "" {
+			return fmt.Sprintf("activity:%d", a.ID)
+		}
+		return fmt.Sprintf("activity:%d:%s", a.ID, a.ChangeUID)
+	}
+	queue := func(a domain.Activity, due time.Time) string {
+		t.Helper()
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindActivity, SourceRef: ref(a),
+			Payload: `{"title":"` + a.Title + `"}`, DueAt: due,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", a.Title, err)
+		}
+		return ref(a)
+	}
+
+	named := log(doomed, "Ferry")
+	// A change from before 0006: its row carries no name and its notification is
+	// queued under the id alone.
+	old := log(doomed, "Piscine")
+	if _, err := s.DB().ExecContext(ctx(), `UPDATE activity_log SET change_uid = '' WHERE id = ?`, old.ID); err != nil {
+		t.Fatalf("take the name off the older change: %v", err)
+	}
+	old.ChangeUID = ""
+	elsewhere := log(kept, "Réunion")
+
+	queue(named, baseTime)
+	queue(old, baseTime)
+	survivor := queue(elsewhere, baseTime)
+	// A row already delivered is the record that the family was told, which is what
+	// stops a catch-up pass telling them again. It is history and it stays.
+	delivered := queue(log(doomed, "Marché"), baseTime.Add(-time.Hour))
+	if err := s.MarkSent(ctx(), queuedIDBySourceRef(t, s, delivered), baseTime); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var refs []string
+	for _, p := range pending {
+		refs = append(refs, p.SourceRef)
+	}
+	if len(refs) != 1 || refs[0] != survivor {
+		t.Errorf("queued after the calendar went = %v; want only the surviving calendar's %q — an "+
+			"announcement left behind names a calendar the recipient no longer has and opens an "+
+			"event that has gone with it", refs, survivor)
+	}
+	if n := countRows(t, s, "notification_queue"); n != 2 {
+		t.Errorf("%d queue rows left; want the surviving calendar's pending one plus the delivered one", n)
+	}
+}
+
 // queuedIDBySourceRef finds a queued row the way no store method does, because
 // EnqueueNotification deliberately reports nothing about what it inserted.
 func queuedIDBySourceRef(t *testing.T, s *Store, ref string) int64 {
