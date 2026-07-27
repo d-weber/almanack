@@ -238,7 +238,7 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		return err
 	}
 
-	recurrenceOfSeries := map[int64]*int64{}
+	templates := map[int64]domain.Event{}
 	var errs []error
 	for _, occ := range occs {
 		// Source references are keyed on the *series* event for a recurring
@@ -247,6 +247,25 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		sourceEvent := occ.Event.ID
 		if occ.SeriesEventID != nil {
 			sourceEvent = *occ.SeriesEventID
+		}
+
+		// named is the row the reference names, which is the row whose id is in it.
+		// For a plain event and for an ordinary occurrence of a series the occurrence
+		// in hand already is that row — the expansion carries the template's fields —
+		// but the copy standing in for an edited occurrence is a row of its own, and
+		// the template it stands in for is what has to be read for those.
+		named := occ.Event
+		if sourceEvent != occ.Event.ID {
+			t, err := n.seriesTemplate(ctx, sourceEvent, templates)
+			if err != nil {
+				// Nothing can be filed for this occurrence without the row its
+				// reference names, and guessing a reference is how a reminder is
+				// queued a second time. The pass fails instead, which leaves the
+				// horizon marker where it was, so the next one tries again.
+				errs = append(errs, err)
+				continue
+			}
+			named = t
 		}
 
 		// An occurrence inherits its series' reminders until somebody changes them on
@@ -271,13 +290,11 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if detached[detachedPair{eventID: occ.Event.ID, userID: userID}] {
 				break // the copy's own list is the whole answer for this date
 			}
-			// An override copy is a standalone event row, so the reminders it
-			// inherits have to be found through the series template it stands in for.
-			rid, err := n.recurrenceOfSeries(ctx, sourceEvent, recurrenceOfSeries)
-			if err != nil {
-				errs = append(errs, err)
-			} else if rid != nil {
-				cands = append(cands, byRecurrence[*rid]...)
+			// An override copy is a standalone event row and names no recurrence of
+			// its own, so the reminders it inherits are found through the series
+			// template it stands in for — which is the row already read above.
+			if named.RecurrenceID != nil {
+				cands = append(cands, byRecurrence[*named.RecurrenceID]...)
 			}
 		case occ.RecurrenceID != nil:
 			cands = append(cands, byRecurrence[*occ.RecurrenceID]...)
@@ -314,12 +331,14 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if due.Before(from) && !p.eventStillAhead(from, n.loc) {
 				continue
 			}
-			// The id and the name answer different questions, which is why they
-			// are not read off the same row for an edited occurrence: the id is
-			// the handle internal/events prunes by, so it is the series', while
-			// the name says which appointment this notification is about, so it
-			// is that of the row the payload above was built from.
-			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID, occ.Event.EventUID)
+			// The name qualifies the id beside it — it says which of the events
+			// that id has named this one is — so both are read off the one row.
+			// Not the payload's: an occurrence edited between its warning and its
+			// hour is the same warning about the same appointment, and reading the
+			// name off the copy that edit left behind moved the reference of every
+			// reminder the family had already been sent, past the delivered row
+			// that was supposed to absorb the re-plan.
+			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID, named.EventUID)
 			if err := n.enqueue(ctx, userID, domain.KindReminder, ref, p, due); err != nil {
 				errs = append(errs, err)
 			}
@@ -328,22 +347,30 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 	return errors.Join(errs...)
 }
 
-// recurrenceOfSeries resolves a series template event id to its recurrence id,
-// memoised for the pass. It is how an edited occurrence finds the reminders it
-// inherits: the copy standing in for it is a standalone event row and names no
-// recurrence of its own, so the series it belongs to is the only place to ask —
-// and asking the series it actually belongs to, rather than any series, is what
-// keeps one family's judo reminder off another lesson.
-func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
-	if rid, ok := cache[eventID]; ok {
-		return rid, nil
+// seriesTemplate reads a series template event, memoised for the pass. It is the row
+// an edited occurrence has to be resolved back to twice over, and both answers are
+// about the template rather than about the copy standing in for that date.
+//
+// Its recurrence id is how the copy finds the reminders it inherits: the copy is a
+// standalone event row and names no recurrence of its own, so the series it belongs
+// to is the only place to ask — and asking the series it actually belongs to, rather
+// than any series, is what keeps one family's judo reminder off another lesson. Its
+// name is what the reference is qualified by, because the id in that reference is the
+// template's.
+//
+// Memoised because a series with a dozen edited occurrences is one row read a dozen
+// times otherwise, on every tick, and the planner already reads the reminders and the
+// detachments once for the whole pass for the same reason.
+func (n *Notifier) seriesTemplate(ctx context.Context, eventID int64, cache map[int64]domain.Event) (domain.Event, error) {
+	if e, ok := cache[eventID]; ok {
+		return e, nil
 	}
 	e, err := n.st.EventByID(ctx, eventID)
 	if err != nil {
-		return nil, fmt.Errorf("series template %d: %w", eventID, err)
+		return domain.Event{}, fmt.Errorf("series template %d: %w", eventID, err)
 	}
-	cache[eventID] = e.RecurrenceID
-	return e.RecurrenceID, nil
+	cache[eventID] = e
+	return e, nil
 }
 
 // lead is how far ahead of its occurrence a reminder fires, used only to size the

@@ -945,10 +945,10 @@ func TestAnAppointmentTakingAReusedEventIDIsStillReminded(t *testing.T) {
 // than the one being fixed: instead of one appointment going unannounced, every
 // appointment in the house is announced over and over.
 //
-// The three shapes are here because the name is read off a different row in each: a
-// plain event's own, a series occurrence's template (the expansion carries the
-// template's fields), and, for an occurrence somebody has edited, the copy standing in
-// for that date.
+// The three shapes are here because the name reaches the reference by a different route
+// in each: a plain event's own row, a series occurrence's template (the expansion carries
+// the template's fields), and, for an occurrence somebody has edited, that same template
+// read back through the copy standing in for the date.
 func TestReplanningAnUnchangedReminderQueuesItOnce(t *testing.T) {
 	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
 	e.noDigests()
@@ -1012,6 +1012,241 @@ func TestReplanningAnUnchangedReminderQueuesItOnce(t *testing.T) {
 			t.Errorf("%q is queued %d times, want %d", title, byTitle[title], want)
 		}
 	}
+}
+
+// The case the test above cannot reach, because it edits the occurrence before the first
+// pass: an occurrence edited *after* the family has been warned about it used to be warned
+// about a second time.
+//
+// An occurrence of a series inherits the series' reminders, and those are filed under the
+// series event's id, because that is the handle internal/events prunes by. The name that
+// stops a reused id imitating them was read off the row the payload was built from
+// instead, and for an edited occurrence that row is the copy the edit leaves behind —
+// which internal/events creates at the moment of the edit, so it is named then. The first
+// ScopeThis edit therefore moved the reference of every reminder that occurrence had
+// already been warned by. The delivered row keeps the old spelling for good, since the
+// prunes skip sent rows and nothing prunes the outbox by age, so INSERT OR IGNORE no
+// longer absorbed the re-plan: a second row landed on the same instant and delivery sent
+// it, because a late warning beats no warning while the appointment is still ahead.
+//
+// Any edit that leaves the clock alone does it — a title, a location, a note, a
+// participant, a label — and the window is from the warning to the appointment, which for
+// "the day before at 09:00" is a whole day. Neither edit below moves anything, which is
+// the point: an edit that moved the occurrence would be a different warning at a different
+// instant, and would deserve a row of its own.
+func TestEditingAnOccurrenceAlreadyWarnedAboutDoesNotWarnAgain(t *testing.T) {
+	t.Run("renamed a quarter of an hour after its warning", func(t *testing.T) {
+		e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC)) // 08:00 in Paris
+		alice := e.user("alice")
+		cal := e.calendar("Famille", alice.ID)
+		e.subscribe(alice.ID, "iphone")
+		e.noDigests()
+
+		piscine := e.timedEvent(cal, alice.ID, "Piscine", 2027, time.June, 1, 17, 0, time.Hour,
+			&domain.Recurrence{Freq: domain.FreqDaily, Interval: 1})
+		e.reminderMinutes(piscine, alice.ID, 30)
+
+		e.plan()
+		e.clk.Set(time.Date(2027, 6, 1, 16, 35, 0, 0, paris))
+		e.dispatch()
+		if got := len(e.push.received()); got != 1 {
+			t.Fatalf("the half-hour warning produced %d pushes, want 1", got)
+		}
+
+		// Ten minutes later somebody corrects the name of today's lesson. The hour is
+		// untouched, so this is the same warning about the same appointment.
+		e.clk.Set(time.Date(2027, 6, 1, 16, 45, 0, 0, paris))
+		retitleOneOccurrence(t, e, cal, piscine, alice.ID, date(2027, 6, 1), "Piscine (bassin nordique)")
+
+		e.plan()
+		e.dispatch()
+
+		if got := len(e.push.received()); got != 1 {
+			t.Errorf("%d pushes went out in all, want 1: renaming an occurrence between its warning "+
+				"and its hour is not a second warning", got)
+		}
+		if got := queuedForOccurrence(t, e, piscine.ID, date(2027, 6, 1)); got != 1 {
+			t.Errorf("today's lesson is in the outbox %d times, want 1: the row already delivered "+
+				"keeps the reference it was filed under, so a second row is a second push", got)
+		}
+	})
+
+	t.Run("given a location the morning after its warning", func(t *testing.T) {
+		e := newEnv(t, time.Date(2027, 6, 7, 6, 0, 0, 0, time.UTC)) // Monday, 08:00 in Paris
+		alice := e.user("alice")
+		cal := e.calendar("Famille", alice.ID)
+		e.subscribe(alice.ID, "iphone")
+		e.noDigests()
+
+		judo := e.timedEvent(cal, alice.ID, "Judo", 2027, time.June, 8, 17, 0, time.Hour,
+			&domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}})
+		e.reminderAt(judo, alice.ID, 1, "09:00") // the day before, at 09:00
+
+		e.plan()
+		e.clk.Set(time.Date(2027, 6, 7, 9, 1, 0, 0, paris))
+		e.dispatch()
+		if got := len(e.push.received()); got != 1 {
+			t.Fatalf("the day-before warning produced %d pushes, want 1", got)
+		}
+
+		// Next morning, hours before the lesson, somebody adds the address.
+		e.clk.Set(time.Date(2027, 6, 8, 8, 0, 0, 0, paris))
+		tuesday := date(2027, 6, 8)
+		start := time.Date(2027, 6, 8, 17, 0, 0, 0, paris)
+		if _, err := e.ev.Update(e.ctx, alice.ID, judo.ID, domain.ScopeThis, tuesday, events.Input{
+			CalendarID: cal.ID, Title: judo.Title, Location: "Dojo municipal",
+			StartsAt: start.UTC(), EndsAt: start.Add(time.Hour).UTC(),
+			LabelID: judo.LabelID, Participants: []int64{alice.ID},
+		}); err != nil {
+			t.Fatalf("add a location to Tuesday's lesson: %v", err)
+		}
+
+		e.plan()
+		e.dispatch()
+
+		if got := len(e.push.received()); got != 1 {
+			t.Errorf("%d pushes went out in all, want 1: adding an address the morning after the "+
+				"warning is not a second warning", got)
+		}
+		if got := queuedForOccurrence(t, e, judo.ID, tuesday); got != 1 {
+			t.Errorf("Tuesday's lesson is in the outbox %d times, want 1", got)
+		}
+	})
+}
+
+// The protection the change above had to keep. #60 put a name in the reference because
+// the three ids in it are all reusable, and the id it is there to qualify is the one the
+// reference actually carries — for an occurrence of a series, the template's. Reading the
+// name off the template is therefore where the protection is strongest rather than a
+// place it might have been given up: the row that can be deleted and have its id handed
+// to something else is the very row now being named.
+//
+// So it is proved on the series, in the shape the reproduction for #60 uses on a plain
+// event: the whole series goes, the next thing made takes its id and its reminder's id,
+// its edited occurrence falls on the same date, and its warning falls on the same instant
+// to the second. Nothing about the key can tell the two apart except the name.
+func TestASeriesTakingAReusedEventIDIsStillReminded(t *testing.T) {
+	e := newEnv(t, time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)) // Monday, 08:00 in Paris
+	ctx := context.Background()
+
+	claire := e.user("claire")
+	cal := e.calendar("Famille", claire.ID)
+	e.subscribe(claire.ID, "iphone")
+	e.noDigests()
+
+	tuesday := date(2026, 6, 2)
+	judo := e.timedEvent(cal, claire.ID, "Judo", 2026, time.June, 2, 17, 0, time.Hour,
+		&domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}})
+	e.reminderAt(judo, claire.ID, 1, "09:00") // the day before, at 09:00
+	e.clk.Set(time.Date(2026, 6, 1, 8, 30, 0, 0, paris))
+	judoCopy := retitleOneOccurrence(t, e, cal, judo, claire.ID, tuesday, "Judo (compétition)")
+
+	e.plan()
+	e.clk.Set(time.Date(2026, 6, 1, 9, 0, 0, 0, paris))
+	e.dispatch()
+	if got := len(e.push.received()); got != 1 {
+		t.Fatalf("the warning about the competition produced %d pushes, want 1", got)
+	}
+	if refs := refsForOccurrence(t, e, judo.ID, tuesday); len(refs) != 1 ||
+		!strings.HasSuffix(refs[0], ":"+judo.EventUID) {
+		t.Fatalf("the delivered warning is filed under %v, want one reference named %q — the row the "+
+			"id in it belongs to", refs, judo.EventUID)
+	}
+
+	// That evening the club changes its mind: judo is dropped and karate starts in its
+	// place, on the same evening of the same week. Deleting the series prunes everything
+	// still waiting for it and keeps the row that was delivered, which is the setup.
+	e.clk.Set(time.Date(2026, 6, 1, 20, 0, 0, 0, paris))
+	if err := e.ev.Delete(ctx, claire.ID, judo.ID, domain.ScopeAll, domain.Date{}); err != nil {
+		t.Fatalf("delete the series: %v", err)
+	}
+	karate := e.timedEvent(cal, claire.ID, "Karaté", 2026, time.June, 2, 17, 0, time.Hour,
+		&domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}})
+	e.reminderAt(karate, claire.ID, 1, "09:00")
+	karateCopy := retitleOneOccurrence(t, e, cal, karate, claire.ID, tuesday, "Karaté (essai)")
+
+	if karate.ID != judo.ID || karateCopy.ID != judoCopy.ID {
+		t.Fatalf("the replacement series took event id %d and its copy %d, where the series it replaced "+
+			"had %d and %d: this SQLite is not reusing the ids of deleted rows, so this test no longer "+
+			"reproduces the fault", karate.ID, karateCopy.ID, judo.ID, judoCopy.ID)
+	}
+	if ids := reminderIDs(t, e); len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("the replacement's reminders are %v, want the reused id [1]: this test no longer "+
+			"reproduces the fault", ids)
+	}
+	if karate.EventUID == judo.EventUID {
+		t.Fatalf("both series are named %q, so the reference has nothing left to tell them apart by",
+			karate.EventUID)
+	}
+
+	e.plan()
+	e.dispatch()
+
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	if byTitle["Karaté (essai)"] != 1 {
+		t.Errorf("the lesson that took the reused ids is queued %d times, want 1: its warning falls on "+
+			"the instant the deleted series' did, and that row is still in the outbox",
+			byTitle["Karaté (essai)"])
+	}
+	if got := len(e.push.received()); got != 2 {
+		t.Errorf("%d pushes went out in all, want 2: the family has a lesson tomorrow evening and has "+
+			"been warned about it once", got)
+	}
+	if byTitle["Judo (compétition)"] != 1 {
+		t.Errorf("the warning already sent is in the outbox %d times, want 1", byTitle["Judo (compétition)"])
+	}
+}
+
+// retitleOneOccurrence renames a single occurrence and changes nothing else: same hour,
+// same duration, same label, same participants. It is the shape of edit this file needs
+// most — one that cannot be excused as a different warning about a different appointment.
+func retitleOneOccurrence(t *testing.T, e *env, cal domain.Calendar, series domain.Event,
+	userID int64, occDate domain.Date, title string) domain.Event {
+	t.Helper()
+	occ, err := e.ev.Occurrence(e.ctx, series.ID, occDate)
+	if err != nil {
+		t.Fatalf("read the occurrence of %s on %s: %v", series.Title, occDate, err)
+	}
+	copyEvent, err := e.ev.Update(e.ctx, userID, series.ID, domain.ScopeThis, occDate, events.Input{
+		CalendarID: cal.ID, Title: title,
+		StartsAt: occ.StartsAt, EndsAt: occ.EndsAt,
+		LabelID: series.LabelID, Participants: []int64{userID},
+	})
+	if err != nil {
+		t.Fatalf("rename the occurrence of %s on %s: %v", series.Title, occDate, err)
+	}
+	if copyEvent.ID == series.ID {
+		t.Fatalf("editing one occurrence answered with the series template itself")
+	}
+	if !copyEvent.StartsAt.Equal(occ.StartsAt) || !copyEvent.EndsAt.Equal(occ.EndsAt) {
+		t.Fatalf("the rename moved the occurrence from %s to %s: this test is about an edit that "+
+			"leaves the hour alone", wall(occ.StartsAt), wall(copyEvent.StartsAt))
+	}
+	return copyEvent
+}
+
+// refsForOccurrence is every reminder reference in the outbox filed for one occurrence of
+// one series, delivered ones included. Reading the rows rather than the pushes is what
+// says whether a fault is a second row in the outbox or something delivery decided.
+func refsForOccurrence(t *testing.T, e *env, seriesID int64, occDate domain.Date) []string {
+	t.Helper()
+	prefix := events.OccurrenceSourcePrefix(seriesID, occDate)
+	var refs []string
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		if strings.HasPrefix(row.SourceRef, prefix) {
+			refs = append(refs, row.SourceRef)
+		}
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func queuedForOccurrence(t *testing.T, e *env, seriesID int64, occDate domain.Date) int {
+	t.Helper()
+	return len(refsForOccurrence(t, e, seriesID, occDate))
 }
 
 // The reproduction from #65, driven through a real store and the real planner. A

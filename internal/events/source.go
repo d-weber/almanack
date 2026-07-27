@@ -34,17 +34,24 @@ import (
 // on the same occurrence date with the same reminder instant was read as the reminder
 // already sent and dropped (migration 0007).
 //
-// eventUID is the name of the event row this occurrence's fields came from, which is the
-// part a reused id cannot imitate. For a plain event and for an ordinary occurrence of a
-// series that is the event or its template; for an occurrence somebody has edited it is
-// the copy standing in for that date, which is right rather than a compromise — the copy
-// is what the notification says, and it is the copy being remade that makes the
-// notification a different one.
+// eventUID is the name of the row eventID names, which is the part a reused id cannot
+// imitate. The two are read off one row on purpose: the name is there to say which of
+// the events that id has held this reference is about, and a name taken from anywhere
+// else does not answer that. For an occurrence somebody has edited, eventID is still the
+// series template's — that is the handle the prunes use — so the name is the template's
+// too, and not the copy standing in for that date. Reading it off the copy was the same
+// reminder filed twice: the copy is created by the edit and named then, so the first
+// edit that left the hour alone moved the reference of every reminder the family had
+// already been sent, past the delivered row that was supposed to absorb the re-plan.
 //
-// It goes last because the layout above is a prune hierarchy before it is an identity:
-// only the tail is free, and a name anywhere earlier would put the two prefixes out of
-// reach of the references they are meant to match. So it qualifies the first component
-// rather than the one beside it. TestSourceRefPrefixesNest holds the arrangement.
+// Where it may go is settled by the layout above being a prune hierarchy before it is an
+// identity. The two prefixes stop after the occurrence date, so what a name must not do
+// is displace either of the first two components — which leaves the last two positions,
+// not only the last. It takes the last one because the layout reads broadest to narrowest
+// and a name qualifying the whole reference belongs at the narrow end, and because the
+// pre-0007 spelling is then a truncation of the current one rather than a different
+// arrangement of the same fields: one reference read two ways, which is what lets old and
+// new rows sit in the outbox together. TestSourceRefPrefixesNest holds the arrangement.
 //
 // An event created before events had names keeps the old spelling. That is not a
 // concession: its reminders are already in the outbox under it, the row itself is what

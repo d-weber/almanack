@@ -1126,9 +1126,10 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 // cancelled, and a reference that has stopped being covered by its own prefixes is a
 // reminder that goes on firing for an appointment nobody has any more.
 //
-// The named spelling is checked beside the old one for that reason: the name went on
-// the end because that is the only place it can go without putting one of the two
-// prefixes out of reach of the references it is meant to match.
+// The named spelling is checked beside the old one for that reason. What the prefixes
+// forbid is a name displacing the event id or the occurrence date; the end is where it
+// went for the other reasons ReminderSourceRef gives, and this is the constraint that
+// rules the rest out.
 func TestSourceRefPrefixesNest(t *testing.T) {
 	d := domain.MustParseDate("2026-08-04")
 	for _, ref := range []string{
