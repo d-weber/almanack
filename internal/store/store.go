@@ -34,6 +34,14 @@
 // SetOverride, RepointOverrides, UpsertPushSubscription, DeletePushSubscription,
 // UpdatePrefs, SetHolidayOverride, SetMeta and EnqueueNotification. Each says so in
 // its own doc comment.
+//
+// # Transactions
+//
+// Store.InTx runs a function against a Store whose statements all go through one
+// transaction, so a caller can make a sequence of these methods atomic without any of
+// them knowing. internal/events uses it for the scoped edits, which are several writes
+// each and must not be interrupted half-way; nothing in this package needs to be
+// rewritten for it, and nothing outside it has to hold a *sql.Tx.
 package store
 
 import (
@@ -70,10 +78,12 @@ const driverName = "sqlite"
 // gives the loser five seconds to win. For a household of at most ten people that is
 // several orders of magnitude more concurrency than the workload needs.
 //
-// The one rule this implies: a function running inside a transaction must use the
-// *sql.Tx it was handed and must never call back into a Store method, which would ask
-// the pool for a second connection while holding one. With a pool this small that is a
-// deadlock, not a slowdown. Store.tx says the same thing where it is easier to find.
+// The rule this used to imply — that code inside a transaction must never call a Store
+// method, because asking a four-connection pool for a second connection while holding
+// one is a deadlock rather than a slowdown — is now enforced by construction instead of
+// by discipline: inside InTx every Store method runs on the transaction's own
+// connection, and Store.tx joins the transaction in progress rather than beginning a
+// second one. Nothing in this package reaches for the pool while a transaction is open.
 const maxOpenConns = 4
 
 // busyTimeoutMS is how long SQLite waits for a lock before returning SQLITE_BUSY.
@@ -83,8 +93,14 @@ const busyTimeoutMS = 5000
 var migrationFS embed.FS
 
 // Store is the handle every other package uses to reach the database.
+//
+// Every query runs against q, which is the pool itself for the Store that Open returns
+// and one open transaction for the copy InTx hands out. That is the whole of the
+// transaction mechanism: the methods below cannot tell the difference, so any sequence
+// of them can be made atomic without being rewritten as SQL.
 type Store struct {
 	db  *sql.DB
+	q   querier
 	loc *time.Location
 	clk clock.Clock
 }
@@ -124,7 +140,7 @@ func Open(path string, loc *time.Location, clk clock.Clock) (*Store, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 
-	s := &Store{db: db, loc: loc, clk: clk}
+	s := &Store{db: db, q: db, loc: loc, clk: clk}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
@@ -290,6 +306,10 @@ func loadMigrations() ([]migration, error) {
 // Rollback in this project is a symlink flip back to the previous release; that is only
 // safe because the old binary stops here instead of running against a schema whose
 // shape it does not know.
+//
+// This is the one part of the store that names the pool rather than s.q. Migrations run
+// once, from Open, before any caller holds a Store — and each one owns the transaction
+// it is applied in, which is what keeps a failure at the last complete version.
 func (s *Store) migrate(ctx context.Context) error {
 	ms, err := loadMigrations()
 	if err != nil {
@@ -380,13 +400,63 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// tx runs fn inside a transaction, committing when it returns nil and rolling back on
-// any error or panic.
+// InTx runs fn against a copy of the Store whose every query goes through one
+// transaction, committing when fn returns nil and rolling back on any error or panic.
 //
-// fn must do all of its work through the *sql.Tx it is given. Calling a Store method
-// from inside fn takes a second connection from a four-connection pool while holding
-// one, which under load is a deadlock — see maxOpenConns.
+// It exists because the interesting writes in this application are sequences. Splitting
+// a series ends the old one, creates its replacement, moves the exceptions across and
+// copies everyone's reminders; each statement runs on the request's context, so a phone
+// that loses its connection half-way through genuinely stops the sequence. Before this,
+// that left the old series capped with no replacement — half a family's swimming
+// lessons gone, with an error on screen that says nothing about it.
+//
+// The alternative was a bespoke store method per flow, which would have moved the
+// orchestration — recurrence validation, re-anchoring a pattern, deciding which
+// exceptions the new pattern can still reach — behind SQL-shaped APIs, and left the
+// next flow that spans two writes with the same problem. A transaction-scoped Store
+// keeps the decisions where they belong (internal/events) and makes atomicity something
+// a caller can ask for in one line.
+//
+// fn must do its work through the *Store it is given: the outer one still writes
+// through the pool, outside the transaction, and would survive the rollback.
+//
+// Nesting is safe — an InTx inside an InTx joins the transaction already open rather
+// than beginning a second one, which on a four-connection pool holding an exclusive
+// write lock would deadlock rather than merely queue. Note what joining means: the
+// inner fn's error rolls the whole thing back, because there is only one thing.
+//
+// Because _txlock=immediate takes SQLite's write lock at BEGIN, a transaction here
+// serialises every other writer for as long as it is open. Keep them to the statements
+// that must land together: validate, compute and decide before calling, and never wait
+// on anything slower than the database inside.
+func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
+	if _, joined := s.q.(*sql.Tx); joined {
+		return fn(s)
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error { return fn(s.withTx(tx)) })
+}
+
+// withTx returns a shallow copy of s that runs its queries on tx. Everything else —
+// the pool handle, the family timezone, the clock — is shared, because a transaction
+// changes where the statements go and nothing else.
+func (s *Store) withTx(tx *sql.Tx) *Store {
+	scoped := *s
+	scoped.q = tx
+	return &scoped
+}
+
+// tx runs fn inside a transaction, committing when it returns nil and rolling back on
+// any error or panic. It is the store's own plumbing; callers outside this package use
+// InTx.
+//
+// When s is already transaction-scoped, fn is handed the transaction in progress and
+// neither commits nor rolls it back: the outer InTx owns that decision, and a Store
+// method that quietly committed half of somebody's transaction would be worse than the
+// pool exhaustion this avoids.
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {
+	if open, joined := s.q.(*sql.Tx); joined {
+		return fn(open)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", mapErr(err))

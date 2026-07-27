@@ -103,11 +103,11 @@ func (s *Store) CreateEvent(ctx context.Context, e domain.Event, rec *domain.Rec
 
 // EventByID returns one event with its participants, or domain.ErrNotFound.
 func (s *Store) EventByID(ctx context.Context, id int64) (domain.Event, error) {
-	e, err := scanEvent(s.db.QueryRowContext(ctx, `SELECT `+eventColsBare+` FROM events WHERE id = ?`, id))
+	e, err := scanEvent(s.q.QueryRowContext(ctx, `SELECT `+eventColsBare+` FROM events WHERE id = ?`, id))
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("event %d: %w", id, err)
 	}
-	parts, err := listParticipants(ctx, s.db, id)
+	parts, err := listParticipants(ctx, s.q, id)
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("event %d: %w", id, err)
 	}
@@ -123,7 +123,7 @@ func (s *Store) EventByID(ctx context.Context, id int64) (domain.Event, error) {
 // split repoints the tail of a series.
 func (s *Store) UpdateEvent(ctx context.Context, e domain.Event) error {
 	args := append(eventValueArgs(e), putInt64Ptr(e.RecurrenceID), e.UpdatedBy, mustInstant(s.now()), e.ID)
-	err := affected(s.db.ExecContext(ctx, `
+	err := affected(s.q.ExecContext(ctx, `
 		UPDATE events
 		   SET title = ?, search_norm = ?, all_day = ?, starts_at = ?, ends_at = ?, start_date = ?, end_date = ?,
 		       location = ?, url = ?, notes = ?, label_id = ?, recurrence_id = ?, updated_by = ?, updated_at = ?
@@ -141,7 +141,7 @@ func (s *Store) UpdateEvent(ctx context.Context, e domain.Event) error {
 // restores that occurrence to the series default. Cancelling an occurrence is a
 // SetOverride with a nil event id, not a DeleteEvent.
 func (s *Store) DeleteEvent(ctx context.Context, id int64) error {
-	err := affected(s.db.ExecContext(ctx, `DELETE FROM events WHERE id = ?`, id))
+	err := affected(s.q.ExecContext(ctx, `DELETE FROM events WHERE id = ?`, id))
 	if err != nil {
 		return fmt.Errorf("delete event %d: %w", id, err)
 	}
@@ -174,7 +174,7 @@ func setParticipants(ctx context.Context, q querier, eventID int64, ids []int64)
 
 // ListParticipants returns the user ids attached to an event, ascending.
 func (s *Store) ListParticipants(ctx context.Context, eventID int64) ([]int64, error) {
-	ids, err := listParticipants(ctx, s.db, eventID)
+	ids, err := listParticipants(ctx, s.q, eventID)
 	if err != nil {
 		return nil, fmt.Errorf("participants of event %d: %w", eventID, err)
 	}
@@ -302,7 +302,7 @@ func decodeWeekdays(v sql.NullString) ([]time.Weekday, error) {
 // through CreateEvent, which does this and the event together; this is for the
 // series-split path, which needs the new recurrence before it has the new template.
 func (s *Store) CreateRecurrence(ctx context.Context, r domain.Recurrence) (domain.Recurrence, error) {
-	out, err := insertRecurrence(ctx, s.db, r)
+	out, err := insertRecurrence(ctx, s.q, r)
 	if err != nil {
 		return domain.Recurrence{}, fmt.Errorf("create recurrence: %w", err)
 	}
@@ -327,7 +327,7 @@ func insertRecurrence(ctx context.Context, q querier, r domain.Recurrence) (doma
 
 // RecurrenceByID returns one recurrence, or domain.ErrNotFound.
 func (s *Store) RecurrenceByID(ctx context.Context, id int64) (domain.Recurrence, error) {
-	r, err := scanRecurrence(s.db.QueryRowContext(ctx, `SELECT `+recurrenceCols+` FROM recurrences WHERE id = ?`, id))
+	r, err := scanRecurrence(s.q.QueryRowContext(ctx, `SELECT `+recurrenceCols+` FROM recurrences WHERE id = ?`, id))
 	if err != nil {
 		return domain.Recurrence{}, fmt.Errorf("recurrence %d: %w", id, err)
 	}
@@ -345,7 +345,7 @@ func (s *Store) UpdateRecurrence(ctx context.Context, r domain.Recurrence) error
 	if r.Until != nil {
 		until = *r.Until
 	}
-	err := affected(s.db.ExecContext(ctx, `
+	err := affected(s.q.ExecContext(ctx, `
 		UPDATE recurrences
 		   SET freq = ?, interval = ?, by_weekday = ?, by_monthday = ?, week_ordinal = ?,
 		       month_last_day = ?, until = ?, dtstart = ?
@@ -362,7 +362,7 @@ func (s *Store) UpdateRecurrence(ctx context.Context, r domain.Recurrence) error
 // event survives with recurrence_id set to NULL (ON DELETE SET NULL), becoming a plain
 // one-off event. That is what "stop repeating this from now on" leaves behind.
 func (s *Store) DeleteRecurrence(ctx context.Context, id int64) error {
-	err := affected(s.db.ExecContext(ctx, `DELETE FROM recurrences WHERE id = ?`, id))
+	err := affected(s.q.ExecContext(ctx, `DELETE FROM recurrences WHERE id = ?`, id))
 	if err != nil {
 		return fmt.Errorf("delete recurrence %d: %w", id, err)
 	}
@@ -377,7 +377,7 @@ func (s *Store) DeleteRecurrence(ctx context.Context, id int64) error {
 // occurrence. A nil value means that occurrence is cancelled; a non-nil value is the id
 // of the standalone event carrying the edited version.
 func (s *Store) Overrides(ctx context.Context, recurrenceID int64) (map[domain.Date]*int64, error) {
-	out, err := overridesFor(ctx, s.db, []int64{recurrenceID})
+	out, err := overridesFor(ctx, s.q, []int64{recurrenceID})
 	if err != nil {
 		return nil, fmt.Errorf("overrides of recurrence %d: %w", recurrenceID, err)
 	}
@@ -423,7 +423,7 @@ func overridesFor(ctx context.Context, q querier, recurrenceIDs []int64) (map[in
 // date is the family-tz date of the occurrence *in the original series*, which is what
 // makes the identity stable when the edited copy is moved to another day.
 func (s *Store) SetOverride(ctx context.Context, recurrenceID int64, date domain.Date, overrideEventID *int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO event_overrides (recurrence_id, occurrence_date, override_event_id)
 		VALUES (?, ?, ?)
 		ON CONFLICT (recurrence_id, occurrence_date)
@@ -442,7 +442,7 @@ func (s *Store) SetOverride(ctx context.Context, recurrenceID int64, date domain
 // It does not delete the event an override pointed at; the caller decides whether that
 // edited copy should become a standalone event or be deleted.
 func (s *Store) DeleteOverride(ctx context.Context, recurrenceID int64, date domain.Date) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.q.ExecContext(ctx,
 		`DELETE FROM event_overrides WHERE recurrence_id = ? AND occurrence_date = ?`, recurrenceID, date)
 	if err != nil {
 		return fmt.Errorf("delete override of recurrence %d on %s: %w", recurrenceID, date, mapErr(err))
@@ -480,7 +480,7 @@ func (s *Store) OverrideRefByEventID(ctx context.Context, eventID int64) (Overri
 	// copy never has a recurrence_id, so it cannot match itself. ORDER BY keeps the
 	// answer stable rather than trusting the query plan for a row set the schema does
 	// not constrain to one.
-	err := s.db.QueryRowContext(ctx, `
+	err := s.q.QueryRowContext(ctx, `
 		SELECT o.recurrence_id, o.occurrence_date, t.id
 		  FROM event_overrides o
 		  JOIN events t ON t.recurrence_id = o.recurrence_id
@@ -507,7 +507,7 @@ func (s *Store) RepointOverrides(ctx context.Context, fromRecurrence, toRecurren
 		return fmt.Errorf("repoint overrides from recurrence %d: split date must be set: %w",
 			fromRecurrence, domain.ErrInvalid)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.q.ExecContext(ctx, `
 		UPDATE event_overrides
 		   SET recurrence_id = ?
 		 WHERE recurrence_id = ? AND occurrence_date >= ?`,
@@ -609,7 +609,7 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	// NULL recurrence_id, and without it every edited occurrence would be drawn twice,
 	// once as itself and once inside its series.
 	singleArgs := append(append([]any{}, calArgs...), to, from, toTS, fromTS, fromTS)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+eventColsE+`
 		  FROM events e
 		 WHERE e.calendar_id IN (`+calIn+`)
@@ -636,7 +636,7 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	// removes an occurrence and can never make one appear, so it does not widen
 	// anything.
 	seriesArgs := append(append([]any{}, calArgs...), to, from.AddDays(-seriesTailDays))
-	rows, err = s.db.QueryContext(ctx, `
+	rows, err = s.q.QueryContext(ctx, `
 		SELECT `+eventColsE+`, `+prefixedRecurrenceCols+`
 		  FROM events e
 		  JOIN recurrences r ON r.id = e.recurrence_id
@@ -657,7 +657,7 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	for i := range series {
 		recurrenceIDs = append(recurrenceIDs, series[i].Recurrence.ID)
 	}
-	overrides, err := overridesFor(ctx, s.db, recurrenceIDs)
+	overrides, err := overridesFor(ctx, s.q, recurrenceIDs)
 	if err != nil {
 		return res, fmt.Errorf("events in range: %w", err)
 	}
@@ -703,7 +703,7 @@ func (s *Store) EventsInRange(ctx context.Context, calendarIDs []int64, from, to
 	for id := range overrideEvents {
 		allIDs = append(allIDs, id)
 	}
-	parts, err := participantsFor(ctx, s.db, dedupeIDs(allIDs))
+	parts, err := participantsFor(ctx, s.q, dedupeIDs(allIDs))
 	if err != nil {
 		return res, fmt.Errorf("events in range: %w", err)
 	}
@@ -776,7 +776,7 @@ func (s *Store) eventsByID(ctx context.Context, ids []int64) (map[int64]domain.E
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+eventColsBare+` FROM events WHERE id IN (`+placeholders(len(ids))+`)`, idArgs(ids)...)
 	if err != nil {
 		return nil, mapErr(err)
@@ -831,7 +831,7 @@ func (s *Store) SearchEvents(ctx context.Context, calendarIDs []int64, q string,
 	}
 	args = append(args, searchLimit)
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+eventColsE+`
 		  FROM events e
 		 WHERE `+strings.Join(conds, " AND ")+`
@@ -849,7 +849,7 @@ func (s *Store) SearchEvents(ctx context.Context, calendarIDs []int64, q string,
 	for i := range events {
 		ids = append(ids, events[i].ID)
 	}
-	parts, err := participantsFor(ctx, s.db, ids)
+	parts, err := participantsFor(ctx, s.q, ids)
 	if err != nil {
 		return nil, fmt.Errorf("search events: %w", err)
 	}

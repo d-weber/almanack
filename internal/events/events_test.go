@@ -38,8 +38,21 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureClock(t, nil)
+}
+
+// newFixtureClock builds a fixture whose store and service read time through wrap(fake)
+// rather than through the fake itself. Everything that writes reads the clock, which is
+// what lets the interruption tests in atomic_test.go fail an edit part-way through
+// without a seam of their own.
+func newFixtureClock(t *testing.T, wrap func(*clock.Fake) clock.Clock) *fixture {
+	t.Helper()
 	loc := paris(t)
-	clk := clock.NewFake(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
+	fake := clock.NewFake(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
+	var clk clock.Clock = fake
+	if wrap != nil {
+		clk = wrap(fake)
+	}
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), loc, clk)
 	if err != nil {
@@ -73,7 +86,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	return &fixture{
-		svc: New(st, loc, clk), st: st, loc: loc, clk: clk,
+		svc: New(st, loc, clk), st: st, loc: loc, clk: fake,
 		maman: maman.ID, papa: papa.ID, cal: cal.ID, other: other.ID, labels: labels,
 	}
 }

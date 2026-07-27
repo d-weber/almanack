@@ -46,8 +46,9 @@ FLOORS: dict[str, float] = {
     "almanack/internal/config": 99.0,
     "almanack/internal/domain": 66.0,
     # Scoped edits and series splitting — the hardest logic in the app, and the subject
-    # of several open issues. This floor should rise as those land.
-    "almanack/internal/events": 77.0,
+    # of several open issues. This floor should rise as those land; making the edits
+    # atomic raised it from 77.
+    "almanack/internal/events": 79.0,
     "almanack/internal/holidays": 94.0,
     # Handlers. The remainder is largely error plumbing on paths the store tests cover
     # from the other side.

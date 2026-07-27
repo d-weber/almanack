@@ -11,6 +11,7 @@ import (
 
 	"almanack/internal/domain"
 	"almanack/internal/recur"
+	"almanack/internal/store"
 )
 
 // Input is the whole editable state of an event. Handlers fill it from JSON; the
@@ -34,6 +35,43 @@ type Input struct {
 	Recurrence *domain.Recurrence
 }
 
+// inTx runs fn inside one database transaction, against a copy of the Service whose
+// store writes through it. Every flow in this file that writes more than once uses it.
+//
+// The writes a scoped edit makes are not independent: "this and following" ends the old
+// series and creates its replacement, and every one of those statements runs on the
+// request's context. A phone that loses its connection part-way through therefore
+// really does stop the sequence, and without a transaction it stopped it wherever it
+// happened to be — most of a series gone, with an error on screen that said nothing
+// about it. The activity row goes in here too, because internal/notify plans the
+// change notification from the log rather than from the edit, and a committed edit
+// whose log row was lost is a change nobody is ever told about.
+//
+// fn is handed the transaction-scoped Service and deliberately shadows the outer one:
+// a write through the Service this was called on would go straight to the pool, outside
+// the transaction, and survive the rollback.
+func (s *Service) inTx(ctx context.Context, fn func(*Service) error) error {
+	return s.st.InTx(ctx, func(st *store.Store) error {
+		scoped := *s
+		scoped.st = st
+		return fn(&scoped)
+	})
+}
+
+// inTxEvent is inTx for the flows that answer with the event they wrote.
+func (s *Service) inTxEvent(ctx context.Context, fn func(*Service) (domain.Event, error)) (domain.Event, error) {
+	var out domain.Event
+	err := s.inTx(ctx, func(s *Service) error {
+		var err error
+		out, err = fn(s)
+		return err
+	})
+	if err != nil {
+		return domain.Event{}, err
+	}
+	return out, nil
+}
+
 // Create stores a new event, and its series when Input carries a recurrence.
 func (s *Service) Create(ctx context.Context, actor int64, in Input) (domain.Event, error) {
 	if err := s.authorize(ctx, actor, in.CalendarID); err != nil {
@@ -43,25 +81,27 @@ func (s *Service) Create(ctx context.Context, actor int64, in Input) (domain.Eve
 		return domain.Event{}, err
 	}
 
-	now := s.clk.Now()
-	e := s.apply(domain.Event{CalendarID: in.CalendarID, CreatedBy: actor, CreatedAt: now}, in, actor, now)
+	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
+		now := s.clk.Now()
+		e := s.apply(domain.Event{CalendarID: in.CalendarID, CreatedBy: actor, CreatedAt: now}, in, actor, now)
 
-	var rec *domain.Recurrence
-	if in.Recurrence != nil {
-		r := *in.Recurrence
-		r.DTStart = s.startDateOf(e)
-		if err := recur.Validate(r); err != nil {
-			return domain.Event{}, err
+		var rec *domain.Recurrence
+		if in.Recurrence != nil {
+			r := *in.Recurrence
+			r.DTStart = s.startDateOf(e)
+			if err := recur.Validate(r); err != nil {
+				return domain.Event{}, err
+			}
+			rec = &r
 		}
-		rec = &r
-	}
 
-	created, err := s.st.CreateEvent(ctx, e, rec)
-	if err != nil {
-		return domain.Event{}, fmt.Errorf("create event: %w", err)
-	}
-	s.logActivity(ctx, actor, created, domain.ActionEventCreated)
-	return created, nil
+		created, err := s.st.CreateEvent(ctx, e, rec)
+		if err != nil {
+			return domain.Event{}, fmt.Errorf("create event: %w", err)
+		}
+		s.logActivity(ctx, actor, created, domain.ActionEventCreated)
+		return created, nil
+	})
 }
 
 // resolveOverride rewrites a request addressed to an edited occurrence so that it names
@@ -158,48 +198,52 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 }
 
 func (s *Service) updatePlain(ctx context.Context, actor int64, existing domain.Event, in Input) (domain.Event, error) {
-	now := s.clk.Now()
-	updated := s.apply(existing, in, actor, now)
-	if err := s.st.UpdateEvent(ctx, updated); err != nil {
-		return domain.Event{}, fmt.Errorf("update event %d: %w", existing.ID, err)
-	}
-	if err := s.st.SetParticipants(ctx, existing.ID, in.Participants); err != nil {
-		return domain.Event{}, err
-	}
-	s.pruneQueued(ctx, EventSourcePrefix(existing.ID))
-	s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
-	return updated, nil
+	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
+		now := s.clk.Now()
+		updated := s.apply(existing, in, actor, now)
+		if err := s.st.UpdateEvent(ctx, updated); err != nil {
+			return domain.Event{}, fmt.Errorf("update event %d: %w", existing.ID, err)
+		}
+		if err := s.st.SetParticipants(ctx, existing.ID, in.Participants); err != nil {
+			return domain.Event{}, err
+		}
+		s.pruneQueued(ctx, EventSourcePrefix(existing.ID))
+		s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
+		return updated, nil
+	})
 }
 
 // updateSeries edits the template. Existing overrides are left alone: someone
 // deliberately changed those occurrences, and silently reverting their work would be
 // worse than the inconsistency of leaving them.
 func (s *Service) updateSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, in Input) (domain.Event, error) {
-	now := s.clk.Now()
-	updated := s.apply(template, in, actor, now)
+	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
+		now := s.clk.Now()
+		updated := s.apply(template, in, actor, now)
 
-	newRec := rec
-	if in.Recurrence != nil {
-		newRec = *in.Recurrence
-		newRec.ID = rec.ID
-	}
-	newRec.DTStart = s.startDateOf(updated)
-	if err := recur.Validate(newRec); err != nil {
-		return domain.Event{}, err
-	}
+		newRec := rec
+		if in.Recurrence != nil {
+			newRec = *in.Recurrence
+			newRec.ID = rec.ID
+		}
+		newRec.DTStart = s.startDateOf(updated)
+		if err := recur.Validate(newRec); err != nil {
+			return domain.Event{}, err
+		}
 
-	if err := s.st.UpdateRecurrence(ctx, newRec); err != nil {
-		return domain.Event{}, fmt.Errorf("update recurrence %d: %w", rec.ID, err)
-	}
-	if err := s.st.UpdateEvent(ctx, updated); err != nil {
-		return domain.Event{}, fmt.Errorf("update series template %d: %w", template.ID, err)
-	}
-	if err := s.st.SetParticipants(ctx, template.ID, in.Participants); err != nil {
-		return domain.Event{}, err
-	}
-	s.pruneQueued(ctx, EventSourcePrefix(template.ID))
-	s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
-	return updated, nil
+		if err := s.st.UpdateRecurrence(ctx, newRec); err != nil {
+			return domain.Event{}, fmt.Errorf("update recurrence %d: %w", rec.ID, err)
+		}
+		if err := s.st.UpdateEvent(ctx, updated); err != nil {
+			return domain.Event{}, fmt.Errorf("update series template %d: %w", template.ID, err)
+		}
+		if err := s.st.SetParticipants(ctx, template.ID, in.Participants); err != nil {
+			return domain.Event{}, err
+		}
+		s.pruneQueued(ctx, EventSourcePrefix(template.ID))
+		s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
+		return updated, nil
+	})
 }
 
 // updateOccurrence records an exception for one date: a standalone event holding the
@@ -209,43 +253,45 @@ func (s *Service) updateOccurrence(ctx context.Context, actor int64, template do
 	if !recur.Occurs(rec, occDate) {
 		return domain.Event{}, fmt.Errorf("%w: %s is not an occurrence of event %d", domain.ErrNotFound, occDate, template.ID)
 	}
-	overrides, err := s.st.Overrides(ctx, rec.ID)
-	if err != nil {
-		return domain.Event{}, err
-	}
-	now := s.clk.Now()
-
-	// Re-editing an occurrence updates the copy that already exists rather than
-	// orphaning it.
-	if ov, ok := overrides[occDate]; ok && ov != nil {
-		current, err := s.st.EventByID(ctx, *ov)
+	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
+		overrides, err := s.st.Overrides(ctx, rec.ID)
 		if err != nil {
 			return domain.Event{}, err
 		}
-		updated := s.apply(current, in, actor, now)
-		if err := s.st.UpdateEvent(ctx, updated); err != nil {
-			return domain.Event{}, fmt.Errorf("update override %d: %w", current.ID, err)
+		now := s.clk.Now()
+
+		// Re-editing an occurrence updates the copy that already exists rather than
+		// orphaning it.
+		if ov, ok := overrides[occDate]; ok && ov != nil {
+			current, err := s.st.EventByID(ctx, *ov)
+			if err != nil {
+				return domain.Event{}, err
+			}
+			updated := s.apply(current, in, actor, now)
+			if err := s.st.UpdateEvent(ctx, updated); err != nil {
+				return domain.Event{}, fmt.Errorf("update override %d: %w", current.ID, err)
+			}
+			if err := s.st.SetParticipants(ctx, current.ID, in.Participants); err != nil {
+				return domain.Event{}, err
+			}
+			s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
+			s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
+			return updated, nil
 		}
-		if err := s.st.SetParticipants(ctx, current.ID, in.Participants); err != nil {
-			return domain.Event{}, err
+
+		copyEvent := s.apply(domain.Event{CalendarID: template.CalendarID, CreatedBy: actor, CreatedAt: now}, in, actor, now)
+		copyEvent.RecurrenceID = nil // an override stands alone; it is not a second series
+		created, err := s.st.CreateEvent(ctx, copyEvent, nil)
+		if err != nil {
+			return domain.Event{}, fmt.Errorf("create override event: %w", err)
+		}
+		if err := s.st.SetOverride(ctx, rec.ID, occDate, &created.ID); err != nil {
+			return domain.Event{}, fmt.Errorf("record override for %s: %w", occDate, err)
 		}
 		s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
-		s.logActivity(ctx, actor, updated, domain.ActionEventUpdated)
-		return updated, nil
-	}
-
-	copyEvent := s.apply(domain.Event{CalendarID: template.CalendarID, CreatedBy: actor, CreatedAt: now}, in, actor, now)
-	copyEvent.RecurrenceID = nil // an override stands alone; it is not a second series
-	created, err := s.st.CreateEvent(ctx, copyEvent, nil)
-	if err != nil {
-		return domain.Event{}, fmt.Errorf("create override event: %w", err)
-	}
-	if err := s.st.SetOverride(ctx, rec.ID, occDate, &created.ID); err != nil {
-		return domain.Event{}, fmt.Errorf("record override for %s: %w", occDate, err)
-	}
-	s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
-	s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
-	return created, nil
+		s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
+		return created, nil
+	})
 }
 
 // splitSeries implements "this and following occurrences": the old series is ended
@@ -259,7 +305,9 @@ func (s *Service) updateOccurrence(ctx context.Context, actor int64, template do
 func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, splitDate domain.Date, in Input) (domain.Event, error) {
 	now := s.clk.Now()
 
-	// 1. Work out both halves and check them BEFORE writing anything.
+	// 1. Work out both halves and check them BEFORE writing anything, and outside the
+	// transaction: SQLite takes its write lock at BEGIN, so deciding first keeps the
+	// lock held for the writes alone.
 	//
 	// This ordering is the whole point. Closing the original series first and
 	// validating the replacement afterwards meant a rejected edit — moving an
@@ -305,46 +353,49 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 		return domain.Event{}, fmt.Errorf("closing the original series: %w", err)
 	}
 
-	// 2. Write. These are still separate statements — see the note on atomicity in
-	// docs/architecture.md — but nothing here can now fail for a reason that was
-	// knowable beforehand.
-	if err := s.st.UpdateRecurrence(ctx, oldRec); err != nil {
-		return domain.Event{}, fmt.Errorf("close series %d at %s: %w", rec.ID, until, err)
-	}
-	created, err := s.st.CreateEvent(ctx, newEvent, &newRec)
-	if err != nil {
-		return domain.Event{}, fmt.Errorf("create split series: %w", err)
-	}
-	if created.RecurrenceID == nil {
-		return domain.Event{}, fmt.Errorf("split series %d was created without a recurrence", created.ID)
-	}
-	newRecID := *created.RecurrenceID
+	// 2. Write, all of it in one transaction. Every statement below runs on the
+	// request's context, so a phone that walks into a lift between two of them stops
+	// the sequence for real: this used to leave the original series capped and its
+	// replacement never created, which is half a family's swimming lessons gone.
+	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
+		if err := s.st.UpdateRecurrence(ctx, oldRec); err != nil {
+			return domain.Event{}, fmt.Errorf("close series %d at %s: %w", rec.ID, until, err)
+		}
+		created, err := s.st.CreateEvent(ctx, newEvent, &newRec)
+		if err != nil {
+			return domain.Event{}, fmt.Errorf("create split series: %w", err)
+		}
+		if created.RecurrenceID == nil {
+			return domain.Event{}, fmt.Errorf("split series %d was created without a recurrence", created.ID)
+		}
+		newRecID := *created.RecurrenceID
 
-	// 3. Move exceptions at or after the split onto the new series.
-	if err := s.st.RepointOverrides(ctx, rec.ID, newRecID, splitDate); err != nil {
-		return domain.Event{}, fmt.Errorf("move overrides to the split series: %w", err)
-	}
-	// An override only survives if the new pattern still produces its date. When the
-	// pattern moved — Tuesdays to Wednesdays — the ones it no longer produces would
-	// otherwise become rows nothing can reach: invisible to the series (which does
-	// not generate that date) and hidden from the plain-event query (which excludes
-	// anything an override points at). Detaching them turns each back into an
-	// ordinary event the family can still see and deal with.
-	if err := s.detachUnreachableOverrides(ctx, newRecID, newRec); err != nil {
-		return domain.Event{}, err
-	}
+		// 3. Move exceptions at or after the split onto the new series.
+		if err := s.st.RepointOverrides(ctx, rec.ID, newRecID, splitDate); err != nil {
+			return domain.Event{}, fmt.Errorf("move overrides to the split series: %w", err)
+		}
+		// An override only survives if the new pattern still produces its date. When the
+		// pattern moved — Tuesdays to Wednesdays — the ones it no longer produces would
+		// otherwise become rows nothing can reach: invisible to the series (which does
+		// not generate that date) and hidden from the plain-event query (which excludes
+		// anything an override points at). Detaching them turns each back into an
+		// ordinary event the family can still see and deal with.
+		if err := s.detachUnreachableOverrides(ctx, newRecID, newRec); err != nil {
+			return domain.Event{}, err
+		}
 
-	// 4. Carry everyone's reminders across, or the second half goes quiet.
-	if err := s.copyReminders(ctx, rec.ID, newRecID); err != nil {
-		return domain.Event{}, err
-	}
+		// 4. Carry everyone's reminders across, or the second half goes quiet.
+		if err := s.copyReminders(ctx, rec.ID, newRecID); err != nil {
+			return domain.Event{}, err
+		}
 
-	// 5. Both halves changed shape; let the planner rebuild their notifications.
-	s.pruneQueued(ctx, EventSourcePrefix(template.ID))
-	s.pruneQueued(ctx, EventSourcePrefix(created.ID))
+		// 5. Both halves changed shape; let the planner rebuild their notifications.
+		s.pruneQueued(ctx, EventSourcePrefix(template.ID))
+		s.pruneQueued(ctx, EventSourcePrefix(created.ID))
 
-	s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
-	return created, nil
+		s.logActivity(ctx, actor, created, domain.ActionEventUpdated)
+		return created, nil
+	})
 }
 
 // reanchor moves a repeat pattern's day-selectors so that the pattern still
@@ -450,12 +501,14 @@ func (s *Service) Delete(ctx context.Context, actor, eventID int64, scope domain
 	}
 
 	if existing.RecurrenceID == nil {
-		if err := s.st.DeleteEvent(ctx, eventID); err != nil {
-			return fmt.Errorf("delete event %d: %w", eventID, err)
-		}
-		s.pruneQueued(ctx, EventSourcePrefix(eventID))
-		s.logActivity(ctx, actor, existing, domain.ActionEventDeleted)
-		return nil
+		return s.inTx(ctx, func(s *Service) error {
+			if err := s.st.DeleteEvent(ctx, eventID); err != nil {
+				return fmt.Errorf("delete event %d: %w", eventID, err)
+			}
+			s.pruneQueued(ctx, EventSourcePrefix(eventID))
+			s.logActivity(ctx, actor, existing, domain.ActionEventDeleted)
+			return nil
+		})
 	}
 
 	rec, err := s.st.RecurrenceByID(ctx, *existing.RecurrenceID)
@@ -475,69 +528,80 @@ func (s *Service) Delete(ctx context.Context, actor, eventID int64, scope domain
 		if !occDate.After(rec.DTStart) {
 			return s.deleteSeries(ctx, actor, existing, rec)
 		}
-		until := occDate.AddDays(-1)
-		rec.Until = &until
-		if err := s.st.UpdateRecurrence(ctx, rec); err != nil {
-			return fmt.Errorf("end series %d at %s: %w", rec.ID, until, err)
-		}
-		s.pruneQueued(ctx, EventSourcePrefix(existing.ID))
-		s.logActivity(ctx, actor, existing, domain.ActionEventUpdated)
-		return nil
+		return s.endSeries(ctx, actor, existing, rec, occDate.AddDays(-1))
 	case domain.ScopeAll:
 		return s.deleteSeries(ctx, actor, existing, rec)
 	}
 	return fmt.Errorf("%w: deleting a recurring event needs a scope", domain.ErrInvalid)
 }
 
+// endSeries stops a series repeating after a date, which is what "delete this and
+// following occurrences" means for everything that is not the first one.
+func (s *Service) endSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, until domain.Date) error {
+	return s.inTx(ctx, func(s *Service) error {
+		rec.Until = &until
+		if err := s.st.UpdateRecurrence(ctx, rec); err != nil {
+			return fmt.Errorf("end series %d at %s: %w", rec.ID, until, err)
+		}
+		s.pruneQueued(ctx, EventSourcePrefix(template.ID))
+		s.logActivity(ctx, actor, template, domain.ActionEventUpdated)
+		return nil
+	})
+}
+
 func (s *Service) cancelOccurrence(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, occDate domain.Date) error {
 	if !recur.Occurs(rec, occDate) {
 		return fmt.Errorf("%w: %s is not an occurrence of event %d", domain.ErrNotFound, occDate, template.ID)
 	}
-	overrides, err := s.st.Overrides(ctx, rec.ID)
-	if err != nil {
-		return err
-	}
-	if ov, ok := overrides[occDate]; ok && ov != nil {
-		// Replace the edited copy with a cancellation, and remove the copy itself.
-		if err := s.st.SetOverride(ctx, rec.ID, occDate, nil); err != nil {
+	return s.inTx(ctx, func(s *Service) error {
+		overrides, err := s.st.Overrides(ctx, rec.ID)
+		if err != nil {
 			return err
 		}
-		if err := s.st.DeleteEvent(ctx, *ov); err != nil {
-			return fmt.Errorf("delete override event %d: %w", *ov, err)
+		if ov, ok := overrides[occDate]; ok && ov != nil {
+			// Replace the edited copy with a cancellation, and remove the copy itself.
+			if err := s.st.SetOverride(ctx, rec.ID, occDate, nil); err != nil {
+				return err
+			}
+			if err := s.st.DeleteEvent(ctx, *ov); err != nil {
+				return fmt.Errorf("delete override event %d: %w", *ov, err)
+			}
+		} else if err := s.st.SetOverride(ctx, rec.ID, occDate, nil); err != nil {
+			return fmt.Errorf("cancel occurrence %s: %w", occDate, err)
 		}
-	} else if err := s.st.SetOverride(ctx, rec.ID, occDate, nil); err != nil {
-		return fmt.Errorf("cancel occurrence %s: %w", occDate, err)
-	}
-	s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
-	s.logActivity(ctx, actor, template, domain.ActionEventDeleted)
-	return nil
+		s.pruneQueued(ctx, OccurrenceSourcePrefix(template.ID, occDate))
+		s.logActivity(ctx, actor, template, domain.ActionEventDeleted)
+		return nil
+	})
 }
 
 // deleteSeries removes a series and everything hanging off it. Deleting the
 // recurrence cascades its override rows and reminders, but the events those rows
 // pointed at are ordinary rows that nothing else would ever clean up, so they go first.
 func (s *Service) deleteSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence) error {
-	overrides, err := s.st.Overrides(ctx, rec.ID)
-	if err != nil {
-		return err
-	}
-	for _, ov := range overrides {
-		if ov == nil {
-			continue
+	return s.inTx(ctx, func(s *Service) error {
+		overrides, err := s.st.Overrides(ctx, rec.ID)
+		if err != nil {
+			return err
 		}
-		if err := s.st.DeleteEvent(ctx, *ov); err != nil {
-			return fmt.Errorf("delete override event %d: %w", *ov, err)
+		for _, ov := range overrides {
+			if ov == nil {
+				continue
+			}
+			if err := s.st.DeleteEvent(ctx, *ov); err != nil {
+				return fmt.Errorf("delete override event %d: %w", *ov, err)
+			}
 		}
-	}
-	if err := s.st.DeleteRecurrence(ctx, rec.ID); err != nil {
-		return fmt.Errorf("delete recurrence %d: %w", rec.ID, err)
-	}
-	if err := s.st.DeleteEvent(ctx, template.ID); err != nil {
-		return fmt.Errorf("delete series template %d: %w", template.ID, err)
-	}
-	s.pruneQueued(ctx, EventSourcePrefix(template.ID))
-	s.logActivity(ctx, actor, template, domain.ActionEventDeleted)
-	return nil
+		if err := s.st.DeleteRecurrence(ctx, rec.ID); err != nil {
+			return fmt.Errorf("delete recurrence %d: %w", rec.ID, err)
+		}
+		if err := s.st.DeleteEvent(ctx, template.ID); err != nil {
+			return fmt.Errorf("delete series template %d: %w", template.ID, err)
+		}
+		s.pruneQueued(ctx, EventSourcePrefix(template.ID))
+		s.logActivity(ctx, actor, template, domain.ActionEventDeleted)
+		return nil
+	})
 }
 
 // apply copies Input onto an event, preserving identity and creation metadata.
@@ -625,6 +689,11 @@ func (s *Service) authorize(ctx context.Context, userID, calendarID int64) error
 	return nil
 }
 
+// logActivity records a change in the feed the family reads. Every call is made from
+// inside the transaction that made the change, so the row commits with the edit or not
+// at all: internal/notify plans change notifications from this log rather than from the
+// edit itself, and that is only the crash-proof design it claims to be if the two
+// cannot come apart.
 func (s *Service) logActivity(ctx context.Context, actor int64, e domain.Event, action domain.ActivityAction) {
 	err := s.st.LogActivity(ctx, domain.Activity{
 		CalendarID: e.CalendarID,
@@ -635,8 +704,11 @@ func (s *Service) logActivity(ctx context.Context, actor int64, e domain.Event, 
 		At:         s.clk.Now(),
 	})
 	if err != nil {
-		// The activity feed is a nice-to-have; losing an entry must never fail the
-		// edit the family actually asked for.
+		// The feed is a nice-to-have; a row that will not insert must never fail the
+		// edit the family actually asked for. Inside the transaction this is close to
+		// theoretical — anything that can stop this statement, a cancelled request or
+		// a full disk, stops the commit as well — which is why it is logged loudly
+		// rather than counted as ordinary.
 		slog.Error("record activity", "event", e.ID, "action", action, "error", err)
 	}
 }

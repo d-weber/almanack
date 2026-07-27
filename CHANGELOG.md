@@ -99,6 +99,19 @@ Notable changes to this project. The format follows
   trip that started on the series' last day and ran into the next month disappeared from
   that month, where the same trip as a one-off event would have been shown.
   ([#2](https://github.com/d-weber/almanack/issues/2))
+- **Losing your connection half-way through "this and following" could take half the series
+  with it.** Splitting a series is several writes — end the original the day before the
+  split, start the replacement at it, move any edited or cancelled occurrences across, copy
+  everyone's reminders — and each one travelled on the request's own connection. A phone
+  that went into a lift between the first and the second left the original series ended and
+  its replacement never created: every swimming lesson from the date you were editing
+  onwards silently gone, with an error on screen that said nothing about it. Editing an
+  occurrence, cancelling one and deleting a series had smaller versions of the same problem,
+  leaving a duplicate or an orphaned copy behind rather than losing anything. Each of those
+  edits is now a single transaction, so an interrupted one leaves the calendar exactly as it
+  was. The activity entry is part of it too: an edit can no longer be saved while the
+  notification that tells everyone about it is lost.
+  ([#3](https://github.com/d-weber/almanack/issues/3))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

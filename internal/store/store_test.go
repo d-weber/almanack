@@ -166,6 +166,186 @@ func TestOpenRejectsBadArguments(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+// errInterrupted stands in for whatever ends a sequence of writes half-way through: a
+// phone that lost its signal, a process that was killed, a statement that failed.
+var errInterrupted = errors.New("interrupted")
+
+// TestInTxRollsBackEveryWrite is the property internal/events relies on for scoped
+// edits: several writes through ordinary Store methods, and either all of them or none.
+func TestInTxRollsBackEveryWrite(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	err := s.InTx(ctx(), func(tx *Store) error {
+		e, err := tx.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: claire.ID, Participants: []int64{claire.ID},
+		}, nil)
+		if err != nil {
+			return err
+		}
+		ten := 10
+		if err := tx.ReplaceReminders(ctx(), &e.ID, nil, claire.ID, []domain.Reminder{{OffsetMinutes: &ten}}); err != nil {
+			return err
+		}
+		if err := tx.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: claire.ID, Action: domain.ActionEventCreated,
+			EventID: &e.ID, Title: e.Title,
+		}); err != nil {
+			return err
+		}
+		// Everything above is visible to this transaction and to nothing else.
+		if got, err := tx.EventByID(ctx(), e.ID); err != nil || got.Title != "Dentiste" {
+			t.Errorf("inside the transaction, EventByID = %+v, %v", got, err)
+		}
+		return errInterrupted
+	})
+	if !errors.Is(err, errInterrupted) {
+		t.Fatalf("InTx = %v; want the error fn returned", err)
+	}
+
+	res, err := s.EventsInRange(ctx(), []int64{cal.ID},
+		domain.MustParseDate("2026-08-01"), domain.MustParseDate("2026-08-31"))
+	if err != nil {
+		t.Fatalf("EventsInRange: %v", err)
+	}
+	if len(res.Singles) != 0 {
+		t.Errorf("%d events survived a rolled-back transaction", len(res.Singles))
+	}
+	if all, err := s.ListAllReminders(ctx()); err != nil || len(all) != 0 {
+		t.Errorf("%d reminders survived a rolled-back transaction (%v)", len(all), err)
+	}
+	// The activity log is where change notifications are planned from, so a row left
+	// behind here would announce an edit that never happened.
+	if rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, time.Time{}); err != nil || len(rows) != 0 {
+		t.Errorf("%d activity rows survived a rolled-back transaction (%v)", len(rows), err)
+	}
+
+	// And the Store is still usable afterwards: a rollback releases the connection.
+	if _, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: claire.ID,
+	}, nil); err != nil {
+		t.Fatalf("CreateEvent after a rollback: %v", err)
+	}
+}
+
+// TestInTxCommitsEveryWrite is the other half: nothing is left in the transaction.
+func TestInTxCommitsEveryWrite(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	var id int64
+	if err := s.InTx(ctx(), func(tx *Store) error {
+		e, err := tx.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: claire.ID, Participants: []int64{claire.ID},
+		}, nil)
+		id = e.ID
+		return err
+	}); err != nil {
+		t.Fatalf("InTx: %v", err)
+	}
+	got, err := s.EventByID(ctx(), id)
+	if err != nil || got.Title != "Dentiste" || len(got.Participants) != 1 {
+		t.Fatalf("after commit, EventByID = %+v, %v", got, err)
+	}
+}
+
+// TestInTxNestsWithoutDeadlocking is the hazard a transaction-scoped Store is built to
+// remove. The pool holds four connections and every write transaction takes SQLite's
+// write lock at BEGIN, so a Store method that began a *second* transaction while inside
+// one would sit waiting for a lock its own caller is holding — five seconds of
+// busy_timeout and then a failure, or worse under load.
+//
+// So the methods that use a transaction internally join the one already open, and InTx
+// inside InTx is the same transaction rather than a new one. The deadline is what makes
+// a regression here fail in seconds instead of hanging until the test binary is killed.
+func TestInTxNestsWithoutDeadlocking(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	deadline, cancel := context.WithTimeout(ctx(), 20*time.Second)
+	defer cancel()
+
+	var id int64
+	err := s.InTx(deadline, func(tx *Store) error {
+		// CreateEvent, SetParticipants and ReplaceReminders each run a transaction of
+		// their own when called on the pool.
+		e, err := tx.CreateEvent(deadline, domain.Event{
+			CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: claire.ID,
+		}, nil)
+		if err != nil {
+			return err
+		}
+		id = e.ID
+		if err := tx.SetParticipants(deadline, e.ID, []int64{claire.ID}); err != nil {
+			return err
+		}
+		ten := 10
+		if err := tx.ReplaceReminders(deadline, &e.ID, nil, claire.ID, []domain.Reminder{{OffsetMinutes: &ten}}); err != nil {
+			return err
+		}
+		// And a nested InTx, which is what a service calling one of its own flows from
+		// inside another would produce.
+		return tx.InTx(deadline, func(inner *Store) error {
+			return inner.UpdateEvent(deadline, e)
+		})
+	})
+	if err != nil {
+		t.Fatalf("nested writes inside InTx: %v", err)
+	}
+	got, err := s.EventByID(ctx(), id)
+	if err != nil || len(got.Participants) != 1 {
+		t.Fatalf("after nested writes, EventByID = %+v, %v", got, err)
+	}
+	if all, err := s.ListAllReminders(ctx()); err != nil || len(all) != 1 {
+		t.Fatalf("reminders after nested writes = %+v, %v", all, err)
+	}
+}
+
+// TestInTxRollsBackWhatANestedCallWrote pins the consequence of joining rather than
+// nesting: an inner InTx that succeeds is not committed on its own, because there is
+// only one transaction and the outer one decides.
+func TestInTxRollsBackWhatANestedCallWrote(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+
+	err := s.InTx(ctx(), func(tx *Store) error {
+		if err := tx.InTx(ctx(), func(inner *Store) error {
+			return inner.UpdateCalendar(ctx(), domain.Calendar{ID: cal.ID, Name: "Chalet", Color: "#123456"})
+		}); err != nil {
+			return err
+		}
+		return errInterrupted
+	})
+	if !errors.Is(err, errInterrupted) {
+		t.Fatalf("InTx = %v; want the error fn returned", err)
+	}
+	got, err := s.CalendarByID(ctx(), cal.ID)
+	if err != nil {
+		t.Fatalf("CalendarByID: %v", err)
+	}
+	if got.Name != "Maison" {
+		t.Errorf("calendar name = %q; a nested transaction committed on its own", got.Name)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Upgrading a database written by an earlier release
 // ---------------------------------------------------------------------------
 
