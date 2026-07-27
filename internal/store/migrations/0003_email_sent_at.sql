@@ -1,0 +1,14 @@
+-- Which legs of a queued notification have already gone out.
+--
+-- A notification is fanned out over two independent channels, and until now the
+-- outbox recorded only that "something was accepted". A push acceptance therefore
+-- retired a row whose email had just been refused by the MTA — and email is the
+-- channel that exists precisely because a push service answers 201 for a
+-- subscription iOS has silently revoked. Recording the email leg separately is
+-- what lets a retry send the leg that is still owed and skip the one that went.
+--
+-- Adding a nullable column is an expand-only change: every statement the previous
+-- binary issues against notification_queue names its columns, so it keeps running
+-- against this schema unchanged, and NULL reads back as "no email has gone" —
+-- which is the truth for every row written before this migration.
+ALTER TABLE notification_queue ADD COLUMN email_sent_at TEXT;

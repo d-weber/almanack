@@ -183,6 +183,27 @@ that is the correct trade, because a duplicate reminder is annoying and a missed
 failure this whole application exists to prevent. The tempting "fix" of marking before
 sending silently converts it to at-most-once.
 
+**Acceptance is counted per channel, because the channels fail independently.** A row is
+finished when every channel the recipient has took the message, not when any one of them
+did. Counting a single acceptance across both let the untrustworthy channel vouch for the
+other: push answers 201 for a subscription iOS revoked weeks ago, so a push "success"
+alongside an MTA refusal is a notification nobody ever receives. `email_sent_at` records
+the mail leg on its own, which is also what makes retrying safe — the next attempt sends
+what is still owed and leaves the mail alone, instead of mailing the family the same
+reminder every time it tries.
+
+**A row is retired by time, never by an attempt count.** The question a failing row asks is
+whether the thing it announces still matters, and the staleness policy above already
+answers it for every kind: a reminder while its event is ahead, a digest or summary for
+four hours, an activity notice for twenty-four. A counter answers a different question, and
+answered it badly — ten attempts one tick apart is five minutes, so an afternoon's trouble
+at a push service permanently retired a reminder for the next morning. Retries instead back
+off, doubling from thirty seconds to an hour, because retrying for as long as a row stays
+relevant is otherwise thousands of requests per subscription and push services rate-limit.
+The consequence worth knowing: a row whose push leg never succeeds ends up recorded as
+`skipped` even though its email went out hours earlier. `email_sent_at` is where that truth
+is kept — one row does not get a third state to say so.
+
 **Boot catch-up** is a defined policy, not best effort. After an outage the server
 backfills the window the planner never materialized (otherwise reminders in that gap simply
 never existed), delivers overdue reminders whose events are still in the future, marks the
@@ -215,9 +236,13 @@ pool holding an exclusive write lock has no second connection to give.
 
 Migrations are numbered, embedded and immutable, applied in a transaction at startup. They follow expand/contract — each release
 stays readable by the previous binary for one version — which is what makes a rollback
-"put the old binary back" rather than "restore a backup". The binary refuses to start
-against a schema newer than it knows, so a mistaken downgrade fails loudly instead of
-corrupting data.
+"put the old binary back" rather than "restore a backup". Concretely: 0003 adds a nullable
+column to `notification_queue`, and every statement the 0.2.0 binary issues names the
+columns it wants, so that binary runs against the upgraded file with nothing to undo. What
+it will not do is start there by itself: the binary refuses to open a schema newer than it
+knows, so a mistaken downgrade fails loudly instead of corrupting data, and a deliberate
+one is a decision somebody takes rather than a surprise. Every migration is proved against
+a database a shipped release really wrote, checked in under `internal/store/testdata/`.
 
 Backups are `almanack backup`: `VACUUM INTO` a temporary file, run `PRAGMA integrity_check`
 **on the output**, fsync, then rename atomically. Checking the copy rather than the source

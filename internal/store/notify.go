@@ -368,14 +368,15 @@ func (s *Store) ListAllPrefs(ctx context.Context) ([]domain.NotificationPrefs, e
 // The notification outbox
 // ---------------------------------------------------------------------------
 
-const queueCols = `id, user_id, kind, source_ref, payload, due_at, sending_started_at, sent_at, skipped, attempts`
+const queueCols = `id, user_id, kind, source_ref, payload, due_at, sending_started_at, sent_at,
+	email_sent_at, skipped, attempts`
 
 func scanQueued(row rowScanner) (domain.QueuedNotification, error) {
 	var q domain.QueuedNotification
 	var skipped sql.NullString
 	err := row.Scan(&q.ID, &q.UserID, &q.Kind, &q.SourceRef, &q.Payload,
 		instantCol{&q.DueAt}, instantCol{&q.SendingStartedAt}, instantCol{&q.SentAt},
-		&skipped, &q.Attempts)
+		instantCol{&q.EmailSentAt}, &skipped, &q.Attempts)
 	if err != nil {
 		return domain.QueuedNotification{}, mapErr(err)
 	}
@@ -473,6 +474,24 @@ func (s *Store) MarkSent(ctx context.Context, id int64, now time.Time) error {
 		mustInstant(now), id))
 	if err != nil {
 		return fmt.Errorf("mark notification %d sent: %w", id, err)
+	}
+	return nil
+}
+
+// MarkEmailSent records that the MTA accepted this row's email, which is a
+// different fact from the row being finished.
+//
+// The two channels fail independently, and the one that lies about success is push.
+// So the email leg is recorded the moment it is accepted, even when the row stays
+// queued because the push leg is still owed — and the next attempt reads this and
+// leaves the mail alone. Without it, retrying a row until its event is past would
+// mail the family the same reminder on every pass.
+func (s *Store) MarkEmailSent(ctx context.Context, id int64, now time.Time) error {
+	err := affected(s.q.ExecContext(ctx,
+		`UPDATE notification_queue SET email_sent_at = COALESCE(email_sent_at, ?) WHERE id = ?`,
+		mustInstant(now), id))
+	if err != nil {
+		return fmt.Errorf("mark notification %d email sent: %w", id, err)
 	}
 	return nil
 }

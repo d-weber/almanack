@@ -377,14 +377,16 @@ func (e *env) noDigests() {
 // ---------------------------------------------------------------------------
 
 type queueRow struct {
-	ID        int64
-	UserID    int64
-	Kind      domain.NotificationKind
-	SourceRef string
-	DueAt     time.Time
-	SentAt    time.Time
-	Skipped   string
-	Payload   string
+	ID          int64
+	UserID      int64
+	Kind        domain.NotificationKind
+	SourceRef   string
+	DueAt       time.Time
+	SentAt      time.Time
+	EmailSentAt time.Time
+	Skipped     string
+	Payload     string
+	Attempts    int
 }
 
 // queue reads the whole outbox, including sent and skipped rows, which the store
@@ -392,7 +394,8 @@ type queueRow struct {
 func (e *env) queue() []queueRow {
 	e.t.Helper()
 	rows, err := e.st.DB().QueryContext(e.ctx,
-		`SELECT id, user_id, kind, source_ref, due_at, COALESCE(sent_at,''), COALESCE(skipped,''), payload
+		`SELECT id, user_id, kind, source_ref, due_at, COALESCE(sent_at,''), COALESCE(email_sent_at,''),
+		        COALESCE(skipped,''), payload, attempts
 		   FROM notification_queue ORDER BY due_at, id`)
 	if err != nil {
 		e.t.Fatalf("read queue: %v", err)
@@ -401,13 +404,17 @@ func (e *env) queue() []queueRow {
 	var out []queueRow
 	for rows.Next() {
 		var r queueRow
-		var due, sent string
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.SourceRef, &due, &sent, &r.Skipped, &r.Payload); err != nil {
+		var due, sent, mailed string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.SourceRef, &due, &sent, &mailed,
+			&r.Skipped, &r.Payload, &r.Attempts); err != nil {
 			e.t.Fatalf("scan queue row: %v", err)
 		}
 		r.DueAt = mustParseInstant(e.t, due)
 		if sent != "" {
 			r.SentAt = mustParseInstant(e.t, sent)
+		}
+		if mailed != "" {
+			r.EmailSentAt = mustParseInstant(e.t, mailed)
 		}
 		out = append(out, r)
 	}

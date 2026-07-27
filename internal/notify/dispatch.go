@@ -72,8 +72,8 @@ func (n *Notifier) drain(ctx context.Context) (drainCounts, error) {
 		}
 		if len(rows) < drainBatch {
 			// A short batch was the whole of what was due; anything left in it is
-			// a transient failure that belongs to the next tick, not to a tight
-			// retry loop that would burn through maxDeliveryAttempts in seconds.
+			// a transient failure that belongs to the next tick rather than to a
+			// tight retry loop against a provider that has just refused.
 			return c, nil
 		}
 		if retired == 0 {
@@ -94,6 +94,12 @@ func (n *Notifier) drain(ctx context.Context) (drainCounts, error) {
 // notification, which is the right trade, because a duplicate reminder is an
 // annoyance and a missed one is the failure this application exists to prevent.
 // Marking before sending would turn this into at-most-once silently.
+//
+// Two decisions govern the end of a row's life, and there is exactly one of each.
+// Whether it is still worth sending is staleness, below, which asks about the thing
+// being announced; there is no second retirement rule counting attempts, and adding
+// one back would retire live reminders during an outage. Whether it is finished is
+// sendResult.complete, which asks every channel separately.
 func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) outcome {
 	now := n.now()
 
@@ -108,6 +114,12 @@ func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) out
 	if reason, stale := n.staleness(q, p, now); stale {
 		n.skip(ctx, q, reason, now)
 		return outcomeSkipped
+	}
+	// A row that has just failed is left alone for a while. This comes after
+	// staleness on purpose: a row whose moment has passed should retire on the next
+	// tick rather than sit out an hour of backoff it will never need.
+	if q.Attempts > 0 && now.Sub(q.SendingStartedAt) < retryBackoff(q.Attempts) {
+		return outcomeDeferred
 	}
 
 	if err := n.st.MarkSending(ctx, q.ID, now); err != nil {
@@ -166,48 +178,96 @@ func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) out
 		return outcomeSkipped
 	}
 
-	attempted, accepted := n.send(ctx, q, p, to, body, email, now)
-
-	switch {
-	case accepted > 0 || attempted == 0:
-		// attempted == 0 means the person has no channel at all — no device, no
-		// email preference. There is nothing to retry, and leaving the row queued
-		// would make it immortal.
-		if err := n.st.MarkSent(ctx, q.ID, n.now()); err != nil {
-			slog.Error("mark notification sent", "id", q.ID, "error", err)
-			return outcomeDeferred
-		}
-		return outcomeDelivered
-	case q.Attempts+1 >= maxDeliveryAttempts:
-		n.skip(ctx, q, fmt.Sprintf("undeliverable after %d attempts", q.Attempts+1), now)
-		return outcomeSkipped
-	default:
+	res, err := n.send(ctx, q, p, to, body, email, now)
+	if err != nil {
+		// The fan-out could not even be attempted — the devices to send to could
+		// not be read. Retiring the row here would record a notification as sent
+		// that no provider was ever shown, which is the one delivery failure that
+		// leaves no trace anywhere.
+		slog.Error("send notification", "id", q.ID, "kind", q.Kind, "error", err)
 		return outcomeDeferred
 	}
+	if !res.complete() {
+		return outcomeDeferred
+	}
+	if err := n.st.MarkSent(ctx, q.ID, n.now()); err != nil {
+		slog.Error("mark notification sent", "id", q.ID, "error", err)
+		return outcomeDeferred
+	}
+	return outcomeDelivered
 }
 
-// send fans one message out over both channels and reports how many providers
-// were asked and how many accepted.
+// sendResult is what one fan-out did, counted per channel.
+//
+// Per channel is the whole point. Push and email fail independently, and the one
+// that cannot be trusted is push: an iOS subscription dies with the service still
+// answering 201. A single "did anything accept?" therefore let the untrusted
+// channel vouch for the one that exists to cover for it, and a refused email was
+// dropped with a log line.
+type sendResult struct {
+	// pushAttempted counts the subscriptions asked, pushAccepted the ones that
+	// took the message. A subscription that answered 404/410 is neither: it has
+	// been deleted and there is nothing left to retry for it.
+	pushAttempted int
+	pushAccepted  int
+	// emailOwed is true when this recipient has an email leg at all: a mailer is
+	// configured, the preference is on, and there is an address to send to.
+	emailOwed bool
+	// emailSent is true when that leg has been accepted, in this pass or in an
+	// earlier one — the fact migration 0003 made durable.
+	emailSent bool
+}
+
+// complete reports whether every channel this recipient has came back accepted,
+// which is the only thing that may retire a row.
+//
+// One acceptance is enough for the push channel as a whole. Which devices took a
+// message is not recorded anywhere, so a second attempt would push again to the
+// phone that already displayed it; holding the row open for a broken tablet would
+// buy a duplicate on the phone every backoff interval and never converge.
+//
+// A recipient with no channel at all — no device, no email preference — is
+// complete vacuously. There is nothing to retry, and leaving the row queued would
+// make it immortal.
+func (r sendResult) complete() bool {
+	if r.pushAttempted > 0 && r.pushAccepted == 0 {
+		return false
+	}
+	return !r.emailOwed || r.emailSent
+}
+
+// send fans one message out over both channels and reports, per channel, what
+// happened.
 //
 // Email is sent whether or not the push succeeded. It is a parallel channel, not
 // a fallback: an iOS push subscription dies silently with the push service still
 // returning 201, so waiting for a delivery error before sending mail would wait
-// forever (the notification rules in docs/architecture.md).
+// forever (the notification rules in docs/architecture.md). The corollary is that
+// an email already accepted is not sent again — the row outlives its failures now,
+// and re-mailing on every attempt would be its own outage.
+//
+// The error return is for a failure to read what to send to, not for a provider
+// refusing: a refusal is an outcome the caller retries, a broken lookup means the
+// caller knows nothing and must not draw conclusions from it. It abandons the whole
+// fan-out rather than mailing anyway, because the record that keeps the email leg
+// from being sent twice lives in the database that has just stopped answering.
 func (n *Notifier) send(ctx context.Context, q domain.QueuedNotification, p payload, to recipient,
-	body []byte, email *mailerMessage, now time.Time) (attempted, accepted int) {
+	body []byte, email *mailerMessage, now time.Time) (sendResult, error) {
+
+	res := sendResult{emailSent: !q.EmailSentAt.IsZero()}
 
 	if n.push != nil {
 		subs, err := n.st.ListPushSubscriptions(ctx, to.user.ID)
 		if err != nil {
-			slog.Error("list push subscriptions", "user", to.user.ID, "error", err)
+			return res, fmt.Errorf("list devices for user %d: %w", to.user.ID, err)
 		}
 		opts := pushOptions(q.Kind, p, now)
 		for _, sub := range subs {
 			err := n.push.Send(ctx, sub, body, opts)
 			switch {
 			case err == nil:
-				attempted++
-				accepted++
+				res.pushAttempted++
+				res.pushAccepted++
 				n.notePush(sub.Endpoint, nil)
 				if err := n.st.MarkPushOK(ctx, sub.ID, now); err != nil {
 					slog.Error("mark push ok", "subscription", sub.ID, "error", err)
@@ -223,7 +283,7 @@ func (n *Notifier) send(ctx context.Context, q domain.QueuedNotification, p payl
 				slog.Info("push subscription is gone, deleted", "subscription", sub.ID,
 					"user", to.user.ID, "service", serviceOf(sub.Endpoint))
 			default:
-				attempted++
+				res.pushAttempted++
 				n.notePush(sub.Endpoint, err)
 				if err := n.st.MarkPushFailure(ctx, sub.ID); err != nil {
 					slog.Error("mark push failure", "subscription", sub.ID, "error", err)
@@ -235,14 +295,45 @@ func (n *Notifier) send(ctx context.Context, q domain.QueuedNotification, p payl
 	}
 
 	if n.mail != nil && email != nil && email.To != "" {
-		attempted++
-		if err := n.mail.Send(ctx, mailer.Message{To: email.To, Subject: email.Subject, Text: email.Text}); err != nil {
-			slog.Error("email delivery failed", "user", to.user.ID, "kind", q.Kind, "error", err)
-		} else {
-			accepted++
+		res.emailOwed = true
+		if !res.emailSent {
+			if err := n.mail.Send(ctx, mailer.Message{To: email.To, Subject: email.Subject, Text: email.Text}); err != nil {
+				slog.Error("email delivery failed", "user", to.user.ID, "kind", q.Kind, "error", err)
+			} else {
+				res.emailSent = true
+				if err := n.st.MarkEmailSent(ctx, q.ID, now); err != nil {
+					// The mail is gone whatever the database says; the cost of not
+					// recording it is a duplicate on the next attempt, which is the
+					// same trade at-least-once delivery makes everywhere else.
+					slog.Error("mark notification email sent", "id", q.ID, "error", err)
+				}
+			}
 		}
 	}
-	return attempted, accepted
+	return res, nil
+}
+
+// retryBackoff is how long a row that has just failed is left alone: doubling from
+// half a minute, capped at an hour.
+//
+// It exists because retirement is time-based. A row is retried for as long as the
+// thing it announces is still ahead, which for a reminder is up to the 48-hour
+// planning horizon; at a fixed thirty seconds that is some 5,700 requests per
+// subscription, and push services rate-limit long before that. The cap keeps a
+// service that comes back after a long outage from waiting the rest of the day to
+// be noticed.
+func retryBackoff(attempts int) time.Duration {
+	if attempts <= 0 {
+		return 0
+	}
+	// Past this the doubling only overflows: 30s << 7 is already over the cap.
+	if attempts > 7 {
+		return maxRetryBackoff
+	}
+	if d := baseRetryBackoff << uint(attempts); d < maxRetryBackoff {
+		return d
+	}
+	return maxRetryBackoff
 }
 
 // pushOptions is the header matrix of the notification rules in docs/architecture.md.

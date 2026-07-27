@@ -243,8 +243,13 @@ type QueuedNotification struct {
 	DueAt            time.Time        `json:"due_at"`     // UTC
 	SendingStartedAt time.Time        `json:"sending_started_at,omitzero"`
 	SentAt           time.Time        `json:"sent_at,omitzero"`
-	Skipped          string           `json:"skipped,omitempty"` // reason, when delivered stale
-	Attempts         int              `json:"attempts"`
+	// EmailSentAt records the email leg on its own, because the two channels fail
+	// independently: a push acceptance is not evidence that the mail went, and a
+	// retry that re-sent an email already accepted would mail the family the same
+	// reminder on every pass until the row retires.
+	EmailSentAt time.Time `json:"email_sent_at,omitzero"`
+	Skipped     string    `json:"skipped,omitempty"` // reason, when delivered stale
+	Attempts    int       `json:"attempts"`
 }
 
 // ActivityAction is what happened, for the activity feed and its notifications.

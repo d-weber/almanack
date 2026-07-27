@@ -100,10 +100,18 @@ const (
 	// recurrences to prove it is pure cost.
 	maxBackfill = 30 * 24 * time.Hour
 
-	// maxDeliveryAttempts retires a row that keeps failing. Without it a
-	// permanently broken endpoint would be retried every 30 seconds until 2040.
-	// The retirement is recorded as a skip with a reason, never as a send.
-	maxDeliveryAttempts = 10
+	// baseRetryBackoff and maxRetryBackoff space out the retries of a row that
+	// keeps failing: min(30s << attempts, 1h).
+	//
+	// There is no attempt cap to go with them, and adding one back would be a
+	// regression. Retirement is a question about the thing being announced —
+	// staleness above answers it for every kind — and a counter answers a
+	// different question badly: ten attempts one tick apart is five minutes, so a
+	// push service having a bad afternoon used to permanently retire a reminder
+	// for an appointment the next morning. What a counter was really standing in
+	// for is this backoff.
+	baseRetryBackoff = 30 * time.Second
+	maxRetryBackoff  = time.Hour
 
 	// drainBatch and maxDrainPasses bound one drain. The passes exist for the
 	// catch-up case, where a week of queue may be waiting.
