@@ -199,7 +199,14 @@ Case- and accent-insensitive (`ecole` matches `École`). A recurring series appe
 | `POST` | `/api/v1/push/confirm` | `{endpoint}` — liveness ping on every app open; bumps `last_confirmed_at` |
 | `DELETE` | `/api/v1/push/subscription` | `{endpoint}` — on logout |
 | `POST` | `/api/v1/push/test` | sends a test notification to the caller's devices → `{"sent":2}` |
-| `GET` | `/api/v1/activity?limit=50&before=` | → `{ "activity": [Activity] }` |
+| `GET` | `/api/v1/activity?limit=50&before_id=` | → `{ "activity": [Activity] }` |
+
+`before_id` is the `id` of the last entry of the previous page. It is an id and not an
+instant because `at` is stored to the second: two changes made inside the same second
+straddle a page boundary, and an instant cursor steps over whichever fell on the far
+side of it. The older `before=<RFC 3339 instant>` is still accepted and behaves exactly
+as it did — including that skip, which is not fixable in terms of an instant. Use
+`before_id`.
 
 `Prefs`:
 ```json

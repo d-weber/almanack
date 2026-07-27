@@ -26,7 +26,10 @@ export function renderActivity() {
   const today = todayISO();
 
   const sentinel = h('div', { class: 'activity-sentinel' });
-  let before = null;
+  // The cursor is the last entry's id, not its instant: instants are stored to the
+  // second and two changes made inside one would straddle a page boundary, losing
+  // whichever fell on the far side of it.
+  let beforeId = null;
   let pages = 0;
   let loading = false;
   let done = false;
@@ -69,12 +72,12 @@ export function renderActivity() {
     clear(footer);
     footer.appendChild(spinner());
     try {
-      const data = await api.activity({ limit: PAGE, before: before || undefined });
+      const data = await api.activity({ limit: PAGE, before_id: beforeId || undefined });
       const entries = Array.isArray(data.activity) ? data.activity : [];
       append(entries);
       pages += 1;
       clear(footer);
-      if (entries.length) before = entries[entries.length - 1].at;
+      if (entries.length) beforeId = entries[entries.length - 1].id;
       if (!entries.length || entries.length < PAGE || pages >= MAX_PAGES) {
         done = true;
         if (observer) observer.disconnect();

@@ -157,6 +157,23 @@ Notable changes to this project. The format follows
   second connection while one is open, because a read that queued every writer behind every
   render would be a considerably worse bug than the one being fixed here.
   ([#6](https://github.com/d-weber/almanack/issues/6))
+- **An entry could go missing from the activity feed, and a change could go out to nobody.**
+  Two changes made in the same second — saving an event and correcting it straight away, or
+  two people typing at once — carry the same timestamp, because the log records the second
+  and not the millisecond. The feed asked for the next page by the time of the last entry
+  it had, so anything sharing that second was on the wrong side of "older than this" and was
+  never shown again: not on the next scroll, not on a reload, not ever. The screen looked
+  complete, which is the part that matters — there was nothing to suggest an entry was
+  missing. The notification planner read the same feed to decide who to tell about what, and
+  after a long enough outage it stepped over changes the same way, so the answer for those
+  was nobody. Both now page by the entry's id, which is unique and is the order the changes
+  were actually made in, so a page boundary can fall anywhere without dropping a row. The
+  planner's copy of the paging is gone entirely: it reads forwards from where it got to, one
+  query, and picks up in the same place next time rather than abandoning the middle of a
+  backlog it could not finish. The activity endpoint takes `before_id` in place of `before`;
+  `before` still works, and still cannot page through a shared second, which is why it is no
+  longer what the app sends. Nothing changed in the database.
+  ([#7](https://github.com/d-weber/almanack/issues/7))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 

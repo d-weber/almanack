@@ -225,7 +225,7 @@ func TestInTxRollsBackEveryWrite(t *testing.T) {
 	}
 	// The activity log is where change notifications are planned from, so a row left
 	// behind here would announce an edit that never happened.
-	if rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, time.Time{}); err != nil || len(rows) != 0 {
+	if rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, 0); err != nil || len(rows) != 0 {
 		t.Errorf("%d activity rows survived a rolled-back transaction (%v)", len(rows), err)
 	}
 
@@ -800,7 +800,7 @@ func checkV020Family(t *testing.T, s *Store) {
 		t.Errorf("still-owed notifications = %v, want [4 2]", unsentIDs)
 	}
 
-	activity, err := s.ListActivity(ctx(), []int64{familyCal, parentsCal, kidsCal}, 100, time.Time{})
+	activity, err := s.ListActivity(ctx(), []int64{familyCal, parentsCal, kidsCal}, 100, 0)
 	if err != nil {
 		t.Fatalf("ListActivity: %v", err)
 	}
@@ -3216,7 +3216,7 @@ func TestActivityLog(t *testing.T) {
 		t.Fatalf("LogActivity: %v", err)
 	}
 
-	entries, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, time.Time{})
+	entries, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, 0)
 	if err != nil || len(entries) != 3 {
 		t.Fatalf("ListActivity = %+v, %v; want 3", entries, err)
 	}
@@ -3228,21 +3228,88 @@ func TestActivityLog(t *testing.T) {
 	}
 
 	// Pagination cursor.
-	older, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, entries[0].At)
+	older, err := s.ListActivity(ctx(), []int64{cal.ID}, 10, entries[0].ID)
 	if err != nil || len(older) != 2 {
 		t.Fatalf("ListActivity before the newest = %+v, %v; want 2", older, err)
 	}
-	if limited, _ := s.ListActivity(ctx(), []int64{cal.ID}, 1, time.Time{}); len(limited) != 1 {
+	if limited, _ := s.ListActivity(ctx(), []int64{cal.ID}, 1, 0); len(limited) != 1 {
 		t.Fatal("limit is not honoured")
 	}
 
 	// Several calendars at once, which is how the feed is actually read.
-	both, err := s.ListActivity(ctx(), []int64{cal.ID, other.ID}, 10, time.Time{})
+	both, err := s.ListActivity(ctx(), []int64{cal.ID, other.ID}, 10, 0)
 	if err != nil || len(both) != 4 {
 		t.Fatalf("ListActivity across calendars = %+v, %v; want 4", both, err)
 	}
-	if entries, _ := s.ListActivity(ctx(), nil, 10, time.Time{}); len(entries) != 0 {
+	if entries, _ := s.ListActivity(ctx(), nil, 10, 0); len(entries) != 0 {
 		t.Fatalf("ListActivity with no calendars = %+v", entries)
+	}
+
+	// Forward from a cursor is the planner's read: everything since, oldest first.
+	since, err := s.ListActivityAfter(ctx(), []int64{cal.ID, other.ID}, entries[1].ID, 10)
+	if err != nil || len(since) != 2 {
+		t.Fatalf("ListActivityAfter = %+v, %v; want 2", since, err)
+	}
+	if since[0].Title != "Vacances" || since[1].Title != "Marc" {
+		t.Fatalf("ListActivityAfter is not oldest-first: %+v", since)
+	}
+	if none, _ := s.ListActivityAfter(ctx(), []int64{cal.ID, other.ID}, both[0].ID, 10); len(none) != 0 {
+		t.Fatalf("ListActivityAfter the newest = %+v, want none", none)
+	}
+
+	// A day of it, which is what the daily summary counts. The window is half-open:
+	// the entry landing exactly on the upper bound belongs to the next one.
+	day, err := s.ListActivityBetween(ctx(), []int64{cal.ID}, baseTime, baseTime.Add(2*time.Hour), 10)
+	if err != nil || len(day) != 2 {
+		t.Fatalf("ListActivityBetween = %+v, %v; want 2", day, err)
+	}
+	if day[0].Title != "Piscine" {
+		t.Fatalf("ListActivityBetween is not newest-first: %+v", day)
+	}
+}
+
+// TestActivityPagesThroughASharedSecond: instants are stored to the second, and a
+// family can easily make two changes inside one — a create and the edit that follows
+// it. Paging on the instant walked over everything sharing the second the page ended
+// on, and those entries never appeared again.
+func TestActivityPagesThroughASharedSecond(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+
+	clk.Set(baseTime) // never moves: every entry below carries the same instant
+	titles := []string{"Dentiste", "Piscine", "Vacances"}
+	for _, title := range titles {
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity: %v", err)
+		}
+	}
+
+	// Read the feed a page at a time, the way the scrolling client asks for it.
+	var seen []string
+	var cursor int64
+	for range len(titles) + 1 {
+		page, err := s.ListActivity(ctx(), []int64{cal.ID}, 1, cursor)
+		if err != nil {
+			t.Fatalf("ListActivity: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		seen = append(seen, page[0].Title)
+		cursor = page[len(page)-1].ID
+	}
+	want := []string{"Vacances", "Piscine", "Dentiste"}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("paging one at a time saw %v, want %v", seen, want)
+	}
+
+	// The planner reads the same second forwards, and must not lose a row either.
+	since, err := s.ListActivityAfter(ctx(), []int64{cal.ID}, 0, 10)
+	if err != nil || len(since) != len(titles) {
+		t.Fatalf("ListActivityAfter = %+v, %v; want %d", since, err, len(titles))
 	}
 }
 

@@ -83,7 +83,7 @@ func (f *fixture) state(t *testing.T) []string {
 
 func (f *fixture) activityCount(t *testing.T) int {
 	t.Helper()
-	rows, err := f.st.ListActivity(context.Background(), []int64{f.cal}, 100, time.Time{})
+	rows, err := f.st.ListActivity(context.Background(), []int64{f.cal}, 100, 0)
 	if err != nil {
 		t.Fatalf("list activity: %v", err)
 	}

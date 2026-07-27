@@ -552,25 +552,65 @@ func (s *Store) LogActivity(ctx context.Context, a domain.Activity) error {
 
 // ListActivity returns the newest entries across the given calendars, oldest-last.
 //
-// before is the pagination cursor: only entries strictly older than it are returned.
-// A zero before means "from the newest". limit defaults to 50 when not positive.
-func (s *Store) ListActivity(ctx context.Context, calendarIDs []int64, limit int, before time.Time) ([]domain.Activity, error) {
+// beforeID is the pagination cursor: only entries with a smaller id are returned. A
+// zero beforeID means "from the newest". limit defaults to 50 when not positive.
+//
+// The cursor is an id and not the instant it happened at, because `at` is stored to
+// the second and a family can make two changes inside one. An instant cursor drops
+// whatever else shared the second the page ended on, and nothing brings it back.
+// The id is unique, so a page boundary can fall anywhere without losing a row.
+//
+// Ordering by id is ordering by when it happened: `at` is written from the same clock
+// read that assigns the id, so the two agree unless the machine's clock has stepped
+// backwards. When it has, id order is the more truthful of the two — it is the order
+// the changes were actually made in.
+func (s *Store) ListActivity(ctx context.Context, calendarIDs []int64, limit int, beforeID int64) ([]domain.Activity, error) {
+	where := `calendar_id IN (` + placeholders(len(calendarIDs)) + `)`
+	args := idArgs(calendarIDs)
+	if beforeID > 0 {
+		where += ` AND id < ?`
+		args = append(args, beforeID)
+	}
+	return s.listActivity(ctx, calendarIDs, where+` ORDER BY id DESC`, args, limit)
+}
+
+// ListActivityAfter returns entries newer than afterID, oldest first.
+//
+// This is the notification planner's read: its cursor is the last activity row it
+// fanned out, and it wants what has happened since, in the order it happened.
+func (s *Store) ListActivityAfter(ctx context.Context, calendarIDs []int64, afterID int64, limit int) ([]domain.Activity, error) {
+	where := `calendar_id IN (` + placeholders(len(calendarIDs)) + `) AND id > ? ORDER BY id`
+	return s.listActivity(ctx, calendarIDs, where, append(idArgs(calendarIDs), afterID), limit)
+}
+
+// ListActivityBetween returns the entries whose instant falls in [from, to), newest
+// first. A zero from means "from the beginning"; to is required.
+//
+// This one really is a question about time rather than about order — "what changed
+// today", for the daily summary — so it is the one read that still bounds on `at`.
+func (s *Store) ListActivityBetween(ctx context.Context, calendarIDs []int64, from, to time.Time, limit int) ([]domain.Activity, error) {
+	where := `calendar_id IN (` + placeholders(len(calendarIDs)) + `)`
+	args := idArgs(calendarIDs)
+	if !from.IsZero() {
+		where += ` AND at >= ?`
+		args = append(args, mustInstant(from))
+	}
+	where += ` AND at < ?`
+	args = append(args, mustInstant(to))
+	return s.listActivity(ctx, calendarIDs, where+` ORDER BY id DESC`, args, limit)
+}
+
+// listActivity runs one of the three activity reads. where carries its own ORDER BY;
+// limit defaults to 50 when not positive.
+func (s *Store) listActivity(ctx context.Context, calendarIDs []int64, where string, args []any, limit int) ([]domain.Activity, error) {
 	if len(calendarIDs) == 0 {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 50
 	}
-	where := `calendar_id IN (` + placeholders(len(calendarIDs)) + `)`
-	args := idArgs(calendarIDs)
-	if !before.IsZero() {
-		where += ` AND at < ?`
-		args = append(args, mustInstant(before))
-	}
-	args = append(args, limit)
-
 	rows, err := s.q.QueryContext(ctx,
-		`SELECT `+activityCols+` FROM activity_log WHERE `+where+` ORDER BY at DESC, id DESC LIMIT ?`, args...)
+		`SELECT `+activityCols+` FROM activity_log WHERE `+where+` LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("list activity: %w", mapErr(err))
 	}

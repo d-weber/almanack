@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -529,6 +530,63 @@ func TestActivityNotifications(t *testing.T) {
 	e.plan()
 	if n := len(e.queueOfKind(domain.KindActivity)); n != 1 {
 		t.Errorf("re-planning produced %d activity rows, want 1", n)
+	}
+}
+
+// TestActivityCatchUpAfterALongOutage: the planner reads the change log forwards from
+// its cursor, and a week of changes is more than one read of it. Nothing between the
+// cursor and the newest row may be stepped over, however the reads fall — a change
+// nobody was told about is indistinguishable from a change that never happened. The
+// clock only moves every fifth row here, so most of the backlog shares its second
+// with a neighbour and plenty of it falls on a batch boundary.
+func TestActivityCatchUpAfterALongOutage(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	cal := e.calendar("Famille", actor.ID)
+	e.join(cal.ID, watcher.ID)
+	e.noDigests()
+
+	e.plan() // the first pass only sets the high-water mark
+
+	// More changes than one pass will take, so the second pass has to resume from
+	// exactly where the first stopped.
+	const changes = activityCatchUpLimit + 50
+	for i := range changes {
+		if i%5 == 0 {
+			e.clk.Advance(time.Second)
+		}
+		if err := e.st.LogActivity(e.ctx, domain.Activity{
+			CalendarID: cal.ID, UserID: actor.ID, Action: domain.ActionEventCreated,
+			Title: fmt.Sprintf("Sortie %d", i),
+		}); err != nil {
+			t.Fatalf("log activity %d: %v", i, err)
+		}
+	}
+
+	e.plan()
+	if n := len(e.queueOfKind(domain.KindActivity)); n != activityCatchUpLimit {
+		t.Fatalf("the first catch-up pass queued %d changes, want %d", n, activityCatchUpLimit)
+	}
+	e.plan()
+	rows := e.queueOfKind(domain.KindActivity)
+	if len(rows) != changes {
+		t.Fatalf("the backlog fanned out to %d notifications, want %d: %d changes were stepped over",
+			len(rows), changes, changes-len(rows))
+	}
+	// Every one of them is a distinct change, not the same row queued twice.
+	refs := map[string]bool{}
+	for _, r := range rows {
+		if refs[r.SourceRef] {
+			t.Fatalf("%s was queued twice", r.SourceRef)
+		}
+		refs[r.SourceRef] = true
+	}
+
+	// And the cursor has come to rest: a further pass adds nothing.
+	e.plan()
+	if n := len(e.queueOfKind(domain.KindActivity)); n != changes {
+		t.Errorf("a pass over a drained backlog queued %d rows, want %d", n, changes)
 	}
 }
 
