@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -53,6 +54,11 @@ type pushCall struct {
 
 // fakePush is an httptest push service. Its status can be changed per endpoint so
 // a test can make one subscription answer 410 Gone.
+//
+// It speaks TLS because a real push endpoint does, and because the endpoint
+// allowlist the notifier applies before dialling refuses anything that is not
+// https. A test whose subscriptions could not exist in production would not be
+// testing much.
 type fakePush struct {
 	srv *httptest.Server
 
@@ -64,7 +70,7 @@ type fakePush struct {
 func newFakePush(t *testing.T) *fakePush {
 	t.Helper()
 	f := &fakePush{status: map[string]int{}}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		code, ok := f.status[r.URL.Path]
 		if !ok {
@@ -84,6 +90,18 @@ func newFakePush(t *testing.T) *fakePush {
 }
 
 func (f *fakePush) endpoint(name string) string { return f.srv.URL + "/push/" + name }
+
+// host is what a test names in Options.PushHosts so that the fake service counts as
+// an allowed one. Loopback is not a push service and the default list rightly says
+// so; naming it here is the same move an operator makes for a self-hosted one.
+func (f *fakePush) host(t *testing.T) string {
+	t.Helper()
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatalf("parse fake push service URL %q: %v", f.srv.URL, err)
+	}
+	return u.Hostname()
+}
 
 func (f *fakePush) setStatus(name string, code int) {
 	f.mu.Lock()
@@ -181,14 +199,15 @@ func newEnv(t *testing.T, now time.Time) *env {
 	mail := &stubMailer{}
 	ev := events.New(st, paris, clk)
 	n, err := New(Options{
-		Store:    st,
-		Events:   ev,
-		Push:     sender,
-		Mailer:   mail,
-		Catalog:  i18n.MustLoad(),
-		Clock:    clk,
-		Location: paris,
-		BaseURL:  "https://almanack.example.org",
+		Store:     st,
+		Events:    ev,
+		Push:      sender,
+		PushHosts: []string{fp.host(t)},
+		Mailer:    mail,
+		Catalog:   i18n.MustLoad(),
+		Clock:     clk,
+		Location:  paris,
+		BaseURL:   "https://almanack.example.org",
 	})
 	if err != nil {
 		t.Fatalf("new notifier: %v", err)

@@ -139,6 +139,12 @@ type Options struct {
 	// email rather than refusing to start: a family server without push keys
 	// still has to send reminders.
 	Push *webpush.Sender
+	// PushHosts are the hostnames a subscription endpoint may point at
+	// (ALMANACK_PUSH_HOSTS). Empty means domain.DefaultPushHosts — a caller that
+	// forgets to pass it gets the safe answer rather than an open door. The HTTP
+	// layer refuses a bad endpoint at registration; this covers rows written
+	// before it did, and rows whose host has since been narrowed out of the list.
+	PushHosts []string
 	// Mailer may be nil, which disables the email channel.
 	Mailer mailer.Mailer
 	// Catalog supplies every user-visible string and the French date formatting
@@ -171,17 +177,18 @@ type Options struct {
 // shared between the scheduler goroutine and the HTTP handlers that read Health,
 // so every mutable field is behind mu.
 type Notifier struct {
-	st      *store.Store
-	ev      *events.Service
-	push    *webpush.Sender
-	mail    mailer.Mailer
-	cat     *i18n.Catalog
-	clk     clock.Clock
-	loc     *time.Location
-	baseURL string
-	horizon time.Duration
-	tick    time.Duration
-	minTime time.Time
+	st        *store.Store
+	ev        *events.Service
+	push      *webpush.Sender
+	pushHosts []string
+	mail      mailer.Mailer
+	cat       *i18n.Catalog
+	clk       clock.Clock
+	loc       *time.Location
+	baseURL   string
+	horizon   time.Duration
+	tick      time.Duration
+	minTime   time.Time
 
 	mu           sync.Mutex
 	lastTick     time.Time
@@ -220,6 +227,7 @@ func New(o Options) (*Notifier, error) {
 		st:           o.Store,
 		ev:           o.Events,
 		push:         o.Push,
+		pushHosts:    o.PushHosts,
 		mail:         o.Mailer,
 		cat:          o.Catalog,
 		clk:          o.Clock,

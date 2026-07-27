@@ -63,7 +63,8 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	eventSvc := events.New(st, cfg.FamilyTZ, clk)
 
 	notifier, err := notify.New(notify.Options{
-		Store: st, Events: eventSvc, Push: sender, Mailer: mail, Catalog: catalog,
+		Store: st, Events: eventSvc, Push: sender, PushHosts: cfg.PushHosts,
+		Mailer: mail, Catalog: catalog,
 		Clock: clk, Location: cfg.FamilyTZ, BaseURL: cfg.BaseURL,
 		Horizon: cfg.PlanHorizon, Tick: cfg.SchedulerTick,
 		OwnerEmail: cfg.OwnerEmail, HeartbeatTime: cfg.HeartbeatTime,

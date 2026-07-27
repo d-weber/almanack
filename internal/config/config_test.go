@@ -130,6 +130,11 @@ func TestLoadDefaults(t *testing.T) {
 		{"ALMANACK_LISTEN", cfg.ListenAddr, "127.0.0.1:8080"},
 		{"ALMANACK_TZ", cfg.TZName, "Europe/Paris"},
 		{"ALMANACK_TRUSTED_PROXIES", strings.Join(cfg.TrustedProxies, ","), "127.0.0.1,::1"},
+		// Empty on purpose: the allowlist of push services lives in
+		// domain.DefaultPushHosts, so an operator who never sets this gets the
+		// browsers' real endpoints and nothing else. Copying the list in here
+		// would be a second place for it to rot.
+		{"ALMANACK_PUSH_HOSTS", strings.Join(cfg.PushHosts, ","), ""},
 		{"ALMANACK_SMTP", cfg.SMTPAddr, "127.0.0.1:25"},
 		{"ALMANACK_ALSACE_MOSELLE", cfg.AlsaceMoselle, false},
 		{"ALMANACK_HOLIDAY_COLOR", cfg.HolidayColor, "#d32f2f"},
@@ -478,6 +483,38 @@ func TestValidValuesAreAccepted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := loadConf(t, minimalProd(tc.line)...); err != nil {
 				t.Errorf("%s was rejected: %v", tc.line, err)
+			}
+		})
+	}
+}
+
+// ALMANACK_PUSH_HOSTS is the operator's way out of the built-in allowlist, for a
+// browser that starts minting endpoints somewhere new or for a self-hosted push
+// service. It is read as a list because that is what it is; the meaning of the
+// values belongs to domain.PushEndpointAllowed, which has its own tests.
+func TestPushHostsIsReadAsAList(t *testing.T) {
+	isolateEnv(t)
+
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"unset means the built-in list", "ALMANACK_TZ=Europe/Paris", nil},
+		{"one host", "ALMANACK_PUSH_HOSTS=push.example.org", []string{"push.example.org"}},
+		{"several, with the spaces a human leaves behind",
+			"ALMANACK_PUSH_HOSTS=push.example.org, *.notify.windows.com ,web.push.apple.com",
+			[]string{"push.example.org", "*.notify.windows.com", "web.push.apple.com"}},
+		{"the escape hatch", "ALMANACK_PUSH_HOSTS=*", []string{"*"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConf(t, minimalProd(tc.line)...)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := strings.Join(cfg.PushHosts, "|"); got != strings.Join(tc.want, "|") {
+				t.Errorf("PushHosts = %q, want %q", cfg.PushHosts, tc.want)
 			}
 		})
 	}
@@ -896,6 +933,16 @@ func TestRedactedMarksUnsetSettings(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Redacted() does not contain %q:\n%s", want, joined)
 		}
+	}
+	// An empty ALMANACK_PUSH_HOSTS is not "no restriction", it is the built-in list,
+	// and the startup line has to say which of the two an operator is looking at.
+	if !strings.Contains(joined, "push_hosts=(built-in list)") {
+		t.Errorf("Redacted() does not say where the push allowlist came from:\n%s", joined)
+	}
+	set := cfg
+	set.PushHosts = []string{"push.example.org", "*.notify.windows.com"}
+	if !strings.Contains(strings.Join(set.Redacted(), "\n"), "push_hosts=push.example.org,*.notify.windows.com") {
+		t.Error("Redacted() does not show a configured push allowlist, so an operator cannot check it")
 	}
 	// The values an operator diagnoses with have to be there in full, the file that
 	// was read most of all: it is the answer to "which configuration is this?".

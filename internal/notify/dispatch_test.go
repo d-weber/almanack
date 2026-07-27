@@ -428,6 +428,71 @@ func TestDegradesToEmailWithoutVAPID(t *testing.T) {
 	}
 }
 
+// TestPushIsNotSentToAnEndpointOutsideTheAllowlist covers the rows that are already
+// in the table. Registration is the real gate (internal/httpapi refuses an endpoint
+// whose host is not a push service), but a row written before that gate existed, or
+// one whose host an operator has since narrowed out of ALMANACK_PUSH_HOSTS, must not
+// be dialled either — a subscription endpoint is a URL somebody else chose, and the
+// last thing between it and a request is this check.
+//
+// It skips the device rather than counting a failure against it: a notification held
+// open for an endpoint that will never be tried would be retried until it went stale,
+// and the endpoint is not what is broken.
+func TestPushIsNotSentToAnEndpointOutsideTheAllowlist(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	sub := e.subscribe(u.ID, "iphone")
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+
+	// The same pipeline, with an allowlist that does not name the fake service the
+	// subscription points at.
+	n, err := New(Options{
+		Store: e.st, Events: e.ev, Push: e.n.push, Mailer: e.mail,
+		Catalog: i18n.MustLoad(), Clock: e.clk, Location: paris,
+		BaseURL: "https://almanack.example.org", PushHosts: []string{"web.push.apple.com"},
+	})
+	if err != nil {
+		t.Fatalf("new notifier: %v", err)
+	}
+	if err := n.Plan(e.ctx); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	e.clk.Set(time.Date(2027, 6, 1, 6, 30, 0, 0, time.UTC))
+	if err := n.Dispatch(e.ctx); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	if got := e.push.received(); len(got) != 0 {
+		t.Fatalf("the endpoint was dialled anyway: %+v", got)
+	}
+	// The other channel is unaffected, and the row is finished rather than left to
+	// be retried against a device that will never be tried.
+	if got := len(e.mail.messages()); got != 1 {
+		t.Errorf("emails = %d, want 1", got)
+	}
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 || rows[0].SentAt.IsZero() {
+		t.Errorf("reminder row = %+v, want it retired by the email leg", rows)
+	}
+
+	// The subscription itself is left alone. When this fires it is at least as
+	// likely that the allowlist is wrong as that the device is, and deleting a
+	// family member's registration over a configuration edit would be a poor trade.
+	subs, err := e.st.ListPushSubscriptions(e.ctx, u.ID)
+	if err != nil {
+		t.Fatalf("list subscriptions: %v", err)
+	}
+	if len(subs) != 1 || subs[0].ID != sub.ID {
+		t.Fatalf("subscriptions = %+v, want the row left in place", subs)
+	}
+	if subs[0].Failures != 0 {
+		t.Errorf("subscription failure count = %d; not dialling a device is not a delivery failure", subs[0].Failures)
+	}
+}
+
 // TestSentAtIsWrittenOnlyAfterAcceptance is the at-least-once contract. When every
 // provider refuses, the row stays queued and is retried; it is never marked sent
 // on the way in. Reversing this is the "fix" that silently turns delivery into

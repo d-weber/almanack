@@ -157,6 +157,10 @@ type Sender struct {
 // a push service operator can use to reach whoever runs this server. Passing a
 // nil client installs one with a timeout, because a push service that never
 // answers must not wedge the scheduler goroutine.
+//
+// Whatever client it ends up with, it will not follow redirects: see
+// refuseRedirects. The caller's client is copied rather than modified, so the
+// property holds for every Sender without changing a client it was only lent.
 func NewSender(vapidPublicB64, vapidPrivateB64, subject string, hc *http.Client) (*Sender, error) {
 	priv, err := parseKey(vapidPublicB64, vapidPrivateB64)
 	if err != nil {
@@ -166,17 +170,35 @@ func NewSender(vapidPublicB64, vapidPrivateB64, subject string, hc *http.Client)
 	if !strings.HasPrefix(subject, "mailto:") && !strings.HasPrefix(subject, "https://") {
 		return nil, fmt.Errorf("webpush: vapid subject %q must be a mailto: or https: URI", subject)
 	}
-	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+	client := http.Client{Timeout: 30 * time.Second}
+	if hc != nil {
+		client = *hc
 	}
+	client.CheckRedirect = refuseRedirects
 	return &Sender{
 		Clock:     clock.Real{},
 		priv:      priv,
 		publicB64: strings.TrimRight(strings.TrimSpace(vapidPublicB64), "="),
 		subject:   subject,
-		hc:        hc,
+		hc:        &client,
 	}, nil
 }
+
+// refuseRedirects stops the client at the first response, whatever it is.
+//
+// The endpoint being posted to is supplied by whoever registered the device, and
+// a redirect is the difference between a URL this server posts to and a URL this
+// server can be aimed at: Go's default client follows ten hops, does not refuse
+// an https→http downgrade, and — because http.NewRequestWithContext over a
+// bytes.Reader sets GetBody — replays the POST on a 307 or 308, or turns it into
+// a GET of anything at all on a 301, 302 or 303. Refusing means the worst an
+// endpoint can do is aim one TLS handshake somewhere, which certificate
+// validation already settles.
+//
+// Nothing legitimate is lost. The push services answer at the endpoint the
+// browser handed out; a 3xx from one is a bug on their side, and it surfaces here
+// as a *StatusError naming the code rather than as a silent request elsewhere.
+func refuseRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // PublicKey returns the base64url VAPID public key this Sender signs with. The
 // client needs it as applicationServerKey when subscribing.

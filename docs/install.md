@@ -158,6 +158,22 @@ sudo chmod 0640 /etc/almanack/almanack.conf
 the proxy, so without it the login rate limiter shares one bucket for the whole family and
 one attacker hammering the login page locks everybody out.
 
+`ALMANACK_PUSH_HOSTS` is not in the minimum above because its default is right for every
+browser. A push subscription endpoint is a URL the browser gives to a device and this server
+then posts to — the one address in the application that comes from outside and gets
+dereferenced — so the hosts it may point at are restricted to the four push services
+(Google's, Mozilla's, Apple's and Microsoft's). The cost of that is real: if a browser ever
+starts handing out endpoints somewhere else, registering that device is refused with a 400
+and the log says so by name —
+
+```
+WARN push endpoint refused: its host is not an allowed push service service=push.newvendor.example setting=ALMANACK_PUSH_HOSTS
+```
+
+— and the fix is to add the host to `ALMANACK_PUSH_HOSTS` (comma-separated; `*.example.org`
+matches subdomains). Set it to `*` to accept any host, which is what running your own push
+service needs.
+
 If you modify Almanack and let other people use it, AGPL section 13 entitles them to your
 source: set `ALMANACK_SOURCE_URL` to where it can be obtained and the app puts a link in
 its About screen.
@@ -467,6 +483,7 @@ and the client reloads when it changes.
 | The page loads but nothing works | A second `Content-Security-Policy` from your proxy. Remove it. |
 | Uploads fail | The proxy's body size limit; needs at least 2 MB. |
 | No push notifications | The app must be installed to the home screen, not just open in a tab. iOS requires Safari and an install. Check `/healthz` for push errors. |
+| One device refuses to register for push | `journalctl -u almanack \| grep "push endpoint refused"`. Its browser hands out endpoints on a host `ALMANACK_PUSH_HOSTS` does not allow; the line names it. |
 | No email at all | Test the MTA directly with `mail`. Almanack never relays; if `mail` does not work, neither will it. |
 | Everyone locked out after one wrong password | `ALMANACK_TRUSTED_PROXIES` does not list your proxy, so the whole family shares one rate-limit bucket. |
 | Times are an hour out | `ALMANACK_TZ` is the family timezone and the only one that matters; devices elsewhere still see family time. |

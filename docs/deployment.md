@@ -24,7 +24,7 @@ a unit or as `almanack --config <path>`.
 | `almanack gen-vapid` | Prints a fresh VAPID keypair. Run once, ever, at first deployment. |
 | `almanack seed` | Creates a demo family. Development only. |
 | `almanack version` | Prints the build version. |
-| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, scheduler heartbeat age, last backup age and result, consecutive SMTP failures, per-push-service error counts, and disk usage. |
+| `GET /healthz` | No auth. `200` with `{"status":"ok",...}`, or `503` when degraded. Reports database reachability, scheduler heartbeat age, last backup age and result, consecutive SMTP failures, how many push subscriptions are failing (`push.failing`) and how many have gone quiet, and disk usage. Because it needs no session it reports no push service *names*: which one is failing is in the daily heartbeat mail, where there is a recipient rather than a URL. |
 | systemd readiness | If `NOTIFY_SOCKET` is set, the process sends `READY=1` **after** migrations complete, so a health check can distinguish "still migrating" from "dead". Use `Type=notify`. |
 | systemd watchdog | If `WATCHDOG_USEC` is set, the scheduler loop pings the watchdog. Set `WatchdogSec` so that a hung scheduler is restarted rather than silently ceasing to send reminders. |
 | Signals | `SIGTERM`/`SIGINT` drain in-flight requests and stop cleanly. |

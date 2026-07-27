@@ -114,6 +114,24 @@ ALMANACK_VAPID_PRIVATE=
 # reach you if your sender misbehaves.
 ALMANACK_VAPID_SUBJECT=mailto:you@example.org
 
+# Which hosts a device's push endpoint may point at, comma-separated.
+#
+# A subscription endpoint is a URL the browser gives to a family member's device
+# and this server then posts to — the one address in the application that comes
+# from outside and gets dereferenced. Restricting it is what stops a member
+# pointing it at something on this machine's own network.
+#
+# Leave it empty and the built-in list is used, which covers every browser:
+#
+#   fcm.googleapis.com, android.googleapis.com,
+#   updates.push.services.mozilla.com, web.push.apple.com, *.notify.windows.com
+#
+# Set it only if a browser starts handing out endpoints somewhere else — the log
+# says "push endpoint refused" with the host when that happens — or if you run
+# your own push service, in which case name it here. A single "*" turns the check
+# off entirely; do that only if you know what you are letting this server dial.
+ALMANACK_PUSH_HOSTS=
+
 
 # ---------------------------------------------------------------------------
 # Scheduler

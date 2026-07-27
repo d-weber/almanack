@@ -67,6 +67,20 @@ Notable changes to this project. The format follows
   1.0 release criteria. Each item was re-reviewed against the code on the way across:
   several proposed fixes were cut down to smaller ones, two were dropped as not worth the
   code, and one had already been fixed.
+- **A push subscription may now only point at a push service.** The endpoint a browser hands
+  over is checked against a list of the four services that issue them — Google's, Mozilla's,
+  Apple's and Microsoft's — and anything else is refused when the device registers, with a
+  400 the app reports and a warning in the log naming the host. Default-deny rather than a
+  list of addresses to avoid: the set of push services is short and known, where the set of
+  things not to dial is neither, and a denylist that is wrong is wrong silently. The cost is
+  real, and falls on the day a browser starts issuing endpoints somewhere new, so it is paid
+  for openly: `ALMANACK_PUSH_HOSTS` takes a comma-separated list of hosts (`*.example.org`
+  matches subdomains) and replaces the built-in one, and `*` accepts anything, which is what
+  running your own push service needs. Every subscription in an existing calendar points at
+  one of the four already, so upgrading changes nothing for anyone; a subscription whose host
+  is not allowed is skipped at delivery rather than deleted, and can still be confirmed and
+  removed by the browser that owns it.
+  ([#12](https://github.com/d-weber/almanack/issues/12))
 
 ### Removed
 
@@ -234,6 +248,24 @@ Notable changes to this project. The format follows
   ends up filed as skipped even though the email arrived. The record of the email is kept
   beside it, rather than inventing a third answer to "did this go out?".
   ([#9](https://github.com/d-weber/almanack/issues/9))
+- **A push subscription could point this server at its own network, by way of a redirect.**
+  Registering a device hands the server a URL and asks it to post there, which is simply how
+  Web Push works; the endpoint was checked for being an `https` URL and nothing else. On its
+  own that was less than it sounds — a certificate has to validate, so a plaintext service on
+  the internal network cannot complete the handshake and the endpoint learns only whether
+  something answered. The redirect was the hole. Go's HTTP client follows up to ten of them,
+  does not refuse a downgrade from `https` to plain `http`, and replays the POST body on a
+  307 or 308 — so an endpoint that answered "moved" could have the next request delivered to
+  the database on the same machine, the router, or a cloud metadata service, and a 301, 302
+  or 303 turned it into a GET of any address at all. Any invited member could reach it: their
+  own device registration, then the "send a test notification" button. The sender now refuses
+  redirects outright and reports the 3xx as the error it is. Real push services answer at the
+  endpoint they issued. Separately, `/healthz` needs no session and was reporting delivery
+  failures broken down by push service host — a value the person registering a device
+  chooses — which answered "did the request I aimed at that address succeed?" to anyone who
+  asked. It now reports how many subscriptions are failing and no longer names them; which
+  service is failing is in the daily heartbeat mail, which has a recipient rather than a URL.
+  ([#12](https://github.com/d-weber/almanack/issues/12))
 - `tools/timetree-export` referred to a `docs/timetree-migration.md` that has never existed
   under that name.
 
