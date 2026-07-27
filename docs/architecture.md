@@ -114,8 +114,8 @@ These were decided deliberately, because every one of them has a plausible oppos
 | `UNTIL` | Inclusive |
 | Interval anchoring | The series start is the anchor, for every frequency |
 | Monthly modes | Exactly one of: day-of-month, nth weekday (`1..5`, `-1` = last), or last calendar day |
-| A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, always** — the server and the browser run the same conversion, so a generated occurrence and a typed time cannot disagree. Which of the two passes it lands on follows the zone: the second in Europe/Paris, the first in a zone whose winter offset is negative |
-| A wall time in the hour the clocks skip (spring) | **Normalised forward** by the length of the gap — 02:30 becomes 03:30, not 03:00 and not 01:30. Both sides again |
+| A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, given the same tz database.** Both run one conversion — read the wall fields as though they were UTC, take the offset in force at that reading, apply it, and correct once — and those are the same function, checked over every transition in all 406 zones. Which of the two passes it lands on follows the zone rather than being a policy: the second in Europe/Paris, the first in a zone whose winter offset is negative. See the caveat below the table: the same *function* is not the same *answer* if the two sides disagree about the rules |
+| A wall time in the hour the clocks skip (spring) | **Moved by the length of the gap, in the direction the offset dictates** — forward where the standard offset is at or above zero, so 02:30 becomes 03:30 in Europe/Paris; backward where it is negative, so 02:30 becomes 01:30 in America/New_York. It is not a choice either implementation makes, but what falls out of the conversion above, and in a zone that jumps at midnight it can land on the **previous day** — a 00:30 series in America/Santiago resolves to 23:30 the day before, and is then bucketed on that day. Both sides again |
 | Occurrence end | **Start plus the template's exact duration.** An occurrence spanning a daylight-saving change is therefore an hour longer or shorter in wall-clock terms, while being exactly as long in real time; RFC 5545 and Google Calendar do the same. Keeping both wall clocks instead would make an occurrence's length depend on the date it fell on, and collapse anything inside the missing spring hour to zero length or less |
 
 `internal/recur` is pure functions over dates with no I/O, which is why it can be tested
@@ -124,6 +124,19 @@ implementation, and the first five policies above — the ones that are its own 
 mutation-tested to confirm the suite actually catches their opposites. The rows below them
 belong to `internal/events`: they are about the instant an occurrence lands on rather than
 the date it falls on.
+
+**The two daylight-saving rows say "the same conversion", not "the same answer".** The
+conversion is provably one function written twice — but each side reads its own copy of the
+tz database, and those can be different vintages: Go prefers the system zoneinfo and falls
+back to the `time/tzdata` the binary embeds, while the browser carries whatever its engine
+shipped with. When a zone's rules change and one side has not caught up, the two disagree
+about a perfectly ordinary time, not merely an edge case — a browser on tzdata 2024b and a
+server on 2026b put `Europe/Chisinau` 2026-03-29 03:30 an hour apart, and put *every*
+`America/Vancouver` timestamp after November 2026 an hour apart, because British Columbia
+stopped changing its clocks. Nothing here can fix that from one side; what it means is that
+the guarantee is about the algorithm, and a household in a zone whose rules have just
+changed should expect an occurrence and a typed time to differ until the browser updates.
+France has not changed its rules since 1996.
 
 ### Occurrences are never stored
 

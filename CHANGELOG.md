@@ -63,17 +63,23 @@ Notable changes to this project. The format follows
   round twice, and in spring it never comes round at all. A recurring event at such a time
   had to land somewhere, and nothing said where — the recurrence policy table in
   [docs/architecture.md](docs/architecture.md) was silent on both. It now has a row for each.
-  In the repeated hour an occurrence takes the second pass, and a time typed into the editor
-  resolves to the same instant; in the skipped hour both move forward by the length of the
-  gap, so 02:30 becomes 03:30 rather than 03:00 or 01:30. **Nothing about your calendar has
-  changed**: this is the behaviour every version so far has had, on both sides, and it was
-  measured rather than assumed before being written down. What was missing was the guarantee
-  that it stays that way. The two halves of the application reach the same answer through
-  different code — Go's `time.Date` on the server, a two-pass conversion in the browser — and
-  if one of them ever drifted, nothing would look wrong: both instants read 02:30 on a clock
-  face, so an appointment could move by an hour with nothing on screen to say so. So both
-  rules are now asserted twice, once in `internal/events` and once in a real browser in
-  `e2e/dst-fallback.spec.js`, each test naming the other.
+  In the repeated hour a French calendar's occurrence takes the second pass, and a time typed
+  into the editor resolves to the same instant; in the skipped hour both move by the length of
+  the gap, so 02:30 becomes 03:30 in Paris. Neither is a policy anyone chose — which pass and
+  which direction both follow from the zone, so a calendar kept in New York lands on the first
+  pass and moves 02:30 back to 01:30, and the table says so rather than pretending Paris is
+  the world. **Nothing about your calendar has changed**: this is the behaviour every version
+  so far has had, on both sides, and it was measured rather than assumed before being written
+  down. What was missing was the guarantee that it stays that way. The two halves of the
+  application reach the same answer through different code — Go's `time.Date` on the server, a
+  two-pass conversion in the browser — and if one of them ever drifted, nothing would look
+  wrong: both instants read 02:30 on a clock face, so an appointment could move by an hour
+  with nothing on screen to say so. So both rules are now asserted twice, once in
+  `internal/events` and once in a real browser in `e2e/dst-fallback.spec.js`, each test naming
+  the other. The guarantee is about the conversion and not about the timezone data underneath
+  it, which the two sides read separately and which can be of different vintages — a caveat
+  now written out under the table, and the reason a household whose country has just changed
+  its daylight-saving rules may see the two disagree until the browser catches up.
   ([#51](https://github.com/d-weber/almanack/issues/51))
 
 - **What happens to the end of a repeating event at a daylight-saving change is now written

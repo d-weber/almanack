@@ -47,8 +47,15 @@ func newFixture(t *testing.T) *fixture {
 // what lets the interruption tests in atomic_test.go fail an edit part-way through
 // without a seam of their own.
 func newFixtureClock(t *testing.T, wrap func(*clock.Fake) clock.Clock) *fixture {
+	return newFixtureIn(t, paris(t), wrap)
+}
+
+// newFixtureIn is newFixtureClock in a family timezone other than Paris. Almost every
+// test here wants Paris, because that is the household this is built for — but two of
+// the daylight-saving policies read differently in a zone whose offset is negative, and a
+// suite that only ever runs in one zone cannot tell a rule from a coincidence.
+func newFixtureIn(t *testing.T, loc *time.Location, wrap func(*clock.Fake) clock.Clock) *fixture {
 	t.Helper()
-	loc := paris(t)
 	fake := clock.NewFake(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
 	var clk clock.Clock = fake
 	if wrap != nil {
@@ -267,6 +274,63 @@ func TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant(t *testing.T) 
 		if got := f.occurrenceOn(t, date).StartsAt.In(f.loc).Format("15:04"); got != "02:30" {
 			t.Errorf("%s reads back as %s locally, want 02:30", date, got)
 		}
+	}
+}
+
+// TestBrokenHoursFollowTheZoneRatherThanAPolicy is the same two rows read in a zone whose
+// offset is negative, and it exists because the pair above cannot tell a rule from a
+// coincidence: run only in Paris, "the second pass" and "moves forward" both look like
+// decisions somebody made, and the policy table said so. They are not. They fall out of
+// the conversion — the wall fields are read as though they were UTC, the offset in force
+// at that reading is applied, and the result is corrected once — and in a zone west of
+// Greenwich that arithmetic runs the other way. New York takes the *first* pass through
+// the repeated hour and moves a skipped 02:30 *back* to 01:30, which is the answer the
+// Paris row explicitly rules out. Both are still what the browser produces.
+func TestBrokenHoursFollowTheZoneRatherThanAPolicy(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("no tzdata available: %v", err)
+	}
+	// New York breaks a different hour from Paris in each direction: it springs forward
+	// 02:00 → 03:00, so 02:30 is the skipped one, and falls back 02:00 → 01:00, so 01:30
+	// is the repeated one. Each case therefore needs its own series and its own fixture,
+	// rather than the single 02:30 series Paris can use for both.
+	cases := []struct {
+		name, seriesDay, date, wantUTC, wantWall, note string
+		hour, min                                      int
+	}{
+		{
+			name:      "the repeated hour takes the first pass here, not the second",
+			seriesDay: "2026-10-04", hour: 1, min: 30,
+			date:     "2026-11-01",
+			wantUTC:  "2026-11-01T05:30:00Z",
+			wantWall: "01:30 EDT",
+			note:     "the second pass, 01:30 EST, would be 2026-11-01T06:30:00Z — the answer Paris takes",
+		},
+		{
+			name:      "the skipped hour moves backward here, not forward",
+			seriesDay: "2026-03-01", hour: 2, min: 30,
+			date:     "2026-03-08",
+			wantUTC:  "2026-03-08T06:30:00Z",
+			wantWall: "01:30 EST",
+			note:     "moving forward, the Paris answer, would be 03:30 EDT at 2026-03-08T07:30:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixtureIn(t, newYork, nil)
+			f.timed(t, "All-nighter", tc.seriesDay, tc.hour, tc.min, &domain.Recurrence{
+				Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+			})
+
+			occ := f.occurrenceOn(t, tc.date)
+			if got := occ.StartsAt.UTC().Format(time.RFC3339); got != tc.wantUTC {
+				t.Errorf("%s starts at %s, want %s (%s)", tc.date, got, tc.wantUTC, tc.note)
+			}
+			if got := occ.StartsAt.In(f.loc).Format("15:04 MST"); got != tc.wantWall {
+				t.Errorf("%s reads back as %s locally, want %s", tc.date, got, tc.wantWall)
+			}
+		})
 	}
 }
 
