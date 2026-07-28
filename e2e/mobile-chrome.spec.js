@@ -12,6 +12,7 @@
 // every control it ever had.
 
 import { test, expect } from '@playwright/test';
+import { HEADERS } from './fixtures.js';
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -70,6 +71,94 @@ test('the round add button sits on the line between the calendar and the tabs', 
   // And it opens the editor, which is the whole of what it is for.
   await page.locator('.fab').click();
   await expect(page.locator('.editor')).toBeVisible({ timeout: 15_000 });
+});
+
+// The button floats over the calendar, so the calendar has to keep out from under it.
+//
+// It is centred, and it rises half its height above the tab bar, so the place it lands
+// is the middle column of the last week — and a day there can hold three chips, which is
+// the cap rather than an overflow: there is no "+N" beside a third chip to say something
+// is hidden. Drawn under the button, that event is simply not on the screen, and nothing
+// on the screen says so. Measured on a phone it was the last 11px of the chip.
+//
+// The month has to be one that needs six week rows, and that is the whole of why May
+// 2027 is used. Rows share the grid's height, so five rows are each tall enough that
+// three chips finish well above the button and nothing is covered — this test was
+// written against March 2027 first and passed against the unfixed stylesheet, proving
+// only that it had chosen a month where the bug does not appear. Six rows are as short
+// as a row ever gets, which is the case worth holding.
+//
+// May 2027 opens on a Saturday and runs 31 days, so with the seeded account's Monday
+// start it spans 26 April – 6 June: six rows, the last of them 31 May – 6 June, whose
+// middle column is Thursday 3 June. That arithmetic is an assumption about the layout
+// rather than a fact this test may rest on, so it is asserted rather than trusted — the
+// fixture has to be found in the column under the button, and there have to be three of
+// them, before anything is concluded from where they sit.
+test('the add button does not cover the last week of the month', async ({ page }) => {
+  const created = [];
+  const DAY = '2027-06-03';
+
+  try {
+    for (const hour of ['08', '10', '12']) {
+      const res = await page.request.post('/api/v1/events', {
+        headers: HEADERS,
+        data: {
+          calendar_id: 1, title: `Under the button ${hour}`, all_day: false,
+          starts_at: `${DAY}T${hour}:00:00Z`, ends_at: `${DAY}T${hour}:30:00Z`, label_id: 2,
+        },
+      });
+      expect(res.status(), await res.text()).toBe(201);
+      created.push((await res.json()).event.id);
+    }
+
+    await page.goto('/#/month?d=2027-05-15');
+    await expect(page.getByText('Under the button 08').first()).toBeVisible({ timeout: 15_000 });
+
+    const measured = await page.evaluate(() => {
+      const fab = document.querySelector('.fab').getBoundingClientRect();
+      const centreX = fab.left + fab.width / 2;
+      const rows = [...document.querySelectorAll('.week-row')];
+      const last = rows[rows.length - 1];
+      // The day whose column the button is centred on, found by where it is rather
+      // than by counting columns.
+      const column = [...last.querySelectorAll('.day-chips')].find((c) => {
+        const b = c.getBoundingClientRect();
+        return b.left <= centreX && centreX < b.right;
+      });
+      if (!column) return null;
+      const chips = [...column.querySelectorAll('.chip')].map((chip) => {
+        const c = chip.getBoundingClientRect();
+        return {
+          text: chip.textContent.trim(),
+          hidden: c.bottom > fab.top && c.top < fab.bottom
+            && c.left < fab.right && c.right > fab.left,
+        };
+      });
+      return { chips, rowCount: rows.length };
+    });
+
+    expect(measured, 'no day column under the add button in the last week row').not.toBeNull();
+    expect(
+      measured.rowCount,
+      'May 2027 no longer draws six week rows — five-row months have rows tall enough to '
+      + 'clear the button on their own, so this test would pass without the padding',
+    ).toBe(6);
+    // The fixture has to be where the arithmetic above says it is, or the assertion
+    // after this one passes by having nothing to measure.
+    expect(
+      measured.chips.length,
+      'the three fixture events are not in the column the button covers — the month no '
+      + 'longer lays out the way this test assumes, so it is proving nothing',
+    ).toBe(3);
+    expect(
+      measured.chips.filter((c) => c.hidden).map((c) => c.text),
+      'the add button is drawn over an event, and no "+N" says it is there',
+    ).toEqual([]);
+  } finally {
+    for (const id of created) {
+      await page.request.delete(`/api/v1/events/${id}?scope=all`, { headers: HEADERS });
+    }
+  }
 });
 
 test('the month title goes back to today, and swiping changes month', async ({ page }) => {

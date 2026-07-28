@@ -1179,6 +1179,16 @@ a { color: var(--accent); }
   flex-direction: column;
 }
 
+/* The round add button sits half over the calendar (see .fab), centred, so it lands on
+   the middle column of the last week. Without this the third chip there is drawn
+   underneath it — and the third is the cap rather than an overflow, so there is no "+N"
+   to reveal what is hidden: the event is simply not on the screen.
+   The grid gives up the button's half instead. Rows are flexed, so the cost is spread
+   across all six rather than taken out of the last one, and none of them drops a chip. */
+@media (max-width: 899px) {
+  .month-grid { padding-bottom: calc(var(--fab-size) / 2); }
+}
+
 .week-row {
   position: relative;
   flex: 1 1 0;
@@ -1842,19 +1852,23 @@ a { color: var(--accent); }
     grid-template-columns: 68px minmax(0, 1fr) minmax(360px, 30vw);
   }
 
-  /* With a column given to the panel, the calendar's own bar is genuinely narrow —
-     narrow enough that fitting five controls on one line clipped the month and year.
-     The view switch takes its own line here, exactly as it does on a phone, which is
-     the same trade for the same reason. */
+  /* Opening the panel takes a column away from the calendar, so the bar can run out of
+     room for its controls. It wraps when that happens and not before: one line for as
+     long as everything fits, a second only once it does not.
+
+     This used to be decided by the class rather than by the width — the switch was
+     given a whole line of its own the moment the panel opened, on every screen, and
+     stretched across it. On a wide monitor that put a full-width grey pill under the
+     month with nothing beside it, and the bar changed shape every time an event was
+     opened. Two things carry the layout instead of that rule: flex-wrap, which moves a
+     control down only when the line is full, and a nav group that will not shrink past
+     its own content, so the row wraps rather than the month and year ellipsing to "J"
+     underneath the switch — which is what it did before the wrap existed at all. */
   .app.is-panel-open .app-bar-row { flex-wrap: wrap; }
-  .app.is-panel-open .app-bar-nav { flex: 1 1 auto; }
-  .app.is-panel-open .app-bar-actions { flex: 0 0 auto; }
-  .app.is-panel-open .view-switch {
-    order: 3;
-    flex: 1 0 100%;
-    margin-left: 0;
-  }
-  .app.is-panel-open .view-switch .segment { flex: 1 1 0; }
+  .app.is-panel-open .app-bar-nav { min-width: min-content; }
+  /* Its two words wide, wherever it lands. It is a pill with a background of its own,
+     so stretching it never read as a control given room, only as a second bar. */
+  .app.is-panel-open .view-switch { flex: 0 0 auto; }
 
   .app.is-panel-open .panel:not([hidden]) {
     display: block;
