@@ -3785,10 +3785,12 @@ func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 			t.Fatalf("ReplaceReminders: %v", err)
 		}
 	}
-	// rows is one member's list as "id:shape". The id is in there because the claim is
-	// about rows and not only about what they say; the numbers themselves are never
-	// asserted, since a row number that outlives a save is the point and one that a
-	// deletion frees is SQLite's business.
+	// rows is one member's list as "id:shape", oldest row first. The id is in there
+	// because the claim is about rows and not only about what they say. The numbers
+	// themselves are still never written down — what a deletion frees is SQLite's
+	// business — but *which* of them survive a save is asserted below by position, since
+	// counting alone was equally happy with a matching that kept the newest row of a
+	// shape rather than the oldest.
 	rows := func(who int64) []string {
 		t.Helper()
 		rs, err := s.ListReminders(ctx(), &e.ID, nil, who)
@@ -3808,30 +3810,43 @@ func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 		}
 		return out
 	}
-	// check saves a list and reports what it did: the reminders that came back, and how
-	// many of them are still on the row they were on beforehand.
+	// check saves a list and reports what it did: the reminders that came back, and which
+	// of the rows that were there beforehand are still among them.
+	//
+	// keptIdx names the survivors by their position in the previous list, which is by
+	// ascending id, so "the two that have been there longest" is [0 1] and cannot be
+	// confused with "the two most recent". The numbers are the test's only way to say
+	// which of three identical reminders the save kept.
 	var before []string
-	check := func(what string, who int64, rs []domain.Reminder, wantShapes []string, wantKept int) {
+	check := func(what string, who int64, rs []domain.Reminder, wantShapes []string, keptIdx ...int) {
 		t.Helper()
+		want := make([]string, 0, len(keptIdx))
+		for _, i := range keptIdx {
+			if i >= len(before) {
+				t.Fatalf("%s: the list beforehand was %v, which has no row %d", what, before, i)
+			}
+			want = append(want, before[i])
+		}
 		save(who, rs)
 		after := rows(who)
-		kept := 0
+		var kept []string
 		for _, v := range after {
 			if slices.Contains(before, v) {
-				kept++
+				kept = append(kept, v)
 			}
 		}
 		if got := shapesOf(after); !slices.Equal(got, wantShapes) {
 			t.Errorf("%s: the list reads %v, want %v", what, got, wantShapes)
 		}
-		if kept != wantKept {
-			t.Errorf("%s: %d of %v are on the row they were on in %v, want %d",
-				what, kept, after, before, wantKept)
+		if !slices.Equal(kept, want) {
+			t.Errorf("%s: %v of %v are on the row they were on in %v, want %v — the reminder that "+
+				"keeps its row is the oldest of its shape, so that saving the list again keeps "+
+				"choosing the same one", what, kept, after, before, want)
 		}
 		before = after
 	}
 
-	check("the first save", claire.ID, at(10, 60), []string{"m10", "m60"}, 0)
+	check("the first save", claire.ID, at(10, 60), []string{"m10", "m60"})
 
 	// Marc sets one of his own afterwards, which is the whole of what he is here for
 	// besides the scope: it puts a row above Claire's, so that re-inserting hers hands
@@ -3840,30 +3855,30 @@ func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 	marcs := rows(marc.ID)
 
 	// The action from the issue: open the editor, press save, change nothing.
-	check("saving an unchanged list", claire.ID, at(10, 60), []string{"m10", "m60"}, 2)
+	check("saving an unchanged list", claire.ID, at(10, 60), []string{"m10", "m60"}, 0, 1)
 
 	// Adding one leaves the reminders already there exactly where they were.
-	check("adding a reminder", claire.ID, at(10, 60, 1440), []string{"m10", "m60", "m1440"}, 2)
+	check("adding a reminder", claire.ID, at(10, 60, 1440), []string{"m10", "m60", "m1440"}, 0, 1)
 
 	// Removing one takes that row and no other.
-	check("removing a reminder", claire.ID, at(10, 1440), []string{"m10", "m1440"}, 2)
+	check("removing a reminder", claire.ID, at(10, 1440), []string{"m10", "m1440"}, 0, 2)
 
 	// Moving one to another time is a different warning, so it is a different row — what
 	// was queued for the old instant is the planner's to drop. Its neighbour staying put
 	// is what says this was the one reminder moving and not the list being rewritten.
-	check("moving a reminder", claire.ID, at(10, 2880), []string{"m10", "m2880"}, 1)
+	check("moving a reminder", claire.ID, at(10, 2880), []string{"m10", "m2880"}, 0)
 
 	// The list is a set. Two reminders that say the same thing are the same reminder, so
 	// the order they arrive in carries nothing and saving them in another one changes
 	// nothing — the editor has no way to reorder them either, only to add and remove.
-	check("reordering the list", claire.ID, at(2880, 10), []string{"m10", "m2880"}, 2)
+	check("reordering the list", claire.ID, at(2880, 10), []string{"m10", "m2880"}, 0, 1)
 
 	// A list holding the same reminder more than once keeps a row per copy, matched
 	// lowest id first — so saving it again is a no-op rather than a shuffle, and dropping
 	// back to two keeps the two that have been there longest.
-	check("three of the same reminder", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 1)
-	check("saving the duplicates again", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 3)
-	check("dropping one of the duplicates", claire.ID, at(10, 10), []string{"m10", "m10"}, 2)
+	check("three of the same reminder", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 0)
+	check("saving the duplicates again", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 0, 1, 2)
+	check("dropping one of the duplicates", claire.ID, at(10, 10), []string{"m10", "m10"}, 0, 1)
 
 	// The all-day shape is matched on both of its halves, so two reminders on the same
 	// day at different times are two reminders.
@@ -3873,13 +3888,13 @@ func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 	}
 	check("switching to the all-day shape", claire.ID,
 		[]domain.Reminder{allDay(one, "09:00"), allDay(two, "09:00")},
-		[]string{"d1@09:00", "d2@09:00"}, 0)
+		[]string{"d1@09:00", "d2@09:00"})
 	check("adding another time on the same day", claire.ID,
 		[]domain.Reminder{allDay(one, "09:00"), allDay(one, "18:00"), allDay(two, "09:00")},
-		[]string{"d1@09:00", "d2@09:00", "d1@18:00"}, 2)
+		[]string{"d1@09:00", "d2@09:00", "d1@18:00"}, 0, 1)
 
 	// Clearing empties the list, and empties only it.
-	check("clearing the list", claire.ID, nil, []string{}, 0)
+	check("clearing the list", claire.ID, nil, []string{})
 	if got := rows(marc.ID); !slices.Equal(got, marcs) {
 		t.Errorf("Marc's reminders are %v after all of that, want %v: he saved once and nothing "+
 			"anyone else does may move his rows", got, marcs)
