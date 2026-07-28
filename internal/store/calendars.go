@@ -172,12 +172,49 @@ func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 		// source_ref is "reminder:{eventID}:{occurrenceDate}:{reminderID}" — the layout
 		// internal/events.ReminderSourceRef writes and prunes by, which cannot be
 		// imported here (it depends on this package). TestDeletingACalendarPrunesTheOutbox
-		// in internal/events holds the two together.
+		// in internal/events holds the two together, and
+		// TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes holds the boundary:
+		// the colon ending the pattern is the whole of what keeps event 1's prune off
+		// event 12's reminders.
+		//
+		// The id is read back out of the reference and matched on events.id for the reason
+		// the activity prune below does it, and this is where the two statements are the
+		// same statement. Without that line the pattern is only ever built: a string
+		// concatenated afresh for every (candidate row × event in the calendar) pair, so
+		// the cost is a product of the two and it is paid holding the write lock s.tx takes
+		// at BEGIN. events.id is INTEGER PRIMARY KEY, so the equality is a rowid seek and
+		// the inner loop stops being a loop.
+		//
+		// It cannot change which rows match, and that is an argument rather than a
+		// measurement: LIKE 'reminder:' || e.id || ':%' can only match a reference that
+		// begins "reminder:{e.id}:", and substr from the tenth character of such a
+		// reference begins "{e.id}:", which CAST reads up to the colon and no further. So
+		// the pattern implies the equality, and adding it as a conjunct excludes nothing.
+		// Confirmed at six sizes as well: the same rows pruned either way, every time.
+		//
+		// kind is not decoration here, it is what makes the equality safe. "activity:12:
+		// NAME" also casts to 12, and "digest:2026-08-04" casts to 26; it is only because
+		// the schema's CHECK allows four kinds and this is the one that carries this
+		// layout that reading digits from the tenth character means an event id at all.
+		// It also keeps the statement off every digest and announcement in the outbox.
+		//
+		// Which leaves the pattern redundant, and it stays anyway. Given kind, every
+		// reference here begins "reminder:{eventID}:", so the equality already decides and
+		// no test can tell the pattern from nothing — dropping it, or dropping the colon
+		// that used to be the whole of the boundary, leaves the suite green. What it is
+		// now is the assertion that the layout is the one this statement assumes, which is
+		// a thing this package can only state and never import, and which
+		// TestDeletingACalendarPrunesTheOutbox in internal/events exists to hold. It costs
+		// what it did not cost before: it used to run once per (row × event) and now runs
+		// once per row, against the single event the seek found. Belt to the equality's
+		// braces, at no price, in the one place two packages have to agree.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM notification_queue
 			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND kind = 'reminder'
 			   AND EXISTS (SELECT 1 FROM events e
 			                WHERE e.calendar_id = ?
+			                  AND e.id = CAST(substr(notification_queue.source_ref, 10) AS INTEGER)
 			                  AND notification_queue.source_ref LIKE 'reminder:' || e.id || ':%')`, id); err != nil {
 			return mapErr(err)
 		}

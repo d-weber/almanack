@@ -1879,6 +1879,122 @@ func TestDeletingACalendarPrunesItsQueuedAnnouncements(t *testing.T) {
 	}
 }
 
+// TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes is the same boundary for
+// the other prune: a reminder's reference begins with the id of the event it warns about,
+// so event 1's prune must not reach event 12's reminders.
+//
+// What holds that boundary changed when the prune was keyed on events.id, and this test
+// is written for the arrangement that exists now rather than the one it replaced. The
+// pattern's trailing colon used to be the whole of it; the equality is now, since a
+// reference for event 12 casts to 12 whatever the pattern says. So what this fails on is
+// the arithmetic — substr from the ninth character or the eleventh, either of which reads
+// a number that is not an event id — and it fails on it in both directions, because
+// "nothing was pruned" and "too much was pruned" are the two ways an off-by-one there can
+// land. Five surviving references rather than one gives it the margin to say which.
+//
+// It is here rather than left to internal/events' TestDeletingACalendarPrunesTheOutbox,
+// which does also fail on some of these, because that test catches them by accident: it is
+// about two packages agreeing on a layout, and the reference it expects to survive is
+// built from ev.ID+1000 because a thousand is a comfortable way to say "another
+// calendar's". The digit boundary is a side effect of the number somebody picked, and
+// changing 1000 to 500 would end the coverage without touching anything that reads as a
+// guard. Coverage nobody meant to write is coverage nobody will keep.
+//
+// Both spellings are on each side, since a household upgrading from 0.2.0 has reminders
+// queued under the four-field reference from before 0007 beside five-field ones.
+func TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	event := func(cal domain.Calendar, title string) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: firstLabel(t, s, cal.ID).ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("CreateEvent %q: %v", title, err)
+		}
+		return e
+	}
+	// The layout internal/events.ReminderSourceRef writes, which cannot be called from
+	// here (that package depends on this one) — the same standing arrangement as for
+	// activity references, and the same reason to spell it out.
+	queue := func(e domain.Event, reminderID int64, named bool) string {
+		t.Helper()
+		ref := fmt.Sprintf("reminder:%d:2026-08-04:%d", e.ID, reminderID)
+		if named {
+			ref += ":" + e.EventUID
+		}
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindReminder, SourceRef: ref,
+			Payload: `{"title":"` + e.Title + `"}`, DueAt: baseTime,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", e.Title, err)
+		}
+		return ref
+	}
+
+	// Event 1, in the calendar about to go, queued under both spellings. Both are the
+	// strings the eleven below are prefixed by.
+	going := event(doomed, "Ferry")
+	if going.ID != 1 {
+		t.Fatalf("the doomed calendar's event took id %d, want 1: this test proves nothing about "+
+			"the digit boundary unless it is on it", going.ID)
+	}
+	gone := []string{queue(going, 1, false), queue(going, 2, true)}
+
+	// Fill the table up to the first two-figure ids, in the calendar that stays.
+	var survivors []string
+	for i := 2; i <= 14; i++ {
+		e := event(kept, fmt.Sprintf("Réunion %d", i))
+		if e.ID != int64(i) {
+			t.Fatalf("the %dth event took id %d: this test needs the ids to run 1 to 14 to reach "+
+				"the digit boundary", i, e.ID)
+		}
+		if e.ID < 10 {
+			continue // single-digit ids are the case every other fixture already covers
+		}
+		survivors = append(survivors, queue(e, 1, e.ID != 12)) // event 12 keeps the pre-0007 spelling
+	}
+	if len(survivors) != 5 {
+		t.Fatalf("queued %d reminders in the surviving calendar (%v), want 5", len(survivors), survivors)
+	}
+	if !slices.Contains(survivors, "reminder:12:2026-08-04:1") {
+		t.Fatalf("the surviving reminders are %v; want \"reminder:12:2026-08-04:1\" among them, which "+
+			"is the reference a prefix on event 1 reaches first", survivors)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var left []string
+	for _, p := range pending {
+		left = append(left, p.SourceRef)
+	}
+	slices.Sort(left)
+	want := slices.Clone(survivors)
+	slices.Sort(want)
+	if !slices.Equal(left, want) {
+		t.Errorf("deleting the calendar holding event 1 left %v queued and the surviving calendar "+
+			"had %v: a reminder taken here warns about an event nobody deleted and simply never "+
+			"arrives, and one left behind fires for an appointment that has gone", left, want)
+	}
+	for _, ref := range gone {
+		if slices.Contains(left, ref) {
+			t.Errorf("%q survived the deletion of the calendar holding its event", ref)
+		}
+	}
+}
+
 // TestDeletingACalendarLeavesTheAnnouncementsOfChangesItsIDPrefixes: the reason the prune
 // above matches a reference whole instead of by prefix. "activity:1" is a prefix of
 // "activity:12", so a prune written as LIKE 'activity:' || a.id || '%' takes every
