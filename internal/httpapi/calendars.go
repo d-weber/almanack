@@ -14,6 +14,7 @@ import (
 	"almanack/internal/auth"
 	"almanack/internal/domain"
 	"almanack/internal/imgproc"
+	"almanack/internal/store"
 )
 
 type calendarRequest struct {
@@ -151,6 +152,15 @@ func (s *Server) handleDeleteCalendar(w http.ResponseWriter, r *http.Request) {
 // handleLeaveCalendar removes the caller. The creator role passes to the
 // longest-standing remaining member, so leaving never orphans a calendar; the last
 // member out deletes it.
+//
+// Counting the members and acting on the count are one transaction, because they are one
+// decision. Two people leaving a two-member calendar at the same moment each read a count
+// of two, each took the "somebody is still here" branch, and both memberships went: a
+// calendar with no members at all, which no query returns to anybody and which nothing
+// left in the application can reach — its events included. The DSN takes the write lock
+// at BEGIN (`_txlock=immediate`), so the second request waits and then reads the count
+// the first one left behind, which is one, and deletes the calendar as the last member
+// out should.
 func (s *Server) handleLeaveCalendar(w http.ResponseWriter, r *http.Request) {
 	id, err := pathInt64(r, "id")
 	if err != nil {
@@ -163,41 +173,49 @@ func (s *Server) handleLeaveCalendar(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	cal, err := s.store.CalendarByID(ctx, id)
+
+	left := false
+	err = s.store.InTx(ctx, func(st *store.Store) error {
+		cal, err := st.CalendarByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		count, err := st.CountMembers(ctx, id)
+		if err != nil {
+			return err
+		}
+		if count <= 1 {
+			return st.DeleteCalendar(ctx, id)
+		}
+		if cal.CreatorID == user.ID {
+			if err := st.TransferCreator(ctx, id); err != nil {
+				return err
+			}
+		}
+		if err := st.RemoveMember(ctx, id, user.ID); err != nil {
+			return err
+		}
+		left = true
+		return nil
+	})
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	count, err := s.store.CountMembers(ctx, id)
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	if count <= 1 {
-		if err := s.store.DeleteCalendar(ctx, id); err != nil {
-			fail(w, r, err)
-			return
+
+	// Outside the transaction: a feed row that will not insert must not undo the
+	// departure it describes, which is the same trade internal/events makes the other
+	// way for an edit — there the row is what a change notification is planned from,
+	// and here there is nothing to plan.
+	if left {
+		if err := s.store.LogActivity(ctx, domain.Activity{
+			CalendarID: id,
+			UserID:     user.ID,
+			Action:     domain.ActionMemberLeft,
+			Title:      user.DisplayName,
+		}); err != nil {
+			slog.Error("record activity", "action", domain.ActionMemberLeft, "error", err)
 		}
-		writeNoContent(w)
-		return
-	}
-	if cal.CreatorID == user.ID {
-		if err := s.store.TransferCreator(ctx, id); err != nil {
-			fail(w, r, err)
-			return
-		}
-	}
-	if err := s.store.RemoveMember(ctx, id, user.ID); err != nil {
-		fail(w, r, err)
-		return
-	}
-	if err := s.store.LogActivity(ctx, domain.Activity{
-		CalendarID: id,
-		UserID:     user.ID,
-		Action:     domain.ActionMemberLeft,
-		Title:      user.DisplayName,
-	}); err != nil {
-		slog.Error("record activity", "action", domain.ActionMemberLeft, "error", err)
 	}
 	writeNoContent(w)
 }

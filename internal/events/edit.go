@@ -188,7 +188,7 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 		if in.Recurrence == nil {
 			return domain.Event{}, errNoRepeatTransition("event %d is a series", eventID)
 		}
-		return s.updateSeries(ctx, actor, existing, rec, in)
+		return s.updateSeries(ctx, actor, existing, rec, false, in)
 	case domain.ScopeThis:
 		if occDate.IsZero() {
 			return domain.Event{}, fmt.Errorf("%w: editing one occurrence needs its date", domain.ErrInvalid)
@@ -199,9 +199,11 @@ func (s *Service) Update(ctx context.Context, actor, eventID int64, scope domain
 			return domain.Event{}, fmt.Errorf("%w: editing this and following occurrences needs the split date", domain.ErrInvalid)
 		}
 		// Splitting at or before the series start would leave an empty first half,
-		// so it is simply an edit of the whole series.
+		// so it is an edit of the whole series — but it is still one occurrence being
+		// moved, and the pattern has to follow it exactly as a split's does, which is
+		// what the flag asks for.
 		if !occDate.After(rec.DTStart) {
-			return s.updateSeries(ctx, actor, existing, rec, in)
+			return s.updateSeries(ctx, actor, existing, rec, true, in)
 		}
 		return s.splitSeries(ctx, actor, existing, rec, occDate, in)
 	}
@@ -242,21 +244,52 @@ func (s *Service) updatePlain(ctx context.Context, actor int64, existing domain.
 // updateSeries edits the template. Existing overrides are left alone: someone
 // deliberately changed those occurrences, and silently reverting their work would be
 // worse than the inconsistency of leaving them.
-func (s *Service) updateSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, in Input) (domain.Event, error) {
+//
+// followMove says the edit is one occurrence being dragged rather than a plain
+// whole-series edit, which is how "this and following" at the very first occurrence
+// arrives here (Update refuses to split there — the first half would be empty). The
+// pattern then has to move with the occurrence, and the result has to contain its own
+// start, both for the reasons splitSeries gives. Without it the shortcut skipped every
+// one of those steps: the client sends no pattern for that scope, so the series carried
+// on at its old weekday while DTStart alone moved, and since a series is only ever read
+// through its rule, neither the occurrence that was dragged nor the one it came from
+// existed afterwards. The edit answered 200 with both gone.
+//
+// The two are asked only of that case. A whole-series edit carries its own pattern and
+// may legitimately anchor before its first occurrence — a weekly series anchored on a
+// Monday with by_weekday of Tuesday starts the day after, which internal/recur documents
+// and the editor produces — so applying the same checks there would refuse it.
+func (s *Service) updateSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, followMove bool, in Input) (domain.Event, error) {
+	// Decided before the transaction opens, for the reason splitSeries sets out: a
+	// rejected edit must not have written anything first.
+	now := s.clk.Now()
+	updated := s.apply(template, in, actor, now)
+
+	newRec := rec
+	if in.Recurrence != nil {
+		newRec = *in.Recurrence
+		newRec.ID = rec.ID
+	}
+	newRec.DTStart = s.startDateOf(updated)
+	moved := followMove && in.Recurrence == nil
+	if moved {
+		newRec = reanchor(newRec, rec.DTStart, newRec.DTStart)
+		// Dragging the first occurrence past the end of its own series leaves exactly
+		// one occurrence rather than an impossible range.
+		if newRec.Until != nil && newRec.Until.Before(newRec.DTStart) {
+			last := newRec.DTStart
+			newRec.Until = &last
+		}
+	}
+	if err := recur.Validate(newRec); err != nil {
+		return domain.Event{}, err
+	}
+	if moved && !recur.Occurs(newRec, newRec.DTStart) {
+		return domain.Event{}, fmt.Errorf("%w: the new repeat pattern does not include %s, the date being moved",
+			domain.ErrInvalid, newRec.DTStart)
+	}
+
 	return s.inTxEvent(ctx, func(s *Service) (domain.Event, error) {
-		now := s.clk.Now()
-		updated := s.apply(template, in, actor, now)
-
-		newRec := rec
-		if in.Recurrence != nil {
-			newRec = *in.Recurrence
-			newRec.ID = rec.ID
-		}
-		newRec.DTStart = s.startDateOf(updated)
-		if err := recur.Validate(newRec); err != nil {
-			return domain.Event{}, err
-		}
-
 		if err := s.st.UpdateRecurrence(ctx, newRec); err != nil {
 			return domain.Event{}, fmt.Errorf("update recurrence %d: %w", rec.ID, err)
 		}
@@ -379,7 +412,7 @@ func (s *Service) splitSeries(ctx context.Context, actor int64, template domain.
 	}
 
 	oldRec := rec
-	until := splitDate.AddDays(-1)
+	until := endOfSeries(rec, splitDate.AddDays(-1))
 	oldRec.Until = &until
 	if err := recur.Validate(oldRec); err != nil {
 		return domain.Event{}, fmt.Errorf("closing the original series: %w", err)
@@ -620,9 +653,25 @@ func (s *Service) Delete(ctx context.Context, actor, eventID int64, scope domain
 	return fmt.Errorf("%w: deleting a recurring event needs a scope", domain.ErrInvalid)
 }
 
+// endOfSeries is where a series ends once it has been asked to stop at `at`: the
+// earlier of that date and the end it already had.
+//
+// Ending a series can only ever bring its end forward. Written as `until = at` it also
+// pushed it back, so "delete this and following" — or a split — at a date past a series'
+// own end *extended* it, and every occurrence between the real end and the new one came
+// back from the dead. A client can address such a date perfectly innocently: the last
+// occurrence a family remembers is not the last one the rule produced.
+func endOfSeries(rec domain.Recurrence, at domain.Date) domain.Date {
+	if rec.Until != nil && rec.Until.Before(at) {
+		return *rec.Until
+	}
+	return at
+}
+
 // endSeries stops a series repeating after a date, which is what "delete this and
 // following occurrences" means for everything that is not the first one.
 func (s *Service) endSeries(ctx context.Context, actor int64, template domain.Event, rec domain.Recurrence, until domain.Date) error {
+	until = endOfSeries(rec, until)
 	return s.inTx(ctx, func(s *Service) error {
 		rec.Until = &until
 		if err := s.st.UpdateRecurrence(ctx, rec); err != nil {

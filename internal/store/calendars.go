@@ -344,14 +344,23 @@ func (s *Store) AddMember(ctx context.Context, calendarID, userID int64) error {
 // RemoveMember removes a membership and everything in that calendar that was only
 // there because of it, reporting domain.ErrNotFound when there was no membership.
 //
-// event_participants and reminders are keyed on users rather than on membership, so the
-// membership row is not the only thing that has to go. What is left otherwise is an
-// ex-member still shown on other people's events — a state the API refuses to create,
-// since an edit that lists a non-member is rejected — and their reminders lying dormant
-// until somebody re-invites them, at which point they start firing again. Both are
-// scoped to this calendar: the same person's rows in the calendars they are staying in
-// are none of this method's business. The reminders reach the series patterns by joining
-// through events, which is the same route DeleteCalendar takes.
+// event_participants, reminders and reminder_detachments are keyed on users rather than
+// on membership, so the membership row is not the only thing that has to go. What is
+// left otherwise is an ex-member still shown on other people's events — a state the API
+// refuses to create, since an edit that lists a non-member is rejected — and their
+// reminders lying dormant until somebody re-invites them, at which point they start
+// firing again. All three are scoped to this calendar: the same person's rows in the
+// calendars they are staying in are none of this method's business. The reminders reach
+// the series patterns by joining through events, which is the same route DeleteCalendar
+// takes.
+//
+// A detachment is the record that this member set their own reminders on one edited
+// occurrence, empty list included, and it outranks the series' list for that date. It
+// therefore has to go with the reminders it qualifies, or the pair comes back
+// inconsistent: a re-invited member's rows say "inherit from the series" while the
+// detachment still says "read the copy's own list", which is now empty — so the
+// occurrence they were re-invited to is the one the family stops being told about, and
+// nothing on screen distinguishes it from any other.
 //
 // The membership row goes last, so its domain.ErrNotFound rolls the rest back: removing
 // somebody who was never there stays an error that changed nothing.
@@ -376,6 +385,13 @@ func (s *Store) RemoveMember(ctx context.Context, calendarID, userID int64) erro
 			     OR recurrence_id IN (SELECT recurrence_id FROM events
 			                           WHERE calendar_id = ? AND recurrence_id IS NOT NULL))`,
 			userID, calendarID, calendarID); err != nil {
+			return mapErr(err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM reminder_detachments
+			 WHERE user_id = ?
+			   AND event_id IN (SELECT id FROM events WHERE calendar_id = ?)`,
+			userID, calendarID); err != nil {
 			return mapErr(err)
 		}
 		return affected(tx.ExecContext(ctx,

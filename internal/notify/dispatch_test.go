@@ -1049,7 +1049,7 @@ func TestSummaryIsResolvedAtDelivery(t *testing.T) {
 	}
 
 	// The wording is composed from what actually happened, counted at delivery.
-	filled, err := e.n.fillSummary(e.ctx, watcher.ID, e.payloadOf(summary))
+	filled, err := e.n.fillSummary(e.ctx, watcher.ID, e.payloadOf(summary), "20:00")
 	if err != nil {
 		t.Fatalf("fill summary: %v", err)
 	}

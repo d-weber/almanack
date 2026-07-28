@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -730,6 +732,69 @@ func TestLeaveTransfersTheCalendar(t *testing.T) {
 		expect(http.StatusNoContent)
 	if _, err := e.store.CalendarByID(t.Context(), cal.ID); err == nil {
 		t.Errorf("an empty calendar was left behind")
+	}
+}
+
+// A calendar's members all leaving at the same moment used to strand it. Counting the
+// members and acting on the count were separate transactions, so every request read a
+// count above one, every one took the "somebody is still here" branch, and every
+// membership went — leaving a calendar with no members, which no query returns to
+// anybody and which nothing left in the application can reach, its events included.
+//
+// Whichever request is last must find itself alone and take the calendar with it. Which
+// one that is does not matter and is not asserted; the two states this leaves are "gone"
+// and "still has a member", and the bug is the third.
+func TestMembersLeavingAtOnceDoNotStrandTheCalendar(t *testing.T) {
+	e := newEnv(t)
+	owner, cal := e.family()
+
+	members := []domain.User{owner}
+	clients := []*http.Client{e.client}
+	for _, name := range []string{"papa", "leo", "mamie"} {
+		u := e.createUser(name+"@example.org", name)
+		if err := e.store.AddMember(t.Context(), cal.ID, u.ID); err != nil {
+			t.Fatalf("add member %s: %v", name, err)
+		}
+		members = append(members, u)
+		clients = append(clients, e.login(e.newClient(), u.Email))
+	}
+
+	path := fmt.Sprintf("/api/v1/calendars/%d/leave", cal.ID)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			// Any answer is legitimate — a request that loses the race for the lock may
+			// find the calendar already gone — so the status is not what is asserted.
+			e.request(c, http.MethodPost, path, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	_, err := e.store.CalendarByID(t.Context(), cal.ID)
+	if err == nil {
+		// It survived, so somebody must still be in it.
+		count, err := e.store.CountMembers(t.Context(), cal.ID)
+		if err != nil {
+			t.Fatalf("CountMembers: %v", err)
+		}
+		if count == 0 {
+			t.Error("the calendar survived with no members: it is unreachable, and so is everything in it")
+		}
+		return
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("CalendarByID: %v", err)
+	}
+	// It was deleted, which is the other correct outcome: nobody is left in it.
+	for _, u := range members {
+		if member, _ := e.store.IsMember(t.Context(), cal.ID, u.ID); member {
+			t.Errorf("user %d is a member of a calendar that was deleted", u.ID)
+		}
 	}
 }
 

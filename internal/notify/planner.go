@@ -36,6 +36,11 @@ func (n *Notifier) Plan(ctx context.Context) error {
 // the whole pass was clean, so a partial failure is retried rather than sealed
 // behind a marker that says the work was done.
 func (n *Notifier) plan(ctx context.Context, from, to time.Time) error {
+	// One pass at a time; see planMu on Notifier for why overlapping passes are wrong
+	// and not only racy.
+	n.planMu.Lock()
+	defer n.planMu.Unlock()
+
 	if to.Before(from) {
 		from = to
 	}

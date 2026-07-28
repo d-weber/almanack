@@ -225,9 +225,20 @@ type Notifier struct {
 	caughtUp     bool
 	catchUp      CatchUpSummary
 
+	// planMu admits one planning pass at a time. Two can genuinely overlap — the
+	// scheduler goroutine runs one every tick, POST /dev/tick runs another on the
+	// request's goroutine — and they are not merely racy on `planned` below but wrong
+	// together: reconcile deletes every undelivered row the pass no longer calls for,
+	// so a pass reading half of another's decisions deletes reminders that are wanted.
+	// Serialising is also the cheaper answer, since the second pass has nothing left to
+	// do by the time it runs.
+	//
+	// It is separate from mu, which is held only for the duration of a field read and
+	// must never be held across the database work a pass does.
+	planMu sync.Mutex
 	// planned collects what the pass in progress decided should exist, so that
 	// reconcile can delete undelivered rows that are no longer called for. It is
-	// non-nil only for the duration of a planning pass.
+	// non-nil only for the duration of a planning pass, and is guarded by planMu.
 	planned map[string]bool
 
 	ownerEmail  string
