@@ -21,14 +21,12 @@
 
 import { test, expect } from '@playwright/test';
 
-// Both tests answer an API request instead of the server, and a service worker that has
-// claimed the page answers /api/ out of its own cache before anything here is consulted —
-// sw.js calls skipWaiting() and clients.claim(), so it takes control partway through a
-// visit rather than on the next one. Requests it makes are its own, not the page's, and
-// page.route never sees them: whichever of the two won the race decided whether these
-// tests were looking at the invite they set up or at the family's real (empty) list.
-// Nothing here writes, so there is nothing worth caching either.
-test.use({ serviceWorkers: 'block' });
+// Both tests answer an API request instead of the server, which is only reliable because
+// the suite blocks service workers (playwright.config.js, #79). A worker that has claimed
+// the page answers /api/ out of its own cache before anything here is consulted, and the
+// requests it makes are its own rather than the page's, so page.route never sees them:
+// whichever of the two won the race decided whether these tests were looking at the
+// invite they set up or at the family's real (empty) list.
 
 // 00:30 on the 5th in Paris (CEST, UTC+2), which is still the 4th in UTC. The one thing
 // that must not appear on screen is 4 August.

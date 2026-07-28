@@ -47,6 +47,25 @@ export default {
     timezoneId: 'Europe/Paris',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    // No service worker, unless a spec asks for one.
+    //
+    // web/sw.js calls skipWaiting() and clients.claim(), so it takes control partway
+    // through a visit rather than on the next one, and its fetch handler answers /api/.
+    // The requests it makes are its own rather than the page's, and page.route never
+    // sees them — so every spec that answers an API path for itself was racing the
+    // worker for control of that request and losing about one run in five (#79). When it
+    // lost, the route did not fire and the spec failed over something it was not
+    // testing: intermittent, green on the re-run, and expensive to trace back.
+    //
+    // The alternative was to write the constraint down beside page.route and leave the
+    // default alone. A note only reaches whoever reads it before writing the spec, and
+    // the failure it prevents points nowhere near it — this suite has twice paid for a
+    // failure that pointed away from its cause (#52, #66). Blocked by default, the trap
+    // is not there to fall into; the two files that are *about* the worker turn it back
+    // on in one line each, in the file whose subject it is, and a worker test written
+    // without that line fails the same way every time. A deterministic failure is the
+    // cheap kind.
+    serviceWorkers: 'block',
   },
   projects: [
     // Signs in through the real form and saves the session for everything below. See

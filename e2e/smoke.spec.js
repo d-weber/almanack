@@ -21,6 +21,15 @@
 import { test, expect } from '@playwright/test';
 import { MEETING, HOSTILE_TITLE, HEADERS } from './fixtures.js';
 
+// The suite blocks service workers by default, because one that has claimed the page
+// answers /api/ before page.route can see the request (playwright.config.js, #79). The
+// last three tests in this file are about the worker itself — that it registers, that
+// the last-seen calendar stays readable offline, and that the API cache is capped — so
+// this is one of the two files that ask for it back. Blocked, those three would be
+// asserting that Chromium has an HTTP cache. Nothing here routes anything, so having a
+// worker costs the rest of the file nothing.
+test.use({ serviceWorkers: 'allow' });
+
 /**
  * Press Save and hand back the id of the event that was created.
  *

@@ -18,9 +18,9 @@
 // is safe on its own, given a hostile value from anywhere at all — and the only honest
 // way to ask it is to hand the renderer a hostile value.
 //
-// Service workers are blocked for this spec so the rewritten response actually reaches
-// the page: a worker that has claimed the page serves the fetch itself, and page.route
-// never sees it.
+// The rewritten response reaches the page because the suite blocks service workers
+// (playwright.config.js, #79): a worker that has claimed the page serves the fetch
+// itself, and page.route never sees it.
 //
 // This is a browser test because the sink is a browser: what makes the tab dangerous is
 // that setAttribute('href', …) removes it at URL-parse time, and nothing outside a real
@@ -28,8 +28,6 @@
 // JavaScript unit runner to put it in either.
 
 import { test, expect } from '@playwright/test';
-
-test.use({ serviceWorkers: 'block' });
 
 const HEADERS = { 'X-Requested-With': 'almanack' };
 const DATE = '2026-08-12';

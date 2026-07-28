@@ -964,6 +964,23 @@ Notable changes to this project. The format follows
   on the whole page, and so was answered by the month chip behind the detail screen it was
   written for. The demo data is unchanged.
   ([#78](https://github.com/d-weber/almanack/issues/78))
+- **A browser spec that answers an API request for itself was racing the service worker, and
+  nothing anywhere said so.** `web/sw.js` calls `skipWaiting()` and `clients.claim()` and its
+  fetch handler answers `/api/`, so it takes control partway through a visit rather than on
+  the next one — and the requests it then makes are its own rather than the page's, which
+  `page.route` never sees. Whichever of the two won decided whether the spec was reading the
+  answer it had set up or the server's. Three specs already turned service workers off one at
+  a time, each having found the constraint the expensive way, and nothing recorded it
+  anywhere else: the next person to write a `page.route` spec would have met an intermittent
+  failure of the shape that passes on the re-run, which is the kind that costs an afternoon.
+  The suite now blocks service workers by default, and the two files that are *about* the
+  worker — the offline and cache-cap tests, and the one that signs out of its cache — ask for
+  it back in a line each, in the file whose subject it is. Measured: the spec that answers
+  `/api/v1/me` for itself fails ten runs out of ten with a worker in play and passes with it
+  blocked, and taking either opt-in away fails exactly the four tests that exercise the
+  worker and nothing else — which is what stops the new default from switching them off
+  quietly.
+  ([#79](https://github.com/d-weber/almanack/issues/79))
 
 ## [0.2.0] — 2026-07-27
 

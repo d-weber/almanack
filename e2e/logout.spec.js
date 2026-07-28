@@ -23,6 +23,12 @@
 import { test, expect } from '@playwright/test';
 import { signIn } from './fixtures.js';
 
+// The other of the two files that ask for a service worker back. The suite blocks them
+// by default, because one that has claimed the page answers /api/ before page.route can
+// see the request (playwright.config.js, #79) — but the cache this test signs out of is
+// the worker's, so blocked there would be nothing here to purge and nothing to prove.
+test.use({ serviceWorkers: 'allow' });
+
 const CREDENTIALS = { email: 'dad@example.org', password: 'password' };
 
 /** How many `/api/` responses this context is holding, across every cache it has. */

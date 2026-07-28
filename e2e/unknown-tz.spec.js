@@ -33,10 +33,10 @@
 import { test, expect } from '@playwright/test';
 import { CREDENTIALS, HEADERS, signIn } from './fixtures.js';
 
-// A service worker that has claimed the page would answer /api/v1/config and the locale
-// out of its own cache, which is one more thing standing between this test and what it
-// is asking about. Nothing here writes, so there is nothing worth caching either.
-test.use({ serviceWorkers: 'block' });
+// The tests below answer /api/v1/config and the locale files for themselves. They can,
+// because the suite blocks service workers (playwright.config.js, #79): one that has
+// claimed the page would answer both out of its own cache, and page.route would never
+// see the request.
 
 /** The zone this server is actually configured with, read rather than written down. */
 async function configuredZone(page) {
