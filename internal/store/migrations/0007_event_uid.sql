@@ -19,10 +19,16 @@
 -- in the reference. What a reused id can still change underneath the key is which
 -- appointment all of that is about, and that is the event.
 --
--- Adding a column with a constant default is expand-only: every statement the previous
--- binary issues against events names its columns, so it keeps running against this
--- schema unchanged, and the default reads back as "this event has no name of its own" —
--- the truth for every row written before this migration.
+-- Adding a column with a constant default is expand-only, which 0006 spells out and which
+-- means less than it is usually taken to mean: the previous binary does not go on running
+-- against this schema, it refuses to start on a version it does not know (Store.migrate).
+-- What it does mean is that nothing already in the file is rewritten — every column and row
+-- the previous release wrote is untouched, so a restore, the sqlite3 shell or a hand-rolled
+-- downgrade all still find what they left, and undoing this is one DROP COLUMN and one
+-- DELETE from schema_migrations rather than a table rebuilt around a family's calendar.
+--
+-- The default reads back as "this event has no name of its own" — the truth for every row
+-- written before this migration.
 --
 -- Those rows are deliberately not backfilled. Their reminders are already queued under
 -- the old spelling, and leaving the column empty is what keeps that spelling theirs, so

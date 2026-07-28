@@ -82,9 +82,14 @@ const (
 	// it — see repairCursor. A database written before these keys existed has
 	// neither, which reads as "cannot be vouched for" and costs one repair pass.
 	//
-	// They are separate keys rather than a richer value under the first because a
-	// binary from the previous release still has to read a plain integer there,
-	// which is the expand/contract rule (CONVENTIONS §8) applied to meta.
+	// They are separate keys rather than a richer value under the first so that the
+	// first goes on holding a plain integer. Not so that a binary from the previous
+	// release can read it — it refuses to start against a schema it does not know, and
+	// meta is not versioned anyway — but so that the value stays what it says it is to
+	// anyone reading the table: a row of `meta` is one of the few places in this
+	// database a person looks by hand when notifications have gone quiet, and an
+	// integer that has quietly become JSON is a worse thing to meet there than three
+	// keys.
 	MetaActivityCursorAt       = "notify.activity_cursor_at"
 	MetaActivityCursorCalendar = "notify.activity_cursor_calendar"
 )

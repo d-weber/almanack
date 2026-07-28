@@ -19,10 +19,25 @@
 -- comes from another table's DDL, and a row that has already been given a reused id
 -- would still carry it. A column of its own answers the question where the question is.
 --
--- Adding a column with a constant default is expand-only: every statement the previous
--- binary issues against activity_log names its columns, so it keeps running against this
--- schema unchanged, and the default reads back as "this change has no name of its own" —
--- which is the truth for every row written before this migration.
+-- Adding a column with a constant default is expand-only, and it is worth saying plainly
+-- what that does and does not buy, because the obvious claim is false: the previous binary
+-- does not go on running against this schema. It refuses to start, deliberately, the moment
+-- schema_migrations holds a version it does not know (Store.migrate), which is what stops a
+-- rolled-back release writing rows into a shape it cannot reason about. Every statement it
+-- issues against activity_log naming its columns is true and is not the point.
+--
+-- What expand-only buys is that this migration adds and never rewrites. Every column and
+-- every row the previous release wrote is still there, still meaning what it meant, so the
+-- file after the upgrade is the file before it plus one column — legible to a restore, to
+-- the sqlite3 shell, and to somebody in 2040 with neither this repository nor a working
+-- binary. Undoing it by hand is one DROP COLUMN and one DELETE from schema_migrations. A
+-- table rebuild would have copied a family's whole history into a new shape, and there is no
+-- comparable way back from that. Rolling back as this project practises it is still
+-- restoring the snapshot taken before the upgrade (docs/deployment.md); this is what keeps
+-- the other route open for the day the snapshot is the thing that is missing.
+--
+-- The default reads back as "this change has no name of its own" — which is the truth for
+-- every row written before this migration.
 --
 -- Those rows are deliberately not backfilled. Their notifications are already in the
 -- outbox under the old spelling, "activity:{id}", and leaving the column empty is what

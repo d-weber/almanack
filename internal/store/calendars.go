@@ -141,6 +141,20 @@ func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
 // the next two days goes out for a calendar that no longer exists. Only undelivered
 // rows go; sent and skipped ones are history.
 //
+// "Undelivered" is sent_at IS NULL AND skipped IS NULL, which includes a row a dispatcher
+// has picked up and is in the middle of pushing: sending_started_at is set on that row and
+// is deliberately not tested here. So deleting a calendar under an in-flight push leaves
+// one `slog.Error("mark notification sent", …)` behind, reading `mark notification N sent:
+// not found` — the dispatcher coming back with the provider's acceptance for a row that
+// went out from under it. Reproduced, and left as it is. The push either reached the phone
+// or it did not, nothing is lost either way, and the row was going to be deleted a moment
+// later regardless; testing sending_started_at would keep it instead, which is the worse
+// end — a queued announcement for a calendar nobody has, surviving because a delivery
+// attempt happened to be running when it went. The window is not new and not particular to
+// activity: the reminder prune below has the same shape, and so does
+// DeleteUnsentBySourcePrefix, which internal/events runs on every deletion. It is written
+// down so the log line is not read as a defect by whoever meets it next.
+//
 // Both kinds a calendar can produce go, and they are found in different ways. A
 // reminder's reference begins with the id of the event it warns about, so the events
 // being deleted name their own rows. A change's does not mention the calendar at all —
