@@ -53,11 +53,17 @@ export function renderActivity() {
         h('div', { class: 'activity-body' },
           h('p', { class: 'activity-text' }, actionText(entry)),
           h('p', { class: 'activity-meta' }, meta.join(' · '))));
-      if (entry.event_id && entry.action !== 'event_deleted') {
+      // The link uses the date the server resolved, never the day the change was made.
+      // A recurring event is only reachable on a date its rule produces, and the day
+      // somebody edits a swimming lesson is almost never a Tuesday: the old link sent
+      // the reader to a 404 that read as the event having been deleted. A row the server
+      // could find no date for — a deleted event, a rule with no occurrence anywhere —
+      // is plain text, because there is nothing to open.
+      if (entry.event_id && entry.occurrence_date && entry.action !== 'event_deleted') {
         list.appendChild(h('button', {
           class: 'activity-row',
           type: 'button',
-          onclick: () => go(`/event/${entry.event_id}/${day}`),
+          onclick: () => go(`/event/${entry.event_id}/${entry.occurrence_date}`),
         }, row));
       } else {
         list.appendChild(h('div', { class: 'activity-row' }, row));
@@ -84,6 +90,10 @@ export function renderActivity() {
         if (!any) footer.appendChild(emptyState(t('activity.empty')));
       } else {
         footer.appendChild(sentinel);
+        // Re-observed, not merely re-attached: a failed page disconnects below, and
+        // Retry then loaded one more and stopped for good. See the same line in
+        // views/agenda.js.
+        if (observer) observer.observe(sentinel);
       }
     } catch (err) {
       clear(footer);

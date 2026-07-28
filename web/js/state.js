@@ -160,9 +160,24 @@ export function clearSession() {
  */
 function purgeApiCache() {
   try {
-    const worker = navigator.serviceWorker && navigator.serviceWorker.controller;
-    if (worker) worker.postMessage({ type: 'purgeApi' });
-  } catch (_) { /* no worker on this device, so nothing of ours was cached */ }
+    const sw = navigator.serviceWorker;
+    if (!sw) return; // no worker on this device, so nothing of ours was cached
+    if (sw.controller) {
+      sw.controller.postMessage({ type: 'purgeApi' });
+      return;
+    }
+    // An uncontrolled page has no controller but the cache is still there: a hard
+    // reload loads outside the worker's control, and so does the first load after it
+    // installs. Signing out from one of those left every /api/ response on the device
+    // — the family's appointments, and a /me that answers 200, which takes an offline
+    // boot straight back into a calendar nobody is signed in to. The registration's
+    // active worker can be messaged either way, so that is what is asked for. A device
+    // with no registration at all never settles, which is the right answer: there is
+    // nothing of ours cached to purge.
+    sw.ready.then((reg) => {
+      if (reg && reg.active) reg.active.postMessage({ type: 'purgeApi' });
+    }).catch(() => {});
+  } catch (_) { /* nothing cached, or a browser that forbids asking */ }
 }
 
 export function weekStart() {
@@ -321,6 +336,10 @@ export function dismissIOSInstall() {
 
 let inflight = null;
 
+// Which range load is the current one. Every start takes the next number and only the
+// holder of the highest may write to state.range; see loadRange.
+let rangeSeq = 0;
+
 /**
  * The contract names an occurrence's event `event_id`; the Go type embeds Event,
  * whose own field is `id`. Accept either so one serialization detail cannot blank
@@ -340,15 +359,27 @@ export async function fetchRange(from, to) {
   };
 }
 
-/** Load the visible window into the store; identical windows are deduped. */
+/**
+ * Load the visible window into the store; identical windows are deduped.
+ *
+ * A load that has been overtaken does not write. Paging quickly through months starts a
+ * request per month against one shared store, they come back in whatever order the
+ * network gives them, and the slow one used to land last and win: the grid drawn from
+ * August, `state.range` holding July, and the day sheet — which reads the store rather
+ * than the grid — opening July's appointments on an August date. The sequence number is
+ * compared after the await for that reason, and the caller is handed whatever is loaded
+ * now, which is the window it was overtaken by.
+ */
 export async function loadRange(from, to, { force = false } = {}) {
   if (!force && state.range.loadedAt && state.range.from === from && state.range.to === to) {
     return state.range;
   }
   if (inflight && inflight.key === `${from}:${to}` && !force) return inflight.promise;
 
+  const seq = ++rangeSeq;
   const promise = (async () => {
     const data = await fetchRange(from, to);
+    if (seq !== rangeSeq) return state.range;
     state.range.from = from;
     state.range.to = to;
     state.range.occurrences = data.occurrences;

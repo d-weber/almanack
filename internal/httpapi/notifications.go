@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -347,8 +349,64 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	if entries == nil {
-		entries = []domain.Activity{}
+	rows, err := s.activityViews(ctx, entries)
+	if err != nil {
+		fail(w, r, err)
+		return
 	}
-	writeJSON(w, r, http.StatusOK, map[string]any{"activity": entries})
+	writeJSON(w, r, http.StatusOK, map[string]any{"activity": rows})
+}
+
+// activityView is one feed entry plus the date the row links to.
+//
+// The date is here for the same reason a search result carries one. A feed row about a
+// recurring event has only the instant the change was made, and the client built its
+// link from that — but GET /events/{id} answers 404 for a date the series does not land
+// on, and the day somebody edited a swimming lesson is almost never a Tuesday. Tapping
+// the row reported the event as missing. Deriving it on the server is what keeps the
+// answer honest: a series' anchor need not be an occurrence of its own rule, so there is
+// nothing the browser could correctly guess from what it holds.
+//
+// It is null when there is nothing to link to — a deleted event, or a rule with no
+// occurrence anywhere — and the client renders those rows as plain text rather than as a
+// link to an error.
+type activityView struct {
+	domain.Activity
+	OccurrenceDate *domain.Date `json:"occurrence_date"`
+}
+
+// activityViews resolves the link date for a page of entries, reading each event once
+// however many of its changes the page holds.
+func (s *Server) activityViews(ctx context.Context, entries []domain.Activity) ([]activityView, error) {
+	today := domain.DateIn(s.clock.Now(), s.cfg.FamilyTZ)
+	dates := map[int64]*domain.Date{}
+	out := make([]activityView, 0, len(entries))
+	for _, a := range entries {
+		view := activityView{Activity: a}
+		switch {
+		case a.EventID == nil, a.Action == domain.ActionEventDeleted:
+			// Nothing to open: a deleted event is kept in the feed by its title alone.
+		default:
+			date, ok := dates[*a.EventID]
+			if !ok {
+				ev, err := s.store.EventByID(ctx, *a.EventID)
+				switch {
+				case errors.Is(err, domain.ErrNotFound):
+					// Deleted since, without a deletion of its own in this page.
+				case err != nil:
+					return nil, err
+				default:
+					if _, occurrence, err := s.resultDates(ctx, ev, today); err != nil {
+						return nil, err
+					} else {
+						date = occurrence
+					}
+				}
+				dates[*a.EventID] = date
+			}
+			view.OccurrenceDate = date
+		}
+		out = append(out, view)
+	}
+	return out, nil
 }
