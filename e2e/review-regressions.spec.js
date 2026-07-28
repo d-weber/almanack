@@ -2,8 +2,8 @@
 //
 // Each is a thing the Go tests structurally cannot reach: a link built in the browser
 // from data the browser cannot correctly guess, a paging observer that survives being
-// disconnected, a URL that stops the app booting before any of it runs, and a URL for a
-// view that no longer exists.
+// disconnected, a URL that stops the app booting before any of it runs, a URL for a view
+// that no longer exists, and a control that changed size when a panel opened beside it.
 //
 // Every test starts already signed in, from the session auth.setup.js saved, and the
 // one that creates an event deletes it again in a finally — through the API, whether
@@ -142,6 +142,58 @@ test('a malformed escape in the hash does not stop the app booting', async ({ pa
   await page.getByRole('button', { name: 'Month', exact: true }).click();
   await page.getByRole('button', { name: 'Today', exact: true }).click();
   await expect(page.getByText("Leo's dentist").first()).toBeVisible({ timeout: 15_000 });
+});
+
+// Opening an event should not resize the control next to it.
+//
+// The panel takes a column from the calendar, and the bar used to answer that by giving
+// the view switch a line of its own and stretching it across the width — on every screen,
+// however much room was left. The switch is a segmented pill with a background, so on a
+// wide monitor that drew a full-width grey bar under the month, and the bar changed shape
+// every time an event was opened or closed.
+//
+// Both halves are held here, because fixing one by itself gives the other back: the
+// switch keeps the width of its two words, and the row stays on one line while there is
+// room for one. 1400px leaves room even with the panel out; 1000px does not, and is here
+// so that "one line" is not achieved by letting the month and year run under the switch.
+test('opening the event panel does not resize or relayout the view switch', async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.goto('/#/month');
+  await expect(page.locator('.month-grid')).toBeVisible({ timeout: 15_000 });
+
+  const measure = () => page.evaluate(() => {
+    const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+    const title = document.querySelector('.app-title');
+    return {
+      switchWidth: Math.round(box('.view-switch').width),
+      barHeight: Math.round(box('.app-bar-row').height),
+      panelOpen: document.querySelector('.app').classList.contains('is-panel-open'),
+      // The bar may wrap, but never by hiding the one label that has to stay readable.
+      titleClipped: title.scrollWidth > title.clientWidth + 1,
+    };
+  });
+
+  const closed = await measure();
+  expect(closed.panelOpen, 'the panel was already open before the test opened it').toBe(false);
+
+  await page.locator('.chip').first().click();
+  await expect(page.locator('.app.is-panel-open')).toBeVisible({ timeout: 15_000 });
+  const open = await measure();
+
+  expect(open.switchWidth, 'the view switch changed width when the panel opened')
+    .toBe(closed.switchWidth);
+  expect(open.barHeight, 'the bar took a second line although there was room for one')
+    .toBe(closed.barHeight);
+  expect(open.titleClipped, 'the month and year is clipped with the panel open').toBe(false);
+
+  // Narrow enough that it genuinely cannot fit: it may wrap, and the switch still keeps
+  // its own width rather than filling the line it wrapped onto.
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.waitForTimeout(300);
+  const narrow = await measure();
+  expect(narrow.switchWidth, 'the view switch stretched across the line it wrapped onto')
+    .toBe(closed.switchWidth);
+  expect(narrow.titleClipped, 'the month and year is clipped on a narrow window').toBe(false);
 });
 
 test('a bookmarked weekly view lands on the month rather than on nothing', async ({ page }) => {
