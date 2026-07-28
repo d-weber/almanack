@@ -6,7 +6,44 @@ Notable changes to this project. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] — 2026-07-28
+
+The numbering jumps from 0.2.0 because this release carries the whole of milestones 0.3
+through 0.6 — every open defect fixed or explicitly accepted, which is what those four
+milestones were between them. Cutting them as four tags would have meant four releases of
+nearly the same code, so they are one. What follows 0.6 is not more code but time: the two
+daylight-saving transitions, a household that is not the author's, and a rollback performed
+for real. See [#28](https://github.com/d-weber/almanack/issues/28).
+
 ### Added
+
+- **[tools/timetree-import](tools/timetree-import/)** — step 2 of
+  [docs/migrating-from-timetree.md](docs/migrating-from-timetree.md), which had described a
+  specification with nothing implementing it. Turns the raw JSON the exporter produces into
+  events over the public HTTP API, standard library only. It is idempotent — a journal keyed
+  on the TimeTree `uuid` means an interrupted run resumes rather than duplicating a family's
+  history — and loud: a recurrence rule it does not fully understand, a `label_id` outside the
+  ten a calendar has, or an all-day alert that will not convert stops the run with the event
+  named, before anything is written. Birthdays arrive as the yearly all-day events the mapping
+  calls for, an attendee id missing from `--user-map` is reported with a count of the events it
+  was dropped from rather than silently omitted, and `--dry-run` shows the whole plan.
+  `created_at`/`updated_at` cannot be carried at all — the server stamps both — and the
+  document now says so instead of promising them.
+- **`ALMANACK_HOLIDAYS`** chooses which public holidays are shown, as a list. Two sets exist:
+  `FR`, and `FR-ALSACE-MOSELLE` which contains it plus Good Friday and St Stephen's Day. Set it
+  to `none` if you are somewhere else — no public holidays are drawn at all, which is the honest
+  answer and better than being shown another country's — and the family can still name its own
+  days either way. An unrecognised code is refused at startup naming what exists.
+  ([#26](https://github.com/d-weber/almanack/issues/26))
+- **Pre-migration snapshots.** A release with migrations to apply now writes a verified copy of
+  the database into `<ALMANACK_BACKUP_DIR>/pre-migration/` before applying them, and refuses to
+  start if it cannot: a migration whose fallback could not be taken is the one that should not
+  run. They are never pruned — migrations are rare, and this is the one snapshot whose worth is
+  set by an event rather than by its age. Both documents that promised this for several releases
+  were describing something that did not exist.
+  ([#22](https://github.com/d-weber/almanack/issues/22))
 
 - **[docs/install.md](docs/install.md)** — a worked install, from downloading a binary to a
   checklist that tells you it is working. A five-minute local trial that needs no domain and
@@ -99,6 +136,49 @@ Notable changes to this project. The format follows
 
 ### Changed
 
+- **Rolling back a release is a restore, not a symlink flip.** Four documents said rollback was
+  "putting the old binary back", with no restore and no data loss. It never was: the binary
+  refuses to open a schema newer than it knows — deliberately — so after any upgrade the previous
+  release hard-fails at startup. Going back means restoring that release's pre-migration snapshot
+  *and* putting the old binary back, which discards everything entered since the upgrade. Plan an
+  upgrade around it; the window in which rolling back is cheap is hours, not days. Expand/contract
+  migrations still earn their place — they keep the previous release's statements valid and make
+  an interrupted migration safe to retry — but they do not make the old binary start.
+  ([#22](https://github.com/d-weber/almanack/issues/22))
+- **`/api/v1` is documented as the seam the embedded PWA speaks, not a public contract.** The
+  browser code ships in the same binary and is deployed with it, in lockstep, so nothing was
+  forcing the API to be stable and treating it as frozen would mean a deprecation cycle for bug
+  fixes nobody outside this repository could observe. Anything built against it is welcome and is
+  a fork's risk to carry: pin a release, read the changelog, expect to follow. What *is* frozen at
+  1.0 is the operator contract — config keys, subcommands and their exit codes, `/healthz`.
+  ([#27](https://github.com/d-weber/almanack/issues/27))
+- **The daily summary counts what the activity screen shows**, and both ignore
+  `participating_only`, which governs per-change notifications only. Filtering the count alone
+  would have produced a push saying three changes that opens a list showing five.
+  ([#11](https://github.com/d-weber/almanack/issues/11))
+- **`/api/v1/me` stays cacheable**, with the reasoning and the residual risk written down: making
+  it uncacheable would not merely harden the boot but remove offline boot entirely, since the app
+  asks for it before rendering anything. ([#14](https://github.com/d-weber/almanack/issues/14))
+- Event chips in the month grid are **24px on desktop**, the WCAG 2.2 target-size minimum. The
+  phone grid keeps 20px and relies on the criterion's Equivalent exception, because its row budget
+  is exact to the pixel and raising it costs either a month view that scrolls appreciably more or
+  one fewer visible event per day. The reasoning is recorded in the stylesheet beside the numbers.
+  ([#21](https://github.com/d-weber/almanack/issues/21))
+- CI no longer downloads 21 MB of Japanese, Thai, Chinese and Cyrillic fonts on every run to
+  render a French and English calendar. `--with-deps` was installing nine packages, every one a
+  font and not one a library — Chromium's own are already on the runner — and they were the whole
+  of the browser job's tail: eleven runs took under half a minute and one took ten, the difference
+  being the Ubuntu mirror's throughput that afternoon.
+- The browser suite retries once, and only a browser crash survives it. `chrome-headless-shell`
+  segfaults mid-run and the test that reports it is the *next* one to ask for a context, so a red
+  run there says nothing true about the code — but a blanket retry hides the flakes worth finding.
+  A reporter now fails the run again if any test passed on a retry for anything other than the
+  crash, so an intermittent bug still turns CI red and still names itself.
+  ([#80](https://github.com/d-weber/almanack/issues/80))
+- The one-shot subcommands take a `clock.Clock` rather than reading the wall clock directly, which
+  is what makes the seeder testable at a chosen date — verifying it across a range of dates used
+  to need a patched throwaway binary. ([#68](https://github.com/d-weber/almanack/issues/68))
+
 - **Planning moved to the issue tracker.** What was `docs/known-issues.md` is now one
   GitHub issue per defect, and the road to 1.0 is milestones 0.3 to 1.0 — the data layer,
   notifications, the browser, then operations, followed by a soak through both
@@ -123,10 +203,109 @@ Notable changes to this project. The format follows
 
 ### Removed
 
+- **`ALMANACK_ALSACE_MOSELLE`** — replaced by `ALMANACK_HOLIDAYS=FR-ALSACE-MOSELLE`. A regional
+  variant expressed as a boolean while the country was a setting was the odd one out; as a set it
+  needs no special case anywhere. **A configuration that still sets it will not start**, and says
+  what to write instead: ignoring it silently would have taken two public holidays off an Alsace
+  family's calendar without a word. ([#26](https://github.com/d-weber/almanack/issues/26))
+
 - `docs/known-issues.md` and the roadmap that briefly replaced part of it. A file listing
   what is broken goes stale between releases; an issue closes when the fix lands.
 
 ### Fixed
+
+- **"This and following" on a series' first occurrence lost it, and the series stayed where it
+  was.** Splitting at the first occurrence would leave an empty first half, so that edit takes the
+  whole-series path instead — which skipped the re-anchoring a split does. Move the first Tuesday
+  of a weekly series to a Wednesday and the rule stayed on Tuesdays while only the start moved: a
+  series is read through its rule alone, so neither the occurrence that was dragged nor the one it
+  came from existed afterwards, and the edit answered 200 with both gone.
+- **Deleting or splitting "this and following" past a series' end extended it.** The end date was
+  written as the split minus a day whatever it was, so occurrences between the real end and the
+  new one came back from the dead. Ending a series now only ever brings its end forward.
+- **A transient database error retired a live reminder.** Delivery skipped a queued notification
+  on *any* error from reading the recipient, recording "recipient no longer exists". The reading
+  was permanent — nothing returns a skipped row to the queue, boot catch-up passes over it, and
+  re-planning cannot replace it because the outbox's unique key is still held — so one `SQLITE_BUSY`
+  during a checkpoint lost a reminder for good, with an audit line saying it had been a decision.
+- **Two planning passes at once wiped the outbox.** The scheduler goroutine and `POST /dev/tick`
+  can genuinely overlap, and they shared one unsynchronised record of what the pass had decided
+  should exist. Reconciliation deletes every undelivered row a pass no longer calls for, so two
+  passes reading half of each other's decisions deleted the reminders both wanted; the regression
+  test loses all four without the fix. Planning is now one pass at a time.
+- **Changes made after the daily summary's slot were reported by nobody.** The summary counted the
+  calendar day it is named after but goes out at its slot, so an edit made that evening belonged to
+  a summary that had already been sent, and the next day's window began after it. The window now
+  ends at the slot and reaches back to the previous one.
+- **A reminder deleted after its slot had passed still went out.** Reconciliation only looked at
+  the window just planned, so a row whose slot was behind it could not be seen, let alone dropped
+  — and delivery sends a late reminder on purpose while its event is still ahead. It now reaches
+  back as far as delivery reaches, and leaves rows whose moment has gone to be retired with a
+  reason rather than deleting the record.
+  ([#71](https://github.com/d-weber/almanack/issues/71))
+- **Search and the activity feed could link to a cancelled occurrence**, which answers 404 and
+  reads as the event having been deleted when only one of its dates was. Recurrence expands a
+  pattern and no more, so both dates a row carries could name a date the family had struck out.
+  They now skip cancellations, reading the exceptions for a whole page in one query rather than
+  one per row. ([#73](https://github.com/d-weber/almanack/issues/73))
+- **The "send me a test" notification was deleted before it was ever sent.** It is filed under the
+  reminder kind so that it travels the real delivery path, but no planning pass produces one, so
+  outbox reconciliation dropped it — on a thirty-second tick, almost always. The button reported
+  success and nothing arrived.
+- **Removing a member left their reminder-detachment rows behind.** A detachment records that a
+  member set their own reminders on one edited occurrence, empty list included, and it outranks the
+  series' list for that date — so a re-invited member inherited nothing on exactly the occurrence
+  the row named, with nothing on screen to distinguish it.
+- **A rejected profile edit could still have changed the password.** `PATCH /me` changed it before
+  validating the rest of the payload, so a request carrying a new password and, say, an empty
+  display name answered 400 having already changed the password and signed every other device out.
+  Everything is now checked before anything is written.
+- **Signup created the account and its membership separately.** A failure between them left an
+  account that can sign in, belongs to no calendar, and cannot sign up again — the address is taken
+  and an invite is the only route in. They are now one transaction.
+- **Everyone leaving a calendar at once stranded it.** The member count and the decision it drives
+  were separate transactions, so concurrent departures each saw somebody still there and all left,
+  producing a calendar with no members that no query returns and nothing can reach — its events
+  included.
+- **A VAPID key in the standard base64 alphabet was advertised unusably.** Key material is
+  deliberately accepted in either alphabet, but the configured string was then published verbatim
+  as the `k=` parameter and by `PublicKey()`, where `+` and `/` are neither valid base64url nor a
+  key any push service or browser can decode. It is re-encoded from the key itself now.
+- **A backup could fail over a stale partial another run had just tidied up.** Two overlapping runs
+  each listed the directory and each tried to remove the same file; the loser failed the whole
+  backup, which means a failure mail and a 503 from `/healthz` for a backup that was doing its job.
+- The multipart email boundary was a compile-time constant, which put the guarantee that a
+  delimiter does not appear in the text it delimits in the hands of whatever went into the body.
+  Nothing composes an HTML part today, so this closes the door before it is opened.
+- **The activity feed linked to the day a change was made**, which for a recurring event is almost
+  never a date its rule produces — so the row opened a 404 that read as a deletion. The date now
+  comes from the server, the way search results have carried one since 0.2.0's fix.
+- **Both infinite-scroll screens stopped paging for good after one failed page and a Retry.** The
+  observer watching the sentinel is disconnected when a page fails, and Retry put the sentinel back
+  with nothing watching it: scrolling did nothing for the rest of the visit, with no error on
+  screen to explain why.
+- **A superseded range load could still overwrite the store.** Paging quickly through months starts
+  a request per month against one shared store, and the slow one landed last and won — the grid
+  drawn from one month, the store holding another, and the day sheet opening the wrong month's
+  appointments.
+- **The event panel and the day sheet could open over an unrelated screen.** Both open after an
+  awaited render, and a navigation landing inside that await left them open on top of whatever it
+  had drawn — after that screen had already closed the panel, so nothing took it down again.
+- **Signing out left the family's calendar on the device when the page was uncontrolled.** The
+  cache purge only ran when a service worker controlled the page, which a hard reload is not, nor
+  is the first load after the worker installs — so every `/api/` response stayed, including a `/me`
+  that answers 200 and takes an offline boot straight back into a calendar nobody is signed in to.
+- **A malformed percent-escape in the URL rendered nothing at all.** `decodeURIComponent` throws on
+  `%` alone and was called while matching a route, uncaught, out of a dispatch that boot calls: one
+  bad character in the address bar produced a blank page, on that URL and on every reload of it.
+- **A notification click reloaded the tab it had just routed in place.** The service worker
+  messaged the open window *and* called `client.navigate()`, so the reload always won where
+  `navigate` exists, throwing away the state the message existed to keep — and a `navigate()` that
+  then failed fell through to focus and message a second window.
+- A comment in the event editor stated a daylight-saving rule that is false for every zone west of
+  Greenwich. Nothing misbehaved; the cost was that the next person reasoning about ambiguous times
+  would have started from a false premise.
+  ([#76](https://github.com/d-weber/almanack/issues/76))
 
 - **Deleting an occurrence you had already edited brought it back.** Editing a single
   occurrence stores a separate copy of the event, and from then on the app addressed that
@@ -1096,6 +1275,7 @@ First working version: in use by one household, not yet by anyone else.
 - Never upgraded in place: expand/contract migrations are implemented and tested, but
   no release has yet followed another on a live database.
 
-[Unreleased]: https://github.com/d-weber/almanack/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/d-weber/almanack/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/d-weber/almanack/compare/v0.2.0...v0.6.0
 [0.2.0]: https://github.com/d-weber/almanack/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/d-weber/almanack/releases/tag/v0.1.0
