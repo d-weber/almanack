@@ -144,9 +144,32 @@ func (d Date) AtTimeOf(t time.Time, loc *time.Location) time.Time {
 // A broken wall time has exactly two readings, being the offsets either side of the
 // jump, so where the first leaves the date behind the other one is the answer. Over
 // every minute of every gap in the timezone database between 1970 and 2100 it lands on
-// the date that was asked for, the sole exceptions being the six dates a zone deleted
-// outright on crossing the date line (Pacific/Apia has no 30 December 2011), which no
-// arithmetic can put an occurrence on because they never happened.
+// the date that was asked for, with three exceptions: 21 August 1993, 31 December 1994
+// and 30 December 2011, each of them a date a zone deleted outright on crossing the
+// international date line. Five zones and six names — Apia, Fakaofo, Kanton with
+// Enderbury pointing at it, Kiritimati, Kwajalein — and neither reading is on the date,
+// so the last line below is what they get.
+//
+// "A day that never happened can hold nothing" is the comfortable version of that and
+// not the true one. The day does not vanish, it splits: in Apia every wall time before
+// 10:00 resolves onto the 29th and every one from 10:00 onwards onto the 31st, so a
+// series asked for the 30th gets an instant on one neighbour or the other depending on
+// what o'clock it was. The occurrence keeps the 30th as its identity, so overlaps()
+// compares that against an instant reading the 29th or the 31st and drops it: a day view
+// of the 30th is empty, and so is one of either neighbour, since expansion never reaches
+// a date outside the window it was given. Only a window wide enough to expand the 30th
+// returns it at all, and then the month grid draws it on the neighbour — absent where it
+// was put and present where nobody put anything, which is #57's shape exactly. The
+// window built from In has
+// the matching fault and a quieter one: In(the 30th) and In(the 31st) are 24 hours apart
+// and everything between them is on the 29th, so a query for the deleted date is a
+// well-formed day covering its neighbour, with nothing anywhere to say so.
+//
+// Nothing is done about it. The three dates are decades past, the zones are five Pacific
+// islands, and only a timed series reaches it at all — an all-day event is stored as a
+// Date and never becomes an instant. Refusing the date would be a rule in domain, a
+// string in two catalogs and a branch in the editor, for a household that would have to
+// be on Kiritimati and entering something for New Year's Eve 1994.
 func (d Date) at(hour, min, sec int, loc *time.Location) time.Time {
 	t := time.Date(d.Year, d.Month, d.Day, hour, min, sec, 0, loc)
 	if DateIn(t, loc).Equal(d) {

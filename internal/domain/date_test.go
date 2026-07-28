@@ -427,6 +427,93 @@ func TestADayWithTwoMidnightsBeginsAtTheFirstOne(t *testing.T) {
 	}
 }
 
+// TestADateAZoneDeletedSplitsAcrossItsNeighbours is the one case at's rule cannot help,
+// pinned because it is otherwise only described.
+//
+// Three dates in the database were deleted outright by a zone crossing the international
+// date line, and on those neither reading of a wall time is on the date asked for, so at
+// falls through to the standard resolution. Until this test that last line was
+// unreachable: returning the alternative reading unconditionally instead passed the
+// whole suite, which means the branch was documented and not decided.
+//
+// What it decides is which neighbour the day leaks onto, because it does leak — the day
+// splits rather than being empty. Both answers are wrong in the sense that matters, and
+// the standard one is the one the browser reaches through the same shape of code, so
+// the two halves stay together on the dates neither can get right.
+func TestADateAZoneDeletedSplitsAcrossItsNeighbours(t *testing.T) {
+	cases := []struct {
+		zone, date  string
+		hour, min   int
+		wantUTC     string
+		wantOnDate  string
+		description string
+	}{
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 0, min: 0,
+			wantUTC: "2011-12-29T10:00:00Z", wantOnDate: "2011-12-29",
+			description: "Samoa skipped 30 December 2011 entirely; the morning falls back a day",
+		},
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 9, min: 59,
+			wantUTC: "2011-12-29T19:59:00Z", wantOnDate: "2011-12-29",
+			description: "the last minute that still lands on the 29th",
+		},
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 10, min: 0,
+			wantUTC: "2011-12-30T20:00:00Z", wantOnDate: "2011-12-31",
+			description: "and the first that lands on the 31st, which is where the day splits",
+		},
+		{
+			zone: "Pacific/Kwajalein", date: "1993-08-21", hour: 11, min: 59,
+			wantUTC: "1993-08-20T23:59:00Z", wantOnDate: "1993-08-20",
+			description: "the same shape eighteen years earlier and with the split at noon",
+		},
+		{
+			zone: "Pacific/Kwajalein", date: "1993-08-21", hour: 12, min: 0,
+			wantUTC: "1993-08-22T00:00:00Z", wantOnDate: "1993-08-22",
+			description: "Kwajalein went from -12:00 to +12:00, so its lost day is a whole one",
+		},
+	}
+
+	for _, tc := range cases {
+		name := tc.zone + " " + tc.date + " " + tc.description
+		t.Run(name, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no tzdata: %v", err)
+			}
+			got := MustParseDate(tc.date).At(tc.hour, tc.min, loc)
+			if s := got.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s %02d:%02d in %s = %s, want %s", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantUTC)
+			}
+			if bucket := DateIn(got, loc); bucket.String() != tc.wantOnDate {
+				t.Errorf("%s %02d:%02d in %s lands on %s, want %s", tc.date, tc.hour, tc.min, tc.zone, bucket, tc.wantOnDate)
+			}
+		})
+	}
+
+	// And what that does to a window, which is the part worth being able to point at.
+	// The half-open day the store builds out of Date.In is a well-formed 24 hours and
+	// covers exactly one calendar day — the wrong one. Asked for 30 December, it hands
+	// back the whole of the 29th and says nothing about having done so.
+	loc, err := time.LoadLocation("Pacific/Apia")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	d := MustParseDate("2011-12-30")
+	from, to := d.In(loc), d.AddDays(1).In(loc)
+	if got := to.Sub(from); got != 24*time.Hour {
+		t.Errorf("the window for the deleted day spans %v, want 24h", got)
+	}
+	wrongDay := MustParseDate("2011-12-29")
+	if got := DateIn(from, loc); !got.Equal(wrongDay) {
+		t.Errorf("the window for %s opens on %s, want %s", d, got, wrongDay)
+	}
+	if got := DateIn(to.Add(-time.Second), loc); !got.Equal(wrongDay) {
+		t.Errorf("the window for %s closes on %s, want %s", d, got, wrongDay)
+	}
+}
+
 func TestZeroDateIsUnset(t *testing.T) {
 	var zero Date
 	if !zero.IsZero() {
