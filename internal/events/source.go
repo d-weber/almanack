@@ -66,6 +66,12 @@ func ReminderSourceRef(eventID int64, occDate domain.Date, reminderID int64, eve
 }
 
 // OccurrenceSourcePrefix matches everything queued for a single occurrence.
+//
+// The trailing colon is belt-and-braces and no test can be written for it: an occurrence
+// date is always ten characters, so "reminder:12:2026-08-04" cannot reach another
+// occurrence's references however it is spelled. It stays because the prefix below, whose
+// colon does real work, would otherwise be the odd one out — and because the day a date
+// stops being fixed-width is not the day to discover which of the two was load-bearing.
 func OccurrenceSourcePrefix(eventID int64, occDate domain.Date) string {
 	return fmt.Sprintf("reminder:%d:%s:", eventID, occDate)
 }

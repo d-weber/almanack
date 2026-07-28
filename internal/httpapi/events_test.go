@@ -313,25 +313,32 @@ func TestARemindersListIsASetAndIsBounded(t *testing.T) {
 		t.Errorf("all-day reminders stored %v, want %v", got, want)
 	}
 
-	// The cap, at the boundary. Exactly the limit saves.
+	// The cap, at the boundary, and written as the numbers rather than as maxReminders.
+	// Twenty is a decision about what a household could plausibly ask for — twice the
+	// fifteen shapes the editor's menu can produce — and it is exactly the thing a
+	// careless edit changes. A boundary phrased in terms of the constant moves with it
+	// and holds nothing: raising the cap to ten thousand would leave this section green
+	// and every word of it true. Raising it deliberately is allowed and lands here, in
+	// the commit that raises it.
 	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
-		"reminders": timedReminders(maxReminders),
+		"reminders": timedReminders(20),
 	}).expect(http.StatusOK)
 	atTheCap := e.remindersOf(timed.ID, "2026-08-04")
-	if len(atTheCap) != maxReminders {
-		t.Fatalf("a list of exactly %d stored %d of them", maxReminders, len(atTheCap))
+	if len(atTheCap) != 20 {
+		t.Fatalf("a list of exactly 20 stored %d of them, and maxReminders is %d: twenty is the "+
+			"number the editor's menu and this bound were chosen against", len(atTheCap), maxReminders)
 	}
 
-	// One over is refused, with the code the client shows a message for — and refused
+	// Twenty-one is refused, with the code the client shows a message for — and refused
 	// before anything is written, so what is stored is still the list that was accepted.
 	res := e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
-		"reminders": timedReminders(maxReminders + 1),
+		"reminders": timedReminders(21),
 	}).expect(http.StatusBadRequest)
 	if code := res.errorCode(); code != codeInvalid {
-		t.Errorf("a list of %d was refused as %q, want %q", maxReminders+1, code, codeInvalid)
+		t.Errorf("a list of 21 was refused as %q, want %q", code, codeInvalid)
 	}
 	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, atTheCap) {
-		t.Errorf("a refused list changed what was stored: %v, want the %d that were accepted", got, maxReminders)
+		t.Errorf("a refused list changed what was stored: %v, want the 20 that were accepted", got)
 	}
 
 	// Creating an event with too many is refused the same way, and the event with it:
@@ -342,7 +349,7 @@ func TestARemindersListIsASetAndIsBounded(t *testing.T) {
 		"starts_at":   "2026-08-05T14:30:00Z",
 		"ends_at":     "2026-08-05T15:15:00Z",
 		"label_id":    labels[3].ID,
-		"reminders":   timedReminders(maxReminders + 1),
+		"reminders":   timedReminders(21),
 	}).expect(http.StatusBadRequest)
 	if occs := e.listEvents("2026-08-05", "2026-08-05").Occurrences; len(occs) != 0 {
 		t.Errorf("the event was created anyway: %+v", occs)
@@ -351,10 +358,10 @@ func TestARemindersListIsASetAndIsBounded(t *testing.T) {
 	// The cap counts warnings, not lines: a list that says the same twenty things twice
 	// is asking for twenty, and a hundred thousand copies of one is asking for one.
 	e.do(http.MethodPut, fmt.Sprintf("/api/v1/events/%d/reminders", timed.ID), map[string]any{
-		"reminders": doubled(timedReminders(maxReminders)),
+		"reminders": doubled(timedReminders(20)),
 	}).expect(http.StatusOK)
 	if got := e.remindersOf(timed.ID, "2026-08-04"); !slices.Equal(got, atTheCap) {
-		t.Errorf("%d shapes sent twice each stored %d rows", maxReminders, len(got))
+		t.Errorf("20 shapes sent twice each stored %d rows", len(got))
 	}
 }
 
