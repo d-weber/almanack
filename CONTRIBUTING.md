@@ -50,7 +50,10 @@ Not because the ideas are bad, but because they change what this is:
   third, it needs a strong argument first, in an issue, before the code.
 - **A frontend framework or a build step.** The only build is `go build`.
 - **CalDAV, ICS, or Google/Outlook sync.** Deliberately out of scope; see the architecture
-  document. A separate project that syncs against the HTTP API would be welcome.
+  document. A separate project that syncs against the HTTP API would be welcome — knowing
+  that the API is the seam this app's own browser code speaks rather than a frozen
+  contract, and changes with releases. Pin one, read the changelog, expect to follow.
+  [docs/api.md](docs/api.md) says what that does and does not promise.
 - **Chat, photo albums, shared lists.** Also deliberate omissions.
 - **Multi-tenancy or a scaling story.** This is for one group on one server.
 

@@ -3,9 +3,36 @@
 The agreement between `internal/httpapi` and `web/`. Both are built against this document,
 so it is normative: if code and contract disagree, that is a bug in the code.
 
+## Who this contract is with
+
+**The embedded PWA, and nothing else.** This is an internal seam rather than a public
+interface, and the `v1` in the path does not make it one (#27).
+
+The browser code ships inside the same binary as the server and is deployed with it, in
+lockstep, always. Nothing is ever running one version of the API against another version
+of the client, so an endpoint can change shape in the same commit as the screen that reads
+it — and does. The activity feed's cursor went from `before=` to `before_id=` that way,
+because paging by an instant could not page through two changes made in the same second.
+Under a frozen contract that would have been a deprecation cycle for a bug fix nobody
+outside this repository could have noticed.
+
+What that means in practice:
+
+- A change here is allowed to break a client that is not the one in `web/`. The path stays
+  `/api/v1` because renaming it would mean renaming it in every release, not because the
+  number is a promise to anyone.
+- Additive is still the habit, not the rule. Endpoints that can grow rather than change,
+  do — `before=` still works — but that is courtesy to whoever is mid-upgrade, not a
+  guarantee held across releases.
+- Anything built against this is welcome and is a fork's risk to carry. Pin a release, read
+  the changelog, and expect to follow. `docs/deployment.md` describes what *is* frozen at
+  1.0: the operator contract — config keys, subcommands and their exit codes, `/healthz`.
+  That is the surface with a stability promise attached; this one is not.
+
 ## Conventions
 
-- Base path `/api/v1`. JSON in, JSON out, UTF-8. Changes within v1 are **additive only**.
+- Base path `/api/v1`. JSON in, JSON out, UTF-8. Changes within v1 are additive **by
+  preference, not by promise** — see above.
 - Every non-GET request must send `X-Requested-With: almanack` (CSRF defense) and
   `Content-Type: application/json` unless stated otherwise. **Mutations are never GET.**
 - Auth is the `almanack_session` cookie (HttpOnly, SameSite=Lax, Secure outside dev).

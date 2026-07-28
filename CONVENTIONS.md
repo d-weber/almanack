@@ -72,7 +72,11 @@ e2e/                    dev-only browser smoke tests
 
 ## 5. HTTP and security
 
-- JSON REST under `/api/v1/`. Changes within `v1` are additive only.
+- JSON REST under `/api/v1/`. It is the seam the embedded PWA speaks, not a public
+  contract: the two ship in one binary and are never out of step, so an endpoint may
+  change in the same commit as the screen that reads it. Additive by preference, not by
+  promise — `docs/api.md` says why, and `docs/deployment.md` covers the surface that
+  really is frozen at 1.0.
 - **Mutations are never GET.** Logout is POST. A single state-changing GET reopens CSRF.
 - Every non-GET/HEAD/OPTIONS request must carry `X-Requested-With: almanack`; middleware rejects
   those that don't (this plus `SameSite=Lax` is the CSRF defense — there is no token).
