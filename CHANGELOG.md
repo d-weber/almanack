@@ -8,6 +8,83 @@ Notable changes to this project. The format follows
 
 Nothing yet.
 
+## [0.7.0] — 2026-07-28
+
+A screen removed and a phone's calendar rebuilt around what a thumb can reach, plus the
+fixes that were going to be 0.6.1 on their own. The version is a minor rather than a
+patch because the weekly view is gone: nobody's data changes, but a screen somebody used
+is not there any more, and that is not something to hide in a third digit. The soak this
+project is in still ships nothing else — see
+[#28](https://github.com/d-weber/almanack/issues/28).
+
+### Removed
+
+- **The weekly view.** It listed seven days, each with its events in order, which is what
+  the agenda already does — from today forward rather than a week at a time, and without
+  a screen of its own to keep working. A browser with `week` stored as its view falls
+  back to the month, and a bookmarked `#/week` lands on the month rather than on nothing:
+  the list of view names is the whitelist the stored value is validated against, so the
+  removal is its own migration.
+
+### Changed
+
+- **A phone's top bar carries the month and the mode, and nothing else.** It held six
+  controls across the width of a phone, most of them at the corner furthest from the hand
+  holding it. Today and the two month arrows are gestures now — swipe the grid sideways,
+  tap the month to come back to today — and adding an event is a round button straddling
+  the line between the calendar and the tab bar, where a thumb already rests. Search was
+  a second door to a screen the tab bar already opens. What the freed room buys is the
+  calendar filters staying on screen underneath.
+- **The theme is settable on a phone.** It was a button in the sidebar footer, which a
+  phone has no room for, so the only way to a dark calendar on one was to darken the
+  whole handset. The stylesheet always understood the override; what was missing was
+  anywhere to say it.
+- **Search leaves the desktop bar.** The sidebar carries it, and the same door twice on
+  one screen is one of them wasted.
+- **The longest bar takes the top lane in a month week.** A five-day trip drawn under a
+  one-day public holiday reads as though the holiday were the longer of the two, and the
+  trip's own row then changes height from day to day as shorter bars come and go beneath
+  it. Holidays were laid out first unconditionally, on the grounds that a public holiday
+  describes the day itself rather than something a member put in it; that reasoning
+  survives, narrowed — a holiday now wins a tie rather than the top outright, so it sits
+  above an ordinary event of the same length and below one that spans more of the week.
+
+### Fixed
+
+- **An all-day event pushed down the timed events of every day in its week.** The month
+  grid drew spanning bars above the timed chips as two stacked blocks, so the bar band
+  reserved its full height across all seven columns: one all-day event on Thursday moved
+  Monday's, Tuesday's and Wednesday's events down with it, on days with nothing all-day
+  about them. Measured on the demo calendar it cost 24px a lane, and a week carrying two
+  lanes lost 50px on every one of its days — in a row whose height is budgeted to the
+  pixel, where 96px holds the day number, three chips and their gaps and nothing else.
+  Bars and chips now share one grid, and a day's chips begin below the lanes that cover
+  *that day* rather than below all of them. A day the bar really does cover still clears
+  it, which is the half the obvious fix breaks: both are pinned by a browser test.
+- **The server said it had stopped while its scheduler was still running.** `runServe`
+  returned as soon as the HTTP server had shut down, but the scheduler finishes the tick
+  it is in and pings the systemd watchdog once more on its way out — so a goroutine was
+  still writing to the notify socket after "stopped" was logged, and a tick's database
+  work could be ended by process exit rather than finishing or being cancelled. It now
+  waits, bounded, so a scheduler wedged on a database that will not answer cannot hold
+  shutdown open either. Found because it made a test intermittent: a watchdog test
+  counting three pings saw four, the extra one belonging to a server the previous test
+  had already shut down.
+- **Two day sheets could stack.** Going from one day to another opened a second sheet
+  over the first, so closing the front one revealed the day you had just left. A new
+  sheet now replaces whatever is up.
+- **The round add button covered an event.** It floats over the calendar, centred, so on
+  a month needing six week rows it landed on the third chip of the middle column of the
+  last week — and three chips is the cap rather than an overflow, so there was no "+N"
+  beside them to say anything was hidden. The event was simply drawn under an opaque
+  circle. The grid keeps clear of it now, at no cost to any row's chips.
+- **The view switch changed size when an event was opened.** Opening the panel takes a
+  column from the calendar, and the bar answered by giving the switch a line of its own
+  and stretching it across the full width — on every screen, however much room was left.
+  On a wide monitor that drew a second grey bar under the month, and the bar changed
+  shape every time an event was opened or closed. The switch keeps the width of its two
+  words, and the row wraps only when the line is genuinely full.
+
 ## [0.6.0] — 2026-07-28
 
 The numbering jumps from 0.2.0 because this release carries the whole of milestones 0.3
@@ -1275,7 +1352,8 @@ First working version: in use by one household, not yet by anyone else.
 - Never upgraded in place: expand/contract migrations are implemented and tested, but
   no release has yet followed another on a live database.
 
-[Unreleased]: https://github.com/d-weber/almanack/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/d-weber/almanack/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/d-weber/almanack/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/d-weber/almanack/compare/v0.2.0...v0.6.0
 [0.2.0]: https://github.com/d-weber/almanack/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/d-weber/almanack/releases/tag/v0.1.0
