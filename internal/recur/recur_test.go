@@ -538,7 +538,7 @@ func TestLast(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := Last(tc.r)
+			got, ok := lastWithin(t, tc.r)
 			if ok != tc.wantOK {
 				t.Fatalf("Last() ok = %v, want %v (got %s)", ok, tc.wantOK, got)
 			}
@@ -546,6 +546,46 @@ func TestLast(t *testing.T) {
 				t.Errorf("Last() = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// lastCallBudget is six orders of magnitude more than Last has ever needed and a fiftieth
+// of the timeout it is here to pre-empt.
+const lastCallBudget = 10 * time.Second
+
+// lastWithin is Last with a deadline, because the row above it that matters most cannot
+// otherwise fail in a way anybody can read.
+//
+// Last's first line refuses a rule Validate rejects, and the "invalid rule" row is the
+// only thing holding that line in place. Take it away and Last hands an interval of zero
+// to eachDaily, which advances the date by nothing and never reaches the end of the
+// window: the test does not fail, it hangs, and the package reports "test timed out
+// after 10m0s" with a stack trace instead of "an unusable rule was expanded". That costs
+// the whole job's budget and names no defect, which is the worst of both — a guard whose
+// absence is indistinguishable from a slow machine is not a guard.
+//
+// Waiting on a channel rather than bounding the loop from inside because the bound
+// belongs to the test, not to Last: a rule Validate has accepted terminates by
+// construction, its probe widening until it has seen the series whole. The goroutine is
+// abandoned if the deadline passes, which is correct here — the process is about to fail
+// and exit, and there is nothing to clean up that outlives it.
+func lastWithin(t *testing.T, r domain.Recurrence) (domain.Date, bool) {
+	t.Helper()
+	type answer struct {
+		d  domain.Date
+		ok bool
+	}
+	done := make(chan answer, 1)
+	go func() {
+		d, ok := Last(r)
+		done <- answer{d, ok}
+	}()
+	select {
+	case a := <-done:
+		return a.d, a.ok
+	case <-time.After(lastCallBudget):
+		t.Fatalf("Last() did not answer within %s: it is expanding a rule it should have refused (%+v)", lastCallBudget, r)
+		return domain.Date{}, false
 	}
 }
 
