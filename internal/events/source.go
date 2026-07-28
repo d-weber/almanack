@@ -2,6 +2,7 @@ package events
 
 import (
 	"fmt"
+	"strings"
 
 	"almanack/internal/domain"
 )
@@ -90,6 +91,36 @@ func DigestSourceRef(day domain.Date) string {
 // SummarySourceRef identifies a user's batched activity summary for one day.
 func SummarySourceRef(day domain.Date) string {
 	return fmt.Sprintf("summary:%s", day)
+}
+
+// TestSourceRef identifies the notification the "send me a test" button files.
+//
+// It is a reminder as far as delivery is concerned — same payload, same channels, so the
+// button exercises the real pipeline rather than a special path that could work while
+// the real one is broken — but the planner never produces one. That is why it has a
+// reference of its own rather than a reminder's: PlannerOwns below is what keeps the
+// outbox reconciliation, which deletes undelivered reminder rows a pass no longer calls
+// for, from deleting the one row no pass will ever call for. Without it a test
+// notification was dropped by the next planning pass, which on a thirty-second tick is
+// most of them, and the button reported success having sent nothing.
+func TestSourceRef(userID int64, nonce int64) string {
+	return fmt.Sprintf("test:%d:%d", userID, nonce)
+}
+
+// PlannerOwns reports whether a queued row's reference is one a planning pass produces,
+// and therefore whether reconcile may delete it when a pass no longer calls for it.
+//
+// Asked of the reference rather than of the kind, because the two can disagree: a test
+// notification is filed under the reminder kind so that it travels the reminder's
+// delivery path, and the kind alone would hand it to a reconciliation that recomputes
+// every reminder from the calendar and finds no reason for this one.
+func PlannerOwns(sourceRef string) bool {
+	for _, prefix := range []string{"reminder:", "digest:", "summary:", "activity:"} {
+		if strings.HasPrefix(sourceRef, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ActivitySourceRef identifies a single activity notification: the change it announces

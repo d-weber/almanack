@@ -140,6 +140,13 @@ func (n *Notifier) reconcile(ctx context.Context, from, to time.Time) error {
 	}
 	removed := 0
 	for _, row := range rows {
+		if !events.PlannerOwns(row.SourceRef) {
+			// A row no pass produces is a row no pass can vouch for. The "send me a
+			// test" button files one under the reminder kind on purpose, so that it
+			// travels the real delivery path, and this used to delete it before it was
+			// ever sent — on a thirty-second tick, almost always.
+			continue
+		}
 		if n.planned[queueKey(row.UserID, row.Kind, row.SourceRef, row.DueAt)] {
 			continue
 		}

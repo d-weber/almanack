@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"almanack/internal/domain"
+	"almanack/internal/events"
 )
 
 func (s *Server) handleGetPrefs(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +232,7 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.EnqueueNotification(ctx, domain.QueuedNotification{
 		UserID:    user.ID,
 		Kind:      domain.KindReminder,
-		SourceRef: "test:" + strconv.FormatInt(user.ID, 10) + ":" + strconv.FormatInt(now.UnixNano(), 10),
+		SourceRef: events.TestSourceRef(user.ID, now.UnixNano()),
 		Payload:   string(payload),
 		DueAt:     now,
 	}); err != nil {

@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -166,6 +167,16 @@ func NewSender(vapidPublicB64, vapidPrivateB64, subject string, hc *http.Client)
 	if err != nil {
 		return nil, fmt.Errorf("webpush: vapid keys: %w", err)
 	}
+	// Re-encoded from the key itself rather than trimmed from what was configured.
+	// decodeKeyMaterial deliberately accepts the standard base64 alphabet as well as
+	// base64url, so a key pasted from a generator that emits '+' and '/' parses and
+	// signs correctly — but the string went on to be published verbatim as the `k=`
+	// parameter of the Authorization header and as PublicKey(), where it is neither
+	// valid base64url nor the same key any push service or browser would recognise.
+	pubBytes, err := priv.PublicKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("webpush: encode vapid public key: %w", err)
+	}
 	subject = strings.TrimSpace(subject)
 	if !strings.HasPrefix(subject, "mailto:") && !strings.HasPrefix(subject, "https://") {
 		return nil, fmt.Errorf("webpush: vapid subject %q must be a mailto: or https: URI", subject)
@@ -178,7 +189,7 @@ func NewSender(vapidPublicB64, vapidPrivateB64, subject string, hc *http.Client)
 	return &Sender{
 		Clock:     clock.Real{},
 		priv:      priv,
-		publicB64: strings.TrimRight(strings.TrimSpace(vapidPublicB64), "="),
+		publicB64: base64.RawURLEncoding.EncodeToString(pubBytes),
 		subject:   subject,
 		hc:        &client,
 	}, nil

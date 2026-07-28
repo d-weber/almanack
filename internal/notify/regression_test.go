@@ -1978,3 +1978,45 @@ func TestAChangeIsReportedByExactlyOneSummary(t *testing.T) {
 			counted["2027-06-02"])
 	}
 }
+
+// The "send me a test" button files a row under the reminder kind on purpose, so that
+// it travels the real delivery path rather than a special one that could work while the
+// real one is broken. Reconciliation deletes undelivered reminder rows a planning pass
+// no longer calls for, and no pass ever calls for this one — so the next tick deleted
+// it, which on a thirty-second tick is almost always. The button reported success and
+// nothing arrived.
+func TestATestNotificationSurvivesTheNextPlanningPass(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+
+	now := e.clk.Now().UTC().Truncate(time.Second)
+	ref := events.TestSourceRef(u.ID, now.UnixNano())
+	if err := e.st.EnqueueNotification(e.ctx, domain.QueuedNotification{
+		UserID: u.ID, Kind: domain.KindReminder, SourceRef: ref,
+		Payload: `{"kind":"reminder","title":"Test"}`, DueAt: now,
+	}); err != nil {
+		t.Fatalf("queue the test notification: %v", err)
+	}
+
+	e.plan()
+
+	if _, ok := findRow(e.queueOfKind(domain.KindReminder), ref); !ok {
+		t.Fatal("the test notification was deleted by the planning pass that followed it")
+	}
+
+	// And it goes out, which is the whole point of the button.
+	e.dispatch()
+	row, ok := findRow(e.queueOfKind(domain.KindReminder), ref)
+	if !ok {
+		t.Fatal("the test notification disappeared during delivery")
+	}
+	if row.SentAt.IsZero() {
+		t.Errorf("the test notification was never sent: %+v", row)
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("push deliveries = %d, want 1", got)
+	}
+}
