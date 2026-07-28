@@ -46,7 +46,6 @@ const CONFIRM_THROTTLE_MS = 60 * 60 * 1000;
 // that it does not travel inside one.
 const TZ_SETTING = 'ALMANACK_TZ';
 
-
 const root = document.getElementById('app');
 let chromeEl = null;
 let viewEl = null;

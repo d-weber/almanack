@@ -1,8 +1,9 @@
-// Three browser regressions from an adversarial review of the built application.
+// Browser regressions from reviewing and from using the built application.
 //
 // Each is a thing the Go tests structurally cannot reach: a link built in the browser
 // from data the browser cannot correctly guess, a paging observer that survives being
-// disconnected, and a URL that stops the app booting before any of it runs.
+// disconnected, a URL that stops the app booting before any of it runs, and a URL for a
+// view that no longer exists.
 //
 // Every test starts already signed in, from the session auth.setup.js saved, and the
 // one that creates an event deletes it again in a finally — through the API, whether
@@ -141,4 +142,18 @@ test('a malformed escape in the hash does not stop the app booting', async ({ pa
   await page.getByRole('button', { name: 'Month', exact: true }).click();
   await page.getByRole('button', { name: 'Today', exact: true }).click();
   await expect(page.getByText("Leo's dentist").first()).toBeVisible({ timeout: 15_000 });
+});
+
+test('a bookmarked weekly view lands on the month rather than on nothing', async ({ page }) => {
+  // The weekly view was removed, and #/week is what anyone who had it open still has in
+  // the address bar — a bookmark, an open tab, a shared link. It resolves through the
+  // router's notFound handler, which is a general fallback rather than anything this
+  // change added: nothing in the removal itself holds that route open, so the upgrade
+  // path for those readers rests on a line in another file that no test names.
+  await page.goto('/#/week');
+
+  await expect(page.locator('.month-grid')).toBeVisible({ timeout: 15_000 });
+  // Replaced rather than pushed, so Back leaves the app instead of returning to a view
+  // that no longer exists and bouncing forward again.
+  await expect.poll(() => page.evaluate(() => location.hash)).not.toContain('week');
 });
