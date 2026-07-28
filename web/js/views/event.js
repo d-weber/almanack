@@ -287,12 +287,17 @@ function formFromOccurrence(occ, rec, reminders) {
  * still read as they did.
  *
  * When the clocks go back, a wall time inside the repeated hour names two instants and
- * `wallToInstant()` answers the later one, always. Re-deriving an endpoint nobody
- * touched therefore moves it: a start on the first pass lands after an end on the
- * second, so a save that changed nothing is refused, and an event lying wholly on the
- * first pass moves an hour later with nothing on screen to say so. An endpoint that was
- * actually edited has only its wall clock to go on and resolves as before, to the
- * second pass.
+ * `wallToInstant()` resolves it to one of them. Which one is not a policy this code
+ * chooses: it follows the sign of the zone's offset, the same way the skipped hour does,
+ * and the recurrence policy table in docs/architecture.md is where that is written down.
+ * Do not restate it here — a second statement is a second thing to keep true, and the
+ * one that used to be here ("the later one, always") was false for every zone west of
+ * Greenwich.
+ *
+ * What matters here holds either way: re-deriving an endpoint nobody touched can move it,
+ * so a save that changed nothing is refused, and an event lying wholly on one pass moves
+ * an hour with nothing on screen to say so. An endpoint that was actually edited has only
+ * its wall clock to go on and resolves as any other wall time does.
  */
 function instantFor(form, which) {
   const was = form.pristine && form.pristine[which];
