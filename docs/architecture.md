@@ -436,6 +436,17 @@ calendar is readable offline. Its push handler always displays a notification, i
 generic fallback when a payload cannot be parsed — iOS revokes a subscription after roughly
 three pushes that display nothing, so a silent push is a bug and never an optimisation.
 
+`/api/v1/me` is cached along with the rest, and that is the decision offline reading turns
+on rather than an oversight. The app asks for it before it renders anything, so making it
+uncacheable does not merely harden the boot — it removes offline boot altogether: with no
+network the request throws, the session is cleared, and the app routes to a login screen
+whose own request fails too. A phone in a dead zone, checking what time the thing is, is
+precisely the reader the cache exists for. What is accepted in exchange is that a session
+revoked on the server still boots authenticated offline and shows the calendar it last
+saw, until the device is back on the network and the real answer arrives. Reaching that
+state needs physical possession of an unlocked device; the case somebody can actually
+arrange — signing out — is covered by the purge below.
+
 Those cached `/api/` responses belong to a session rather than to the device. Ending one —
 the sign-out button, a 401 from the server, a boot that could not load a session — goes
 through `clearSession()` in `js/state.js`, which asks the worker to delete every `/api/`

@@ -8,6 +8,15 @@
 //    belong to a session: signing out purges them (js/state.js asks; the message
 //    handler below does it), and they are capped so an install that stays on a home
 //    screen for a year does not keep every range and search it ever loaded.
+//  * /api/v1/me is cached like the rest, deliberately, and that is what makes an
+//    offline cold boot possible at all: the app asks for it before it renders anything,
+//    so an uncacheable /me means a phone with no signal shows the login screen — whose
+//    own request then fails too — instead of the calendar it was opened to check. The
+//    price is that a session revoked server-side still boots authenticated offline, and
+//    shows the last calendar it saw until the device is back on the network. That is
+//    accepted (#14): it needs physical possession of an unlocked device, the deliberate
+//    case is already covered by the purge above, and refusing it would take the feature
+//    away from exactly the person it exists for.
 //  * EVERY push shows a notification, including a generic fallback when the payload
 //    is missing or unparseable. iOS revokes the subscription after roughly three
 //    silent pushes — a silent push is a bug, never an optimisation.
