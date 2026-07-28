@@ -267,6 +267,23 @@ func TestWallClockResolvesOntoTheDayItWasAskedFor(t *testing.T) {
 			if bucket := DateIn(got, loc); !bucket.Equal(d) {
 				t.Errorf("%s %02d:%02d in %s lands on %s, which is not the day it was asked for", tc.date, tc.hour, tc.min, tc.zone, bucket)
 			}
+
+			// The midnight rows belong to Date.In as much as to Date.At — it is the one
+			// that is a day boundary in Store.EventsInRange and in the activity count
+			// behind a summary — and asking only its neighbour leaves it free to go back
+			// to bare time.Date without a single test noticing. It is not a synonym for
+			// At(0, 0): a day with two midnights is In's business and not At's, which is
+			// why the answer is restated here rather than compared to the row above.
+			if tc.hour != 0 || tc.min != 0 {
+				return
+			}
+			first := d.In(loc)
+			if s := first.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s.In(%s) = %s, want %s (%s)", tc.date, tc.zone, s, tc.wantUTC, tc.note)
+			}
+			if bucket := DateIn(first, loc); !bucket.Equal(d) {
+				t.Errorf("%s.In(%s) lands on %s, which is not the day it was asked for", tc.date, tc.zone, bucket)
+			}
 		})
 	}
 }
