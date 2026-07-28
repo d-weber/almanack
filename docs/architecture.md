@@ -298,6 +298,17 @@ changes, whether a quiet day is worth sending at all — are read from the calen
 delivery, along with the wording, per recipient and in their language. Two days is long
 enough for a day to be rearranged twice.
 
+**A summary counts what the activity screen shows, and both ignore `participating_only`.**
+That preference governs the per-change path only: it decides whether one edit is pushed to
+one member, and `planOneActivity` honours it. The daily summary is a count, and the
+notification it produces opens `/#/activity` — so the number has to agree with the list it
+opens, and that list is the calendars the member belongs to, unfiltered. Filtering the
+count alone would have been the worse bug of the two: a push saying three changes, opening
+a screen showing five, with nothing on either to explain the difference. Muted calendars
+are excluded from both, because muting is about the calendar rather than about one change.
+Someone who wants only their own events sees that filter on the calendar itself, not in
+the change feed.
+
 **Delivery is at-least-once.** `sent_at` is set only after a push service or the MTA
 accepts the message. A crash between sending and marking may duplicate a notification —
 that is the correct trade, because a duplicate reminder is annoying and a missed one is the
