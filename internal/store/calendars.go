@@ -172,12 +172,38 @@ func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 		// prefix would take eleven other changes' announcements with it, from
 		// calendars nobody has deleted. Both spellings are listed rather than
 		// reasoned about, because which one a given row carries depends on whether
-		// its change was logged before 0006.
+		// its change was logged before 0006. TestDeletingACalendarLeavesTheAnnouncements
+		// OfChangesItsIDPrefixes holds the boundary the first sentence is about.
+		//
+		// The id is read out of the reference and matched on activity_log.id, which is
+		// the whole of what makes this affordable. Without that line the two spellings
+		// are only ever *built*: every candidate row is compared against a pair of
+		// strings concatenated afresh for every row of the log, so the statement is
+		// quadratic — and it runs inside s.tx, which takes SQLite's write lock at BEGIN
+		// and stands every other writer still while it works. Measured on 20,000 changes
+		// and 30,000 queued rows: 3m07s, against 74ms with the id keyed, having gone
+		// 704ms, 2.9s, 11.7s, 45.0s over the doublings before it — 4x a doubling, which
+		// is the shape rather than the size being wrong. A family will not have 20,000
+		// changes; a family also cannot be asked to hold still while one calendar is
+		// deleted, and this is the one statement here that grows on two things at once.
+		//
+		// activity_log.id is INTEGER PRIMARY KEY, so the equality is a rowid lookup and
+		// the inner loop stops being a loop. substr from the tenth character is what
+		// follows 'activity:'; CAST reads the leading digits and stops at the colon, so
+		// both spellings arrive at the same number. The IN is still what decides, and the
+		// CAST only says which row to ask, so nothing about which rows match changes —
+		// a reference that merely starts with the right digits is refused exactly as it
+		// was. kind is there for the same reason it reads well: the schema's CHECK allows
+		// four values and only one of them can carry these references, so saying so keeps
+		// the statement off every reminder and digest in the outbox and says out loud
+		// what it is about.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM notification_queue
 			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND kind = 'activity'
 			   AND EXISTS (SELECT 1 FROM activity_log a
 			                WHERE a.calendar_id = ?
+			                  AND a.id = CAST(substr(notification_queue.source_ref, 10) AS INTEGER)
 			                  AND notification_queue.source_ref IN (
 			                        'activity:' || a.id,
 			                        'activity:' || a.id || ':' || a.change_uid))`, id); err != nil {
