@@ -105,7 +105,7 @@ func TestTimedReminderDueTime(t *testing.T) {
 			e.clk.Set(tc.occDate.AddDays(-1).At(12, 0, paris))
 			e.plan()
 
-			ref := events.ReminderSourceRef(ev.ID, tc.occDate, reminderIDOf(t, e, u.ID))
+			ref := events.ReminderSourceRef(ev.ID, tc.occDate, reminderIDOf(t, e, u.ID), ev.EventUID)
 			row, ok := findRow(e.queue(), ref)
 			if !ok {
 				t.Fatalf("no queued reminder for %s (source %q)", tc.occDate, ref)
@@ -747,7 +747,7 @@ func (e *env) failFanOutOf(a domain.Activity) {
 		CREATE TRIGGER test_fan_out_failure BEFORE INSERT ON notification_queue
 		WHEN NEW.source_ref = '%s'
 		BEGIN SELECT RAISE(ABORT, 'the database is briefly unavailable'); END`,
-		events.ActivitySourceRef(a.ID)))
+		events.ActivitySourceRef(a)))
 	if err != nil {
 		e.t.Fatalf("install the failure: %v", err)
 	}

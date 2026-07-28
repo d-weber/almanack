@@ -483,6 +483,87 @@ func TestDevRoutesAreNotMountedOutsideDevMode(t *testing.T) {
 	e.post("/dev/tick", nil).expect(http.StatusNotFound)
 	e.post("/dev/clock", map[string]string{"advance": "1h"}).expect(http.StatusNotFound)
 	e.post("/dev/seed", nil).expect(http.StatusNotFound)
+	e.post("/dev/ratelimits/reset", nil).expect(http.StatusNotFound)
+}
+
+// Dev mode is not exempt from the login limiter — it holds the same eight tokens and
+// refills at the same one per twenty seconds there as anywhere else, which is what
+// TestLoginRateLimit asserts on a dev-mode server. What dev mode adds is a way to empty
+// the buckets without restarting the process, for the developer who has just mistyped a
+// password eight times and for the browser suite, which signs in twice a run from one
+// address and used to exhaust the burst after a handful of runs (#66).
+func TestDevForgetsTheRateLimitBuckets(t *testing.T) {
+	e := newEnv(t)
+	e.createUser("maman@example.org", "Maman")
+
+	burst := rateLimits["login"].burst
+	for i := 0; i < burst; i++ {
+		e.post("/api/v1/auth/login", map[string]string{
+			"email": "maman@example.org", "password": "wrong",
+		}).expect(http.StatusUnauthorized)
+	}
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusTooManyRequests)
+
+	res := e.post("/dev/ratelimits/reset", nil).expect(http.StatusOK)
+	var reset struct {
+		Forgotten int `json:"forgotten"`
+	}
+	res.decode(&reset)
+	if reset.Forgotten == 0 {
+		t.Errorf("reported forgetting no buckets, with a spent one to forget")
+	}
+
+	// The whole burst is back, not one token: a reset that handed out a single attempt
+	// would leave the suite failing on its second sign-in instead of its first, which is
+	// a worse bug than the one it replaced.
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusOK)
+	for i := 0; i < burst-1; i++ {
+		e.post("/api/v1/auth/login", map[string]string{
+			"email": "maman@example.org", "password": "wrong",
+		}).expect(http.StatusUnauthorized)
+	}
+
+	// And the limiter still bites afterwards. Emptying a bucket must not be a way of
+	// turning it off.
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusTooManyRequests)
+}
+
+// The other half of the argument above, and the one that matters: outside dev mode
+// nothing can empty the login bucket. The route is not registered rather than registered
+// and guarded, so there is no path to guess at, and the only thing that gives an attacker
+// their attempts back is the clock — which is the control itself.
+func TestTheLoginBucketCannotBeEmptiedOutsideDevMode(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.Dev = false })
+	e.createUser("maman@example.org", "Maman")
+
+	limit := rateLimits["login"]
+	for i := 0; i < limit.burst; i++ {
+		e.post("/api/v1/auth/login", map[string]string{
+			"email": "maman@example.org", "password": "wrong",
+		}).expect(http.StatusUnauthorized)
+	}
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusTooManyRequests)
+
+	// Every spelling of the dev route, including the ones a refactor might leave behind.
+	for _, path := range []string{"/dev/ratelimits/reset", "/dev/ratelimits", "/dev/reset", "/dev/"} {
+		e.post(path, nil).expect(http.StatusNotFound)
+	}
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusTooManyRequests)
+
+	e.clk.Advance(2 * limit.refill)
+	e.post("/api/v1/auth/login", map[string]string{
+		"email": "maman@example.org", "password": testPassword,
+	}).expect(http.StatusOK)
 }
 
 func TestDevDashboardAndTimeTravel(t *testing.T) {

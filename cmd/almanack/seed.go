@@ -149,9 +149,11 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 		return err
 	}
 
+	// A second day with something on it, beside today rather than always after it.
+	evening := parentsEvening(today)
 	if _, err := svc.Create(ctx, ids["Dad"], events.Input{
 		CalendarID: calIDs[family], Title: "Parents' evening",
-		StartsAt: at(today.AddDays(1), 18, 0), EndsAt: at(today.AddDays(1), 19, 0),
+		StartsAt: at(evening, 18, 0), EndsAt: at(evening, 19, 0),
 		Location: "Elm Park School", LabelID: label(family, 1),
 		Participants: []int64{ids["Mum"], ids["Dad"]},
 	}); err != nil {
@@ -160,9 +162,10 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 
 	// A multi-day all-day event: the case that breaks calendars which store all-day
 	// events as midnight instants.
+	holidayStart, holidayEnd := seasideHoliday(today)
 	if _, err := svc.Create(ctx, ids["Mum"], events.Input{
 		CalendarID: calIDs[family], Title: "Seaside holiday", AllDay: true,
-		StartDate: today.AddDays(10), EndDate: today.AddDays(16),
+		StartDate: holidayStart, EndDate: holidayEnd,
 		Location: "Whitstable", LabelID: label(family, 2),
 		Participants: []int64{ids["Mum"], ids["Dad"], ids["Leo"], ids["Gran"]},
 	}); err != nil {
@@ -170,10 +173,10 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}
 
 	// A weekly series, with one occurrence moved and a later one cancelled.
-	nextTuesday := nextWeekday(today, time.Tuesday)
+	firstSwim, movedDate, cancelledDate := swimmingSeries(today)
 	swimming, err := svc.Create(ctx, ids["Dad"], events.Input{
 		CalendarID: calIDs[kids], Title: "Swimming",
-		StartsAt: at(nextTuesday, 17, 30), EndsAt: at(nextTuesday, 18, 30),
+		StartsAt: at(firstSwim, 17, 30), EndsAt: at(firstSwim, 18, 30),
 		Location: "Leisure centre", LabelID: label(kids, 3),
 		Participants: []int64{ids["Leo"], ids["Dad"]},
 		Recurrence:   &domain.Recurrence{Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}},
@@ -188,7 +191,6 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 			return err
 		}
 	}
-	movedDate := nextTuesday.AddDays(7)
 	if _, err := svc.Update(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, movedDate, events.Input{
 		Title:    "Swimming (later than usual)",
 		StartsAt: at(movedDate, 19, 0), EndsAt: at(movedDate, 20, 0),
@@ -197,7 +199,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}); err != nil {
 		return fmt.Errorf("seed moved occurrence: %w", err)
 	}
-	if err := svc.Delete(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, nextTuesday.AddDays(21)); err != nil {
+	if err := svc.Delete(ctx, ids["Dad"], swimming.ID, domain.ScopeThis, cancelledDate); err != nil {
 		return fmt.Errorf("seed cancelled occurrence: %w", err)
 	}
 
@@ -224,7 +226,9 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 		return err
 	}
 
-	saturday := nextWeekday(today, time.Saturday)
+	// A one-off evening out, kept close to today rather than pinned to the month the way
+	// the two series are.
+	saturday := cinemaNight(today)
 	if _, err := svc.Create(ctx, ids["Dad"], events.Input{
 		CalendarID: calIDs[parents], Title: "Cinema",
 		StartsAt: at(saturday, 20, 30), EndsAt: at(saturday, 22, 45),
@@ -234,7 +238,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 	}
 
 	// Every second Wednesday: interval anchoring, visible over a month.
-	wednesday := nextWeekday(today, time.Wednesday)
+	wednesday := guitarSeries(today)
 	if _, err := svc.Create(ctx, ids["Mum"], events.Input{
 		CalendarID: calIDs[kids], Title: "Guitar lesson",
 		StartsAt: at(wednesday, 14, 0), EndsAt: at(wednesday, 15, 0),
@@ -257,6 +261,127 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
   a multi-day holiday, a yearly birthday and a last-day-of-month rule.
 `, cfg.DataPath, seedPassword)
 	return nil
+}
+
+// swimmingSeries returns the three dates the demo's weekly series is built from: the
+// Tuesday it starts on, the occurrence moved to the evening, and the one cancelled.
+//
+// They are counted from the first Tuesday of the seeded month rather than from the
+// seeded day, because the month view is the screen this demo opens on and all three
+// are the point of the series. Its grid runs from the start of the week holding the
+// 1st to the end of the week holding the last day, less a trailing row lying wholly
+// outside the month (monthGrid, web/js/dates.js) — so every day of the month is on it
+// and days either side of the month are on it only sometimes. Counting from the 1st
+// bounds the three at the 7th, the 14th and the 28th, which the shortest February
+// still has. Counting from the seeded day did not bound them at all: the next Tuesday
+// after today is up to seven days out, so seeding on a Tuesday put the first
+// occurrence a week ahead and off the end of a five-row grid, taking the moved one
+// and the cancelled one with it, and the demo opened on a series with nothing to show
+// for itself. The last-day-of-month rule below is anchored to the month for the same
+// reason.
+func swimmingSeries(today domain.Date) (start, moved, cancelled domain.Date) {
+	// The first of any weekday falls on the 1st to the 7th, so this always exists.
+	start, _ = domain.NthWeekdayOfMonth(today.Year, today.Month, time.Tuesday, 1)
+	return start, start.AddDays(7), start.AddDays(21)
+}
+
+// guitarSeries returns the Wednesday the demo's fortnightly series starts on: the first
+// of the seeded month, for the reason swimmingSeries gives above.
+//
+// A series is held to a harder standard than a single event, because one chip on a grid
+// is not a series. What this one is in the seed to show is interval anchoring — that
+// "every second Wednesday" skips the weeks in between — and that needs two occurrences on
+// the month the app opens on. From the first Wednesday they fall on the 7th at the latest
+// and the 21st at the latest, both days of the month and so both on its grid. From the
+// next Wednesday after today, the first could already be in the following month, which
+// near the end of a month is what it was.
+func guitarSeries(today domain.Date) domain.Date {
+	first, _ := domain.NthWeekdayOfMonth(today.Year, today.Month, time.Wednesday, 1)
+	return first
+}
+
+// cinemaNight returns the day the demo's one-off evening out is on: the coming Saturday,
+// counting today, and never the one belonging to the next month.
+//
+// It is deliberately not pinned to a fixed Saturday of the month the way the two series
+// are. A one-off is supposed to sit near the day the demo was made — "what is coming up"
+// is half of what the opening screen is for — and a cinema outing pinned to the first
+// Saturday would be three weeks stale by the end of a month. What it does have to avoid
+// is the far end: nextWeekday() reads "today is already Saturday" as next week, so this
+// was up to seven days out, and seven days out can be past the end of a five-row grid
+// (see swimmingSeries). Counting today is both the realistic answer and the shorter one,
+// and a Saturday that has landed in the next month steps back a week rather than being
+// dropped — on the last days of a month the outing is then a few days behind rather than
+// a few days ahead, which is a thing calendars hold, unlike an event nobody can see.
+//
+// The step back is always inside the seeded month: the coming Saturday only leaves the
+// month when today is within six days of its end, and a week before that is the 15th at
+// the earliest.
+func cinemaNight(today domain.Date) domain.Date {
+	saturday := today
+	if saturday.Weekday() != time.Saturday {
+		saturday = nextWeekday(today, time.Saturday)
+	}
+	if saturday.Year != today.Year || saturday.Month != today.Month {
+		saturday = saturday.AddDays(-7)
+	}
+	return saturday
+}
+
+// seasideHoliday returns the week the demo's multi-day all-day event covers: the second
+// Saturday of the seeded month, and the six days after it.
+//
+// A span is held to both of its ends, which is what makes this one different from the
+// three fixed before it. A bar is on the screen the app opens on only if the day it
+// begins and the day it finishes are both days of the seeded month, and seven days need
+// seven consecutive ones: a week fits only if it starts on or before the 22nd of a
+// 28-day February, the 25th of a 31-day month. Counted from the seeded day it respected
+// neither end — it ran from today + 10 to today + 16 — so on a third of the days the seed
+// could be run the whole week was in the following month, and the demo opened on no
+// holiday at all, which is the one thing the seeder's own summary promises of that
+// screen.
+//
+// It is pinned to the month rather than kept near today, which is the opposite of the
+// choice cinemaNight makes, because a week-long span leaves no room for the choice.
+// "Ahead of today" exists only while today is more than six days from the end of the
+// month; past that the nearest week that fits is whichever one ends on the last day, so
+// clamping the old anchor rather than replacing it would have jammed the holiday against
+// the month's edge on more than half of the days the seed can be run — a placement that
+// reads as an artefact of seeding rather than as a holiday anyone booked. What this event
+// is in the seed for is the awkward rendering case rather than what is coming up: three
+// other seeded events sit within a week of today, and a rendering case is served by being
+// plainly and wholly on the screen, not by being recent.
+//
+// The second Saturday falls on the 8th to the 14th, so the week ends on the 14th to the
+// 20th — clear of both ends of every month, February included. Saturday because that is
+// the day a week by the sea starts on, and because seven days from one are drawn in two
+// week rows for both of the week starts the settings screen offers: a seven-day span sits
+// in a single row exactly when it begins on the reader's first day of the week, and one
+// row does not show the continuation the bar layout in web/js/views/month.js exists for.
+func seasideHoliday(today domain.Date) (start, end domain.Date) {
+	// The second of any weekday falls on the 8th to the 14th, so this always exists.
+	start, _ = domain.NthWeekdayOfMonth(today.Year, today.Month, time.Saturday, 2)
+	return start, start.AddDays(6)
+}
+
+// parentsEvening returns the day the demo's school evening is on: tomorrow, or yesterday
+// when tomorrow belongs to the next month.
+//
+// It is the last of the seeded dates that was counted blindly from the day the seed ran,
+// and the mildest case of it: one day out leaves the month only on the last day of one,
+// and leaves the grid only when that day is also the last day of a week — three days in
+// 2026 and 2027 for a reader whose week begins on a Monday, three others for a reader
+// whose week begins on a Sunday. Mild is still invisible on the days it happens, and the
+// remedy is the one cinemaNight already uses: step back rather than cross. That keeps the
+// appointment beside today, which is the whole of what it is doing in the seed, and
+// inside the month, which is the set of days every reader's grid holds. The day before
+// the last day of a month is the 27th at the earliest, so the step back never leaves it.
+func parentsEvening(today domain.Date) domain.Date {
+	tomorrow := today.AddDays(1)
+	if tomorrow.Year != today.Year || tomorrow.Month != today.Month {
+		return today.AddDays(-1)
+	}
+	return tomorrow
 }
 
 // nextWeekday returns the next occurrence of wd strictly after d.

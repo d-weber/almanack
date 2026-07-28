@@ -334,6 +334,85 @@ func TestBrokenHoursFollowTheZoneRatherThanAPolicy(t *testing.T) {
 	}
 }
 
+// TestSeriesInAZoneThatJumpsAtMidnightStaysOnItsOwnDay is the regression test for the
+// occurrence that went missing from the calendar altogether (#57).
+//
+// The two rules above answer "which instant"; this one answers "which day", and the
+// second does not follow from the first. An occurrence carries the date its recurrence
+// asked for, but every bucket in the application — this package's overlaps(), the
+// planner's, the month grid's — reads the day off the instant instead, because that is
+// the only thing an occurrence still has by the time it reaches them. So the moment the
+// two disagree, the occurrence is filed under a day nobody asked for.
+//
+// A zone that jumps at midnight makes them disagree. Chile abolishes the hour after
+// midnight on 6 September 2026, so a 00:30 series has no 00:30 that morning, and the
+// correction that a negative offset produces landed it at 23:30 on the 5th: the query
+// for the 6th returned nothing at all, and the one for the 5th returned a lesson the
+// family had never put there. Not a display fault — a query for the day it was on
+// answered zero, so the reminder and the digest for that day missed it too.
+//
+// The series is deliberately fifteen minutes long. An hour-long one straddles midnight
+// from the wrong side and so is still dragged into the 6th by its end, which hides the
+// fault behind an occurrence that looks roughly right.
+func TestSeriesInAZoneThatJumpsAtMidnightStaysOnItsOwnDay(t *testing.T) {
+	santiago, err := time.LoadLocation("America/Santiago")
+	if err != nil {
+		t.Skipf("no tzdata available: %v", err)
+	}
+	f := newFixtureIn(t, santiago, nil)
+
+	if _, err := f.svc.Create(context.Background(), f.maman, Input{
+		CalendarID: f.cal, Title: "Astronomie",
+		StartsAt: f.at("2026-08-30", 0, 30), EndsAt: f.at("2026-08-30", 0, 45),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Sunday},
+		},
+	}); err != nil {
+		t.Fatalf("create series: %v", err)
+	}
+
+	// One day at a time, which is how a day view asks and how the fault shows: the
+	// middle row answered zero occurrences before this was fixed.
+	days := []struct {
+		date, wantWall, note string
+	}{
+		{date: "2026-08-30", wantWall: "00:30 -04", note: "the Sunday before the change"},
+		{
+			date: "2026-09-06", wantWall: "01:30 -03",
+			note: "the morning with no 00:30 in it; the answer this replaces was 23:30 on the 5th",
+		},
+		{date: "2026-09-13", wantWall: "00:30 -03", note: "the Sunday after, back to an ordinary 00:30"},
+	}
+	for _, d := range days {
+		occ := f.occurrences(t, d.date, d.date)
+		if len(occ) != 1 {
+			t.Fatalf("%s (%s): %d occurrences, want 1 — the series asked for this day", d.date, d.note, len(occ))
+		}
+		if got := occ[0].OccurrenceDate.String(); got != d.date {
+			t.Errorf("%s: the occurrence returned is %s's", d.date, got)
+		}
+		if got := occ[0].StartsAt.In(f.loc).Format("15:04 -07"); got != d.wantWall {
+			t.Errorf("%s (%s): starts at %s locally, want %s", d.date, d.note, got, d.wantWall)
+		}
+	}
+
+	// And the day it used to be filed under holds nothing: a fix that put the occurrence
+	// on both days would satisfy the loop above.
+	if occ := f.occurrences(t, "2026-09-05", "2026-09-05"); len(occ) != 0 {
+		t.Errorf("5 September holds %d occurrences, want none — nothing was ever asked for that day", len(occ))
+	}
+
+	// The invariant underneath all of it, over a window wide enough to hold the change:
+	// the day an occurrence says it is on is the day its instant is on.
+	for _, o := range f.occurrences(t, "2026-08-01", "2026-10-31") {
+		if bucket := domain.DateIn(o.StartsAt, f.loc); !bucket.Equal(o.OccurrenceDate) {
+			t.Errorf("occurrence of %s starts at %s, which is %s",
+				o.OccurrenceDate, o.StartsAt.In(f.loc).Format(time.RFC3339), bucket)
+		}
+	}
+}
+
 // TestOccurrenceEndIsStartPlusTheTemplatesExactDuration covers the recurrence policy row
 // that says what happens to the *end* of an occurrence at a daylight-saving change. The
 // start keeps its wall clock, which is the rule the whole expansion is built around; the
@@ -976,7 +1055,7 @@ func TestEditingPrunesQueuedNotifications(t *testing.T) {
 	queued := domain.QueuedNotification{
 		UserID:    f.maman,
 		Kind:      domain.KindReminder,
-		SourceRef: ReminderSourceRef(ev.ID, domain.MustParseDate("2026-04-10"), 1),
+		SourceRef: ReminderSourceRef(ev.ID, domain.MustParseDate("2026-04-10"), 1, ev.EventUID),
 		Payload:   `{}`,
 		DueAt:     f.at("2026-04-10", 15, 30),
 	}
@@ -1015,7 +1094,7 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 
 	queued := domain.QueuedNotification{
 		UserID: f.maman, Kind: domain.KindReminder,
-		SourceRef: ReminderSourceRef(ev.ID, day, 1),
+		SourceRef: ReminderSourceRef(ev.ID, day, 1, ev.EventUID),
 		Payload:   `{}`, DueAt: f.at("2026-04-10", 15, 30),
 	}
 	if err := f.st.EnqueueNotification(ctx, queued); err != nil {
@@ -1024,7 +1103,7 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 	// A reference for an event in another calendar, to prove the prune is scoped by
 	// event id rather than merely emptying the outbox.
 	elsewhere := queued
-	elsewhere.SourceRef = ReminderSourceRef(ev.ID+1000, day, 1)
+	elsewhere.SourceRef = ReminderSourceRef(ev.ID+1000, day, 1, ev.EventUID)
 	if err := f.st.EnqueueNotification(ctx, elsewhere); err != nil {
 		t.Fatalf("enqueue elsewhere: %v", err)
 	}
@@ -1041,17 +1120,88 @@ func TestDeletingACalendarPrunesTheOutbox(t *testing.T) {
 	}
 }
 
+// TestSourceRefPrefixesNest: the reference is a prune key before it is an identity.
+// internal/events deletes by "everything for this event" and "everything for this
+// occurrence" whenever a series changes shape, an occurrence moves or an event is
+// cancelled, and a reference that has stopped being covered by its own prefixes is a
+// reminder that goes on firing for an appointment nobody has any more.
+//
+// The named spelling is checked beside the old one for that reason. What the prefixes
+// forbid is a name displacing the event id or the occurrence date; the end is where it
+// went for the other reasons ReminderSourceRef gives, and this is the constraint that
+// rules the rest out.
 func TestSourceRefPrefixesNest(t *testing.T) {
 	d := domain.MustParseDate("2026-08-04")
-	ref := ReminderSourceRef(12, d, 7)
-	if got := OccurrenceSourcePrefix(12, d); len(ref) <= len(got) || ref[:len(got)] != got {
-		t.Errorf("%q is not prefixed by the occurrence prefix %q", ref, got)
+	for _, ref := range []string{
+		ReminderSourceRef(12, d, 7, ""),                           // an event from before 0007
+		ReminderSourceRef(12, d, 7, "MZXW6YTBOI2A4TVOJUXA5DQR7Y"), // and one named since
+	} {
+		if got := OccurrenceSourcePrefix(12, d); len(ref) <= len(got) || ref[:len(got)] != got {
+			t.Errorf("%q is not prefixed by the occurrence prefix %q", ref, got)
+		}
+		if got := EventSourcePrefix(12); ref[:len(got)] != got {
+			t.Errorf("%q is not prefixed by the event prefix %q", ref, got)
+		}
+		// Event 1's prefix must not match event 12's references.
+		if other := EventSourcePrefix(1); len(ref) >= len(other) && ref[:len(other)] == other {
+			t.Errorf("prefix %q wrongly matches a reference for event 12", other)
+		}
+		// Nor may one occurrence's prefix reach another's.
+		if other := OccurrenceSourcePrefix(12, d.AddDays(7)); len(ref) >= len(other) && ref[:len(other)] == other {
+			t.Errorf("prefix %q wrongly matches a reference for %s", other, d)
+		}
 	}
-	if got := EventSourcePrefix(12); ref[:len(got)] != got {
-		t.Errorf("%q is not prefixed by the event prefix %q", ref, got)
+}
+
+// TestReminderSourceRefNamesTheEventNotTheID: events.id, reminders.id and the occurrence
+// date are all reusable, so two different appointments reach the outbox under one
+// reference — and since the outbox keeps a delivered row for good, the second of them is
+// read as the reminder already sent and dropped. What tells them apart is the name the
+// store gave the event.
+func TestReminderSourceRefNamesTheEventNotTheID(t *testing.T) {
+	d := domain.MustParseDate("2026-06-02")
+	gone := ReminderSourceRef(1, d, 1, "MZXW6YTBOI2A4TVOJUXA5DQR7Y")
+	took := ReminderSourceRef(1, d, 1, "PB2XG3DPMFZGK5DFNZSGKZLHOR")
+	if gone == took {
+		t.Errorf("the appointment that took the reused ids is queued under %q, the same reference as "+
+			"the one it replaced: the outbox will read it as a reminder it has already sent", took)
 	}
-	// Event 1's prefix must not match event 12's references.
-	if other := EventSourcePrefix(1); len(ref) >= len(other) && ref[:len(other)] == other {
-		t.Errorf("prefix %q wrongly matches a reference for event 12", other)
+
+	// An event created before events had names keeps the spelling its reminders are
+	// already queued under, so the next pass recognises them rather than filing the
+	// same warning a second time beside itself.
+	old := ReminderSourceRef(1, d, 1, "")
+	if want := "reminder:1:2026-06-02:1"; old != want {
+		t.Errorf("an event with no name of its own is queued under %q, want %q: every reminder in "+
+			"the house would be re-planned, and the recently sent ones sent again", old, want)
+	}
+	if len(took) <= len(old) || took[:len(old)+1] != old+":" {
+		t.Errorf("%q does not extend the old spelling %q: the layout is meant to nest", took, old)
+	}
+}
+
+// TestActivitySourceRefNamesTheChangeNotTheID: the ids of deleted activity rows are
+// handed out again, so two different changes reach the outbox under one number. What
+// tells them apart there is the name the store gave each of them.
+func TestActivitySourceRefNamesTheChangeNotTheID(t *testing.T) {
+	gone := domain.Activity{ID: 42, CalendarID: 2, ChangeUID: "MZXW6YTBOI2A4TVOJUXA5DQR7Y"}
+	took := domain.Activity{ID: 42, CalendarID: 1, ChangeUID: "PB2XG3DPMFZGK5DFNZSGKZLHOR"}
+	if ActivitySourceRef(gone) == ActivitySourceRef(took) {
+		t.Errorf("a change that took the reused id %d is queued under %q, the same reference as the "+
+			"change it replaced: the outbox will read it as an announcement it has already made",
+			took.ID, ActivitySourceRef(took))
+	}
+
+	// A change logged before the log gave out names keeps the spelling its
+	// notification is already queued under, so a re-walk still recognises it.
+	old := domain.Activity{ID: 42, CalendarID: 2}
+	if got, want := ActivitySourceRef(old), "activity:42"; got != want {
+		t.Errorf("a change with no name of its own is queued under %q, want %q: the notification "+
+			"already in the outbox for it would be announced a second time", got, want)
+	}
+	if ref := ActivitySourceRef(took); len(ref) <= len(ActivitySourceRef(old)) ||
+		ref[:len(ActivitySourceRef(old))+1] != ActivitySourceRef(old)+":" {
+		t.Errorf("%q does not extend the old spelling %q: the layout is meant to nest",
+			ref, ActivitySourceRef(old))
 	}
 }

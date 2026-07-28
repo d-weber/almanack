@@ -13,8 +13,20 @@ import { select, emptyState, errorBox, spinner } from '../ui.js';
 
 const DEBOUNCE_MS = 300;
 
-/** Search returns Events, not Occurrences: fill in what the row renderer needs. */
-function asOccurrence(ev, nextDate) {
+/**
+ * Search returns Events, not Occurrences: fill in what the row renderer needs.
+ *
+ * The occurrence date is the one field with no answer to copy, and this screen no longer
+ * works it out. It used to try three sources in turn — the next occurrence, the event's
+ * own start date, the day its start instant falls on — and the last two are guesses that
+ * only ever ran for a series that has ended, which is exactly when they are wrong: an
+ * anchor need not be an occurrence of the rule it anchors. The server expands the rule
+ * anyway and now says which day the row stands for, so there is one answer instead of a
+ * chain, computed where the rule lives.
+ *
+ * It is empty only for a rule with no occurrence at all, which no date could open.
+ */
+function asOccurrence(ev, occurrenceDate) {
   const cal = calendarById(ev.calendar_id);
   const label = labelById(ev.calendar_id, ev.label_id);
   return {
@@ -27,7 +39,7 @@ function asOccurrence(ev, nextDate) {
     ends_at: ev.ends_at,
     start_date: ev.start_date,
     end_date: ev.end_date,
-    occurrence_date: nextDate || ev.start_date || (ev.starts_at ? ev.starts_at.slice(0, 10) : ''),
+    occurrence_date: occurrenceDate || '',
     location: ev.location,
     label_id: ev.label_id,
     label_color: label ? label.color : null,
@@ -67,7 +79,7 @@ export function renderSearch() {
       }
       const box = h('div', { class: 'event-list' });
       for (const r of list) {
-        const occ = asOccurrence(r.event, r.next_occurrence);
+        const occ = asOccurrence(r.event, r.occurrence_date);
         box.appendChild(eventRowWithDate(occ, r.next_occurrence ? formatDateShort(r.next_occurrence) : ''));
       }
       results.appendChild(box);

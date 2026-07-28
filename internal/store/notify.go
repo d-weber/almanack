@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,10 +49,17 @@ func reminderScope(eventID, recurrenceID *int64, userID int64) (string, []any, e
 	}
 }
 
-// ListReminders returns one user's reminders for one event or one series.
+// ListReminders returns one user's reminders for one event or one series, oldest row
+// first, which is the order the editor lists them in.
 //
 // Reminders are per user by design: creating an event never pushes reminders onto
 // anyone else, so this never returns another member's rows.
+//
+// ORDER BY id is this function's own contract and nothing else leans on it. It used to be
+// described as what made ReplaceReminders' matching repeatable, which claimed more than it
+// could carry: no test can tell whether it is there, because on this schema SQLite returns
+// these rows in id order with or without it, so the sentence would have gone on being
+// believed after somebody deleted the clause. matchReminders sorts its own input now.
 func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID *int64, userID int64) ([]domain.Reminder, error) {
 	where, args, err := reminderScope(eventID, recurrenceID, userID)
 	if err != nil {
@@ -75,8 +84,52 @@ func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID 
 	return out, nil
 }
 
+// matchReminders decides what a saved list does to the rows already stored: which of them
+// it keeps, and which of its entries have no row yet. It is the whole of #65 — a reminder
+// in both keeps its row, and with it the id the outbox files its notification under.
+//
+// Matching is by shape, because shape is the whole of what a reminder is
+// (domain.Reminder.Shape, which lives in domain rather than here: it is what a reminder
+// *is* rather than how this table stores one, and the boundary that accepts a list bounds
+// it by the same notion — internal/httpapi.parseReminders). A list may hold one shape more
+// than once, so each shape's rows are taken lowest id first: saving the same list again
+// then settles on the same rows rather than on map order, and dropping back to two keeps
+// the two that have been there longest.
+//
+// It sorts rather than trusting its caller, and it is a function rather than eight lines
+// inside the transaction, for one reason. This is the only part of ReplaceReminders whose
+// answer depends on the order the rows arrive in, and on this schema no test going through
+// the database can show that: every access path there is — a table scan, and each of the
+// three indexes on `reminders`, whose single key column the scope always binds with
+// equality — walks the rowid b-tree in order, so a query without ORDER BY returns exactly
+// what one with it returns, even with the ids written out of sequence and a freed one
+// refilled. Taking the ordering out of ListReminders is therefore invisible to a fixture,
+// which is what its comment used to lean on. Here it is not invisible:
+// TestReminderMatchingTakesTheLowestIDHoweverTheRowsArrive hands the rows over shuffled,
+// which no caller does and no fixture can produce.
+func matchReminders(stored, saved []domain.Reminder) (keep map[int64]bool, add []domain.Reminder) {
+	byShape := map[string][]int64{}
+	for _, r := range stored {
+		byShape[r.Shape()] = append(byShape[r.Shape()], r.ID)
+	}
+	for _, ids := range byShape {
+		slices.Sort(ids)
+	}
+	keep = map[int64]bool{}
+	for _, r := range saved {
+		shape := r.Shape()
+		if ids := byShape[shape]; len(ids) > 0 {
+			keep[ids[0]] = true
+			byShape[shape] = ids[1:]
+			continue
+		}
+		add = append(add, r)
+	}
+	return keep, add
+}
+
 // ReplaceReminders sets one user's reminders for one event or series to exactly rs,
-// deleting and re-inserting inside a transaction.
+// inside a transaction.
 //
 // The scope and the owner come from the arguments, not from the structs: whatever
 // EventID, RecurrenceID and UserID the caller left in rs are overwritten, so a
@@ -87,6 +140,28 @@ func (s *Store) ListReminders(ctx context.Context, eventID *int64, recurrenceID 
 // start) or DaysBefore together with AtTimeLocal (all-day events: "09:00, the day
 // before"), never both and never neither — "09:00 on the day" is not expressible as an
 // offset from midnight, which is why there are two shapes.
+//
+// What is there is reconciled against rs rather than deleted and re-inserted, so a
+// reminder in both keeps its row and with it its id. The id is part of the reference the
+// outbox files that reminder's notification under, and reminders.id is INTEGER PRIMARY
+// KEY without AUTOINCREMENT, so re-inserting moved the reference of the whole list
+// unless the rows deleted happened to be the highest in the table. The delivered row
+// then no longer absorbed the re-plan, and the second copy was not merely queued but
+// sent: a reminder whose slot has passed is planned while its event is still ahead, and
+// a late warning is delivered on purpose. Opening the reminder editor and pressing save
+// without changing anything sent the reminder again (#65).
+//
+// Matching is by shape, lowest id first, so that a list holding the same reminder twice
+// settles on one answer rather than on map order — and so that saving it again keeps
+// settling on the same one. That is matchReminders above, which is where the ordering it
+// depends on is established rather than assumed.
+//
+// A reminder moved to another time is a new row, and should be: it is a different
+// warning at a different instant. What was queued for the old one is not left behind,
+// and not because this prunes — nothing on this path does. The planner recomputes the
+// window on every pass and drops the undelivered rows it would no longer produce
+// (notify.reconcile), which is the single place that answers moving a reminder, deleting
+// one, muting a calendar and every other edit that invalidates the outbox.
 func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrenceID *int64, userID int64, rs []domain.Reminder) error {
 	where, args, err := reminderScope(eventID, recurrenceID, userID)
 	if err != nil {
@@ -102,10 +177,33 @@ func (s *Store) ReplaceReminders(ctx context.Context, eventID *int64, recurrence
 	}
 
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM reminders WHERE `+where, args...); err != nil {
-			return mapErr(err)
+		// Read back through the same scope, so that what is compared cannot be a
+		// wider or narrower set of rows than what is about to be written.
+		stored, err := s.withTx(tx).ListReminders(ctx, eventID, recurrenceID, userID)
+		if err != nil {
+			return err
 		}
-		for _, r := range rs {
+		keep, add := matchReminders(stored, rs)
+
+		// A row at a time rather than one statement naming them all: rs arrives from a
+		// request and nothing bounds its length, and a list long enough to exceed the
+		// parameters a single statement may carry would turn a save that used to work
+		// into an error. Each still carries the scope beside the id, so that what a
+		// DELETE on this table can reach is legible where the DELETE is rather than by
+		// tracing where the id was read. Which is to say no test can tell this from
+		// `WHERE id = ?`, and none should be written to try: the ids came out of a read
+		// through that same scope a few lines above, so the clause is belt to that
+		// read's braces, and it is here for the reader rather than for the rows.
+		for _, r := range stored {
+			if keep[r.ID] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM reminders WHERE id = ? AND `+where,
+				append([]any{r.ID}, args...)...); err != nil {
+				return mapErr(err)
+			}
+		}
+		for _, r := range add {
 			var atTime any
 			if r.AtTimeLocal != "" {
 				atTime = r.AtTimeLocal
@@ -619,12 +717,13 @@ func (s *Store) DeleteUnsentBySourcePrefix(ctx context.Context, prefix string) (
 // Activity log
 // ---------------------------------------------------------------------------
 
-const activityCols = `id, calendar_id, user_id, action, event_id, title, at`
+const activityCols = `id, calendar_id, user_id, action, event_id, title, at, change_uid`
 
 func scanActivity(row rowScanner) (domain.Activity, error) {
 	var a domain.Activity
 	var eventID sql.NullInt64
-	err := row.Scan(&a.ID, &a.CalendarID, &a.UserID, &a.Action, &eventID, &a.Title, instantCol{&a.At})
+	err := row.Scan(&a.ID, &a.CalendarID, &a.UserID, &a.Action, &eventID, &a.Title,
+		instantCol{&a.At}, &a.ChangeUID)
 	if err != nil {
 		return domain.Activity{}, mapErr(err)
 	}
@@ -632,16 +731,30 @@ func scanActivity(row rowScanner) (domain.Activity, error) {
 	return a, nil
 }
 
-// LogActivity appends to the change log. The store timestamps it; a.At is ignored.
+// LogActivity appends to the change log. The store timestamps the entry and names it;
+// a.At and a.ChangeUID are ignored.
+//
+// The name is minted here, beside the timestamp, because it has exactly one job — to
+// be unlike every other — and a caller is the wrong place to rely on for that. It is
+// what the notification outbox files the entry under, since id will not do: SQLite
+// reissues the ids of deleted rows, and an announcement filed under a reused one is
+// taken for the announcement already made under it (migration 0006).
+//
+// crypto/rand.Text is 130 bits and has no error to return; the second half is what
+// decides it. A few thousand changes a decade needs nothing like that width, whereas an
+// error here would have to travel up through the edit's transaction and fail the edit —
+// an appointment that could not be saved because the machine was briefly short of
+// randomness.
 //
 // Title is stored denormalized on purpose: "Claire deleted Dentiste" has to keep
 // reading that way after the event is gone, and activity_log.event_id is deliberately
 // not a foreign key for the same reason.
 func (s *Store) LogActivity(ctx context.Context, a domain.Activity) error {
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO activity_log (calendar_id, user_id, action, event_id, title, at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		a.CalendarID, a.UserID, string(a.Action), putInt64Ptr(a.EventID), a.Title, mustInstant(s.now()))
+		INSERT INTO activity_log (calendar_id, user_id, action, event_id, title, at, change_uid)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.CalendarID, a.UserID, string(a.Action), putInt64Ptr(a.EventID), a.Title,
+		mustInstant(s.now()), rand.Text())
 	if err != nil {
 		return fmt.Errorf("log activity %s on calendar %d: %w", a.Action, a.CalendarID, mapErr(err))
 	}

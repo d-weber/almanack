@@ -360,7 +360,7 @@ func reminderRef(t *testing.T, e *env, ev domain.Event, userID int64, occ domain
 		}
 		if (r.EventID != nil && *r.EventID == ev.ID) ||
 			(r.RecurrenceID != nil && ev.RecurrenceID != nil && *r.RecurrenceID == *ev.RecurrenceID) {
-			return events.ReminderSourceRef(ev.ID, occ, r.ID)
+			return events.ReminderSourceRef(ev.ID, occ, r.ID, ev.EventUID)
 		}
 	}
 	t.Fatalf("no reminder for user %d on event %d", userID, ev.ID)

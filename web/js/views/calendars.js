@@ -9,7 +9,7 @@ import { api } from '../api.js';
 import {
   state, calendarById, labelsOf, membersOf, refreshMe, invalidateRange, calendarImageURL,
 } from '../state.js';
-import { formatDateShort } from '../dates.js';
+import { formatDateShort, instantDate } from '../dates.js';
 import { normalizeHex, readableOn, PALETTE } from '../colors.js';
 import {
   screen, section, field, input, button, toggleRow, colorPicker, avatar, listRow,
@@ -280,7 +280,10 @@ export function renderCalendarDetail({ id }) {
       }
       for (const inv of invites) {
         inviteBox.appendChild(listRow({
-          title: t('calendar.invite.expires', { date: formatDateShort(String(inv.expires_at).slice(0, 10)) }),
+          // An invite expires seven days after it was made, to the minute, so its instant
+          // carries whatever time of day that was. Read as UTC text it names the day
+          // before whenever that minute is late enough in the evening.
+          title: t('calendar.invite.expires', { date: formatDateShort(instantDate(inv.expires_at)) }),
           trailing: h('button', {
             class: 'btn btn-quiet btn-small',
             type: 'button',
@@ -310,7 +313,7 @@ export function renderCalendarDetail({ id }) {
       h('p', { class: 'field-hint' }, t('calendar.invite.hint')),
       urlField,
       invite.expires_at
-        ? h('p', { class: 'field-hint' }, t('calendar.invite.expires', { date: formatDateShort(String(invite.expires_at).slice(0, 10)) }))
+        ? h('p', { class: 'field-hint' }, t('calendar.invite.expires', { date: formatDateShort(instantDate(invite.expires_at)) }))
         : null,
       h('div', { class: 'dialog-actions' },
         button(t('action.close'), { variant: 'quiet', onclick: () => dismiss() }),

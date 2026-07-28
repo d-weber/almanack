@@ -639,8 +639,9 @@ var releaseFixtures = []releaseFixture{
 	{
 		release: "v0.2.0", file: "testdata/v0.2.0.sql", version: 2,
 		// Nothing: no migration between 0002 and head writes a row of this
-		// household's data. 0004 creates a table and 0005 rewrites a derived
-		// search column in place, neither of which changes a count. The swimming
+		// household's data. 0004 creates a table, 0005 rewrites a derived search
+		// column in place, and 0006 and 0007 each add a column with a default, none
+		// of which changes a count. The swimming
 		// lesson this family moved to the evening of 4 August keeps being announced
 		// because the occurrence goes on inheriting the series' reminder, not
 		// because anything was copied onto it — see checkV020Family.
@@ -912,6 +913,15 @@ func checkV020Family(t *testing.T, s *Store) {
 	if dentist.Title != "Leo's dentist" || dentist.Location != "Bridge Street Dental" {
 		t.Errorf("dentist = %+v", dentist)
 	}
+	// 0007 gives each event a name and leaves the ones already created without one,
+	// which is not an oversight: their reminders are queued under a reference built
+	// from the ids alone, and naming them here would change that reference, re-plan
+	// every reminder in the house and send the recently delivered ones a second time.
+	// The absence is load-bearing, so it is asserted rather than assumed.
+	if dentist.EventUID != "" {
+		t.Errorf("the dentist came out of the upgrade named %q; events created before 0007 keep no name",
+			dentist.EventUID)
+	}
 	parts, err := s.ListParticipants(ctx(), dentistID)
 	if err != nil {
 		t.Fatalf("ListParticipants: %v", err)
@@ -1136,6 +1146,17 @@ func checkV020Family(t *testing.T, s *Store) {
 	}
 	if len(activity) > 0 && (activity[0].Action != domain.ActionMemberJoined || activity[0].Title != "Gran") {
 		t.Errorf("newest activity = %+v; want Gran joining", activity[0])
+	}
+	// 0006 gives each change a name and leaves the ones already logged without one,
+	// which is not an oversight: their notifications are queued under a reference
+	// built from the id alone, and naming them here would change that reference and
+	// have the next pass announce them a second time. The absence is load-bearing, so
+	// it is asserted rather than assumed.
+	for _, a := range activity {
+		if a.ChangeUID != "" {
+			t.Errorf("%q came out of the upgrade named %q; entries logged before 0006 keep no name",
+				a.Title, a.ChangeUID)
+		}
 	}
 
 	sess, sessUser, err := s.SessionByToken(ctx(),
@@ -1765,6 +1786,326 @@ func TestDeletingACalendarLeavesNothingBehind(t *testing.T) {
 	}
 	if n := countRows(t, s, "notification_queue"); n != 3 {
 		t.Errorf("%d queue rows left; want two pending plus the delivered one", n)
+	}
+}
+
+// TestDeletingACalendarPrunesItsQueuedAnnouncements is the other half of the outbox the
+// test above covers. A reminder's reference begins with the id of the event it warns
+// about, so the events being deleted find their own rows; a change's reference names the
+// change and never the calendar, so nothing about it can be matched by prefix and the
+// log rows have to be asked instead — while they are still there to be asked.
+//
+// Both spellings the reference has had are seeded, because a household upgrading from
+// 0.2.0 has changes logged before 0006 with no name of their own, queued under the id
+// alone, sitting beside changes logged since.
+func TestDeletingACalendarPrunesItsQueuedAnnouncements(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	log := func(cal domain.Calendar, title string) domain.Activity {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity %q: %v", title, err)
+		}
+		rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 1, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("read back the change %q: %v", title, err)
+		}
+		return rows[0]
+	}
+	// The format internal/events.ActivitySourceRef writes, which cannot be called here
+	// (that package depends on this one) — the same standing arrangement as for
+	// reminders, and the same reason to spell it out.
+	ref := func(a domain.Activity) string {
+		if a.ChangeUID == "" {
+			return fmt.Sprintf("activity:%d", a.ID)
+		}
+		return fmt.Sprintf("activity:%d:%s", a.ID, a.ChangeUID)
+	}
+	queue := func(a domain.Activity, due time.Time) string {
+		t.Helper()
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindActivity, SourceRef: ref(a),
+			Payload: `{"title":"` + a.Title + `"}`, DueAt: due,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", a.Title, err)
+		}
+		return ref(a)
+	}
+
+	named := log(doomed, "Ferry")
+	// A change from before 0006: its row carries no name and its notification is
+	// queued under the id alone.
+	old := log(doomed, "Piscine")
+	if _, err := s.DB().ExecContext(ctx(), `UPDATE activity_log SET change_uid = '' WHERE id = ?`, old.ID); err != nil {
+		t.Fatalf("take the name off the older change: %v", err)
+	}
+	old.ChangeUID = ""
+	elsewhere := log(kept, "Réunion")
+
+	queue(named, baseTime)
+	queue(old, baseTime)
+	survivor := queue(elsewhere, baseTime)
+	// A row already delivered is the record that the family was told, which is what
+	// stops a catch-up pass telling them again. It is history and it stays.
+	delivered := queue(log(doomed, "Marché"), baseTime.Add(-time.Hour))
+	if err := s.MarkSent(ctx(), queuedIDBySourceRef(t, s, delivered), baseTime); err != nil {
+		t.Fatalf("MarkSent: %v", err)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var refs []string
+	for _, p := range pending {
+		refs = append(refs, p.SourceRef)
+	}
+	if len(refs) != 1 || refs[0] != survivor {
+		t.Errorf("queued after the calendar went = %v; want only the surviving calendar's %q — an "+
+			"announcement left behind names a calendar the recipient no longer has and opens an "+
+			"event that has gone with it", refs, survivor)
+	}
+	if n := countRows(t, s, "notification_queue"); n != 2 {
+		t.Errorf("%d queue rows left; want the surviving calendar's pending one plus the delivered one", n)
+	}
+}
+
+// TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes is the same boundary for
+// the other prune: a reminder's reference begins with the id of the event it warns about,
+// so event 1's prune must not reach event 12's reminders.
+//
+// What holds that boundary changed when the prune was keyed on events.id, and this test
+// is written for the arrangement that exists now rather than the one it replaced. The
+// pattern's trailing colon used to be the whole of it; the equality is now, since a
+// reference for event 12 casts to 12 whatever the pattern says. So what this fails on is
+// the arithmetic — substr from the ninth character or the eleventh, either of which reads
+// a number that is not an event id — and it fails on it in both directions, because
+// "nothing was pruned" and "too much was pruned" are the two ways an off-by-one there can
+// land. Five surviving references rather than one gives it the margin to say which.
+//
+// It is here rather than left to internal/events' TestDeletingACalendarPrunesTheOutbox,
+// which does also fail on some of these, because that test catches them by accident: it is
+// about two packages agreeing on a layout, and the reference it expects to survive is
+// built from ev.ID+1000 because a thousand is a comfortable way to say "another
+// calendar's". The digit boundary is a side effect of the number somebody picked, and
+// changing 1000 to 500 would end the coverage without touching anything that reads as a
+// guard. Coverage nobody meant to write is coverage nobody will keep.
+//
+// Both spellings are on each side, since a household upgrading from 0.2.0 has reminders
+// queued under the four-field reference from before 0007 beside five-field ones.
+func TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	event := func(cal domain.Calendar, title string) domain.Event {
+		t.Helper()
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: title, StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: firstLabel(t, s, cal.ID).ID, CreatedBy: u.ID,
+		}, nil)
+		if err != nil {
+			t.Fatalf("CreateEvent %q: %v", title, err)
+		}
+		return e
+	}
+	// The layout internal/events.ReminderSourceRef writes, which cannot be called from
+	// here (that package depends on this one) — the same standing arrangement as for
+	// activity references, and the same reason to spell it out.
+	queue := func(e domain.Event, reminderID int64, named bool) string {
+		t.Helper()
+		ref := fmt.Sprintf("reminder:%d:2026-08-04:%d", e.ID, reminderID)
+		if named {
+			ref += ":" + e.EventUID
+		}
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindReminder, SourceRef: ref,
+			Payload: `{"title":"` + e.Title + `"}`, DueAt: baseTime,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", e.Title, err)
+		}
+		return ref
+	}
+
+	// Event 1, in the calendar about to go, queued under both spellings. Both are the
+	// strings the eleven below are prefixed by.
+	going := event(doomed, "Ferry")
+	if going.ID != 1 {
+		t.Fatalf("the doomed calendar's event took id %d, want 1: this test proves nothing about "+
+			"the digit boundary unless it is on it", going.ID)
+	}
+	gone := []string{queue(going, 1, false), queue(going, 2, true)}
+
+	// Fill the table up to the first two-figure ids, in the calendar that stays.
+	var survivors []string
+	for i := 2; i <= 14; i++ {
+		e := event(kept, fmt.Sprintf("Réunion %d", i))
+		if e.ID != int64(i) {
+			t.Fatalf("the %dth event took id %d: this test needs the ids to run 1 to 14 to reach "+
+				"the digit boundary", i, e.ID)
+		}
+		if e.ID < 10 {
+			continue // single-digit ids are the case every other fixture already covers
+		}
+		survivors = append(survivors, queue(e, 1, e.ID != 12)) // event 12 keeps the pre-0007 spelling
+	}
+	if len(survivors) != 5 {
+		t.Fatalf("queued %d reminders in the surviving calendar (%v), want 5", len(survivors), survivors)
+	}
+	if !slices.Contains(survivors, "reminder:12:2026-08-04:1") {
+		t.Fatalf("the surviving reminders are %v; want \"reminder:12:2026-08-04:1\" among them, which "+
+			"is the reference a prefix on event 1 reaches first", survivors)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var left []string
+	for _, p := range pending {
+		left = append(left, p.SourceRef)
+	}
+	slices.Sort(left)
+	want := slices.Clone(survivors)
+	slices.Sort(want)
+	if !slices.Equal(left, want) {
+		t.Errorf("deleting the calendar holding event 1 left %v queued and the surviving calendar "+
+			"had %v: a reminder taken here warns about an event nobody deleted and simply never "+
+			"arrives, and one left behind fires for an appointment that has gone", left, want)
+	}
+	for _, ref := range gone {
+		if slices.Contains(left, ref) {
+			t.Errorf("%q survived the deletion of the calendar holding its event", ref)
+		}
+	}
+}
+
+// TestDeletingACalendarLeavesTheAnnouncementsOfChangesItsIDPrefixes: the reason the prune
+// above matches a reference whole instead of by prefix. "activity:1" is a prefix of
+// "activity:12", so a prune written as LIKE 'activity:' || a.id || '%' takes every
+// announcement whose change id merely begins with the doomed one's — eleven of them for a
+// household whose log has reached two figures, from calendars nobody has deleted, silently,
+// with the recipients simply never told.
+//
+// The test above cannot see it: every change in it is single-digit, so the boundary the
+// comment is about never occurs and a prefix behaves exactly like a whole match. This one
+// puts the doomed calendar's change on id 1 and the surviving calendar's on 10 to 14, which
+// is the smallest arrangement where the two answers differ — and differ by five.
+//
+// Both spellings are on the surviving side for the same reason they are on the doomed side
+// above: a household upgrading from 0.2.0 has unnamed changes queued under the id alone, and
+// "activity:12" is the reference a prefix on "activity:1" reaches most directly.
+func TestDeletingACalendarLeavesTheAnnouncementsOfChangesItsIDPrefixes(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	log := func(cal domain.Calendar, title string) domain.Activity {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity %q: %v", title, err)
+		}
+		rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 1, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("read back the change %q: %v", title, err)
+		}
+		return rows[0]
+	}
+	unname := func(a domain.Activity) domain.Activity {
+		t.Helper()
+		if _, err := s.DB().ExecContext(ctx(),
+			`UPDATE activity_log SET change_uid = '' WHERE id = ?`, a.ID); err != nil {
+			t.Fatalf("take the name off change %d: %v", a.ID, err)
+		}
+		a.ChangeUID = ""
+		return a
+	}
+	ref := func(a domain.Activity) string {
+		if a.ChangeUID == "" {
+			return fmt.Sprintf("activity:%d", a.ID)
+		}
+		return fmt.Sprintf("activity:%d:%s", a.ID, a.ChangeUID)
+	}
+	queue := func(a domain.Activity) string {
+		t.Helper()
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindActivity, SourceRef: ref(a),
+			Payload: `{"title":"` + a.Title + `"}`, DueAt: baseTime,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", a.Title, err)
+		}
+		return ref(a)
+	}
+
+	// Change 1, in the calendar about to go. Unnamed, so its reference is exactly the
+	// string the eleven below are prefixed by.
+	going := queue(unname(log(doomed, "Ferry")))
+	if going != "activity:1" {
+		t.Fatalf("the doomed calendar's change is queued under %q, want \"activity:1\": this test "+
+			"proves nothing about the digit boundary unless it is on it", going)
+	}
+
+	// Fill the log up to the first two-figure ids, in the calendar that stays.
+	var survivors []string
+	for i := 2; i <= 14; i++ {
+		a := log(kept, fmt.Sprintf("Réunion %d", i))
+		if a.ID != int64(i) {
+			t.Fatalf("the %dth change took id %d: this test needs the log's ids to run 1 to 14 to "+
+				"reach the digit boundary", i, a.ID)
+		}
+		if a.ID < 10 {
+			continue // single-digit ids are the case the test above already covers
+		}
+		if a.ID == 12 {
+			a = unname(a) // the spelling an upgraded household still has
+		}
+		survivors = append(survivors, queue(a))
+	}
+	if len(survivors) != 5 {
+		t.Fatalf("queued %d announcements in the surviving calendar (%v), want 5", len(survivors), survivors)
+	}
+	if !slices.Contains(survivors, "activity:12") {
+		t.Fatalf("the surviving announcements are %v; want \"activity:12\" among them, which is the "+
+			"reference a prefix on \"activity:1\" reaches first", survivors)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var left []string
+	for _, p := range pending {
+		left = append(left, p.SourceRef)
+	}
+	slices.Sort(left)
+	want := slices.Clone(survivors)
+	slices.Sort(want)
+	if !slices.Equal(left, want) {
+		t.Errorf("deleting the calendar holding change 1 left %v queued and the surviving calendar "+
+			"had %v: an announcement taken here belongs to a calendar nobody deleted, and the "+
+			"member it was for is simply never told", left, want)
 	}
 }
 
@@ -3449,6 +3790,233 @@ func TestReplaceRemindersIsScopedToOneUser(t *testing.T) {
 	}
 }
 
+// What ReplaceReminders had to become for #65, and the cases that becoming it must not
+// break. A reminder keeps its row — and so the reference the outbox files it under —
+// for as long as the saved list still says what that row says; anything else is a new
+// row, because it is a different warning.
+//
+// Every case here also watches Marc, who never saves anything: reminders are per person,
+// and reconciliation reads and writes through exactly the scope ReplaceReminders was
+// given.
+// TestReminderMatchingTakesTheLowestIDHoweverTheRowsArrive: #65 keeps the *lowest* id of
+// each shape, so that saving one list twice settles on the same rows both times and
+// dropping a duplicate keeps the ones that have been there longest. Everything downstream
+// of that — which reference the outbox files the reminder under, and therefore whether the
+// row already delivered absorbs the re-plan — depends on it being the same answer twice.
+//
+// It is tested here rather than through ReplaceReminders because through the database it
+// cannot be tested at all: every access path SQLite has to `reminders` walks the rowid
+// b-tree in order, so the rows arrive sorted whether or not the query says so, and a
+// matching that took the highest id, or whatever order a map produced, would be caught by
+// nothing. Handing them over shuffled is the one thing no fixture can do.
+func TestReminderMatchingTakesTheLowestIDHoweverTheRowsArrive(t *testing.T) {
+	m := func(id int64, minutes int) domain.Reminder {
+		return domain.Reminder{ID: id, OffsetMinutes: &minutes}
+	}
+	want := func(minutes ...int) []domain.Reminder {
+		out := make([]domain.Reminder, 0, len(minutes))
+		for _, v := range minutes {
+			out = append(out, domain.Reminder{OffsetMinutes: &v})
+		}
+		return out
+	}
+	// Three rows of one shape and two of another, and the ids deliberately not in the
+	// order the shapes are in.
+	stored := []domain.Reminder{m(9, 10), m(4, 60), m(7, 10), m(2, 10), m(11, 60)}
+
+	for _, tc := range []struct {
+		name     string
+		saved    []domain.Reminder
+		wantKeep []int64
+		wantAdd  int
+	}{
+		{"one of a shape held three times", want(10), []int64{2}, 0},
+		{"two of it", want(10, 10), []int64{2, 7}, 0},
+		{"all three, in the other order", want(10, 10, 10), []int64{2, 7, 9}, 0},
+		{"one of each", want(10, 60), []int64{2, 4}, 0},
+		{"more than there are rows for", want(10, 10, 10, 10), []int64{2, 7, 9}, 1},
+		{"a shape with no row at all", want(30), nil, 1},
+		{"the empty list", nil, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every ordering of the same rows must give the same answer, which is the
+			// claim: a rotation is enough to break a matching that took what it was
+			// handed, and reversal is enough to break one that took the highest.
+			for _, order := range [][]domain.Reminder{
+				stored,
+				{stored[4], stored[3], stored[2], stored[1], stored[0]},
+				{stored[2], stored[0], stored[4], stored[1], stored[3]},
+			} {
+				rows := slices.Clone(order)
+				keep, add := matchReminders(rows, tc.saved)
+				got := make([]int64, 0, len(keep))
+				for id := range keep {
+					got = append(got, id)
+				}
+				slices.Sort(got)
+				if !slices.Equal(got, tc.wantKeep) {
+					ids := make([]int64, 0, len(rows))
+					for _, r := range rows {
+						ids = append(ids, r.ID)
+					}
+					t.Errorf("rows %v kept %v, want %v: the reminder that keeps its row has to be "+
+						"the same one whichever order they were read in", ids, got, tc.wantKeep)
+				}
+				if len(add) != tc.wantAdd {
+					t.Errorf("rows %v produced %d new reminders, want %d", order, len(add), tc.wantAdd)
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
+	s, _, _ := newStore(t)
+	claire := mustUser(t, s, "claire@example.test", "Claire")
+	marc := mustUser(t, s, "marc@example.test", "Marc")
+	cal := mustCalendar(t, s, claire.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+
+	e, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: claire.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+
+	// The list as the editor sends it: fresh structs, carrying no id at all. Matching
+	// therefore cannot lean on one, which is the whole difficulty.
+	at := func(minutes ...int) []domain.Reminder {
+		out := make([]domain.Reminder, 0, len(minutes))
+		for _, m := range minutes {
+			out = append(out, domain.Reminder{OffsetMinutes: &m})
+		}
+		return out
+	}
+	save := func(who int64, rs []domain.Reminder) {
+		t.Helper()
+		if err := s.ReplaceReminders(ctx(), &e.ID, nil, who, rs); err != nil {
+			t.Fatalf("ReplaceReminders: %v", err)
+		}
+	}
+	// rows is one member's list as "id:shape", oldest row first. The id is in there
+	// because the claim is about rows and not only about what they say. The numbers
+	// themselves are still never written down — what a deletion frees is SQLite's
+	// business — but *which* of them survive a save is asserted below by position, since
+	// counting alone was equally happy with a matching that kept the newest row of a
+	// shape rather than the oldest.
+	rows := func(who int64) []string {
+		t.Helper()
+		rs, err := s.ListReminders(ctx(), &e.ID, nil, who)
+		if err != nil {
+			t.Fatalf("ListReminders: %v", err)
+		}
+		out := make([]string, 0, len(rs))
+		for _, r := range rs {
+			out = append(out, fmt.Sprintf("%d:%s", r.ID, r.Shape()))
+		}
+		return out
+	}
+	shapesOf := func(list []string) []string {
+		out := make([]string, 0, len(list))
+		for _, v := range list {
+			out = append(out, v[strings.Index(v, ":")+1:])
+		}
+		return out
+	}
+	// check saves a list and reports what it did: the reminders that came back, and which
+	// of the rows that were there beforehand are still among them.
+	//
+	// keptIdx names the survivors by their position in the previous list, which is by
+	// ascending id, so "the two that have been there longest" is [0 1] and cannot be
+	// confused with "the two most recent". The numbers are the test's only way to say
+	// which of three identical reminders the save kept.
+	var before []string
+	check := func(what string, who int64, rs []domain.Reminder, wantShapes []string, keptIdx ...int) {
+		t.Helper()
+		want := make([]string, 0, len(keptIdx))
+		for _, i := range keptIdx {
+			if i >= len(before) {
+				t.Fatalf("%s: the list beforehand was %v, which has no row %d", what, before, i)
+			}
+			want = append(want, before[i])
+		}
+		save(who, rs)
+		after := rows(who)
+		var kept []string
+		for _, v := range after {
+			if slices.Contains(before, v) {
+				kept = append(kept, v)
+			}
+		}
+		if got := shapesOf(after); !slices.Equal(got, wantShapes) {
+			t.Errorf("%s: the list reads %v, want %v", what, got, wantShapes)
+		}
+		if !slices.Equal(kept, want) {
+			t.Errorf("%s: %v of %v are on the row they were on in %v, want %v — the reminder that "+
+				"keeps its row is the oldest of its shape, so that saving the list again keeps "+
+				"choosing the same one", what, kept, after, before, want)
+		}
+		before = after
+	}
+
+	check("the first save", claire.ID, at(10, 60), []string{"m10", "m60"})
+
+	// Marc sets one of his own afterwards, which is the whole of what he is here for
+	// besides the scope: it puts a row above Claire's, so that re-inserting hers hands
+	// them numbers they have never had rather than politely giving their own back.
+	save(marc.ID, at(30))
+	marcs := rows(marc.ID)
+
+	// The action from the issue: open the editor, press save, change nothing.
+	check("saving an unchanged list", claire.ID, at(10, 60), []string{"m10", "m60"}, 0, 1)
+
+	// Adding one leaves the reminders already there exactly where they were.
+	check("adding a reminder", claire.ID, at(10, 60, 1440), []string{"m10", "m60", "m1440"}, 0, 1)
+
+	// Removing one takes that row and no other.
+	check("removing a reminder", claire.ID, at(10, 1440), []string{"m10", "m1440"}, 0, 2)
+
+	// Moving one to another time is a different warning, so it is a different row — what
+	// was queued for the old instant is the planner's to drop. Its neighbour staying put
+	// is what says this was the one reminder moving and not the list being rewritten.
+	check("moving a reminder", claire.ID, at(10, 2880), []string{"m10", "m2880"}, 0)
+
+	// The list is a set. Two reminders that say the same thing are the same reminder, so
+	// the order they arrive in carries nothing and saving them in another one changes
+	// nothing — the editor has no way to reorder them either, only to add and remove.
+	check("reordering the list", claire.ID, at(2880, 10), []string{"m10", "m2880"}, 0, 1)
+
+	// A list holding the same reminder more than once keeps a row per copy, matched
+	// lowest id first — so saving it again is a no-op rather than a shuffle, and dropping
+	// back to two keeps the two that have been there longest.
+	check("three of the same reminder", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 0)
+	check("saving the duplicates again", claire.ID, at(10, 10, 10), []string{"m10", "m10", "m10"}, 0, 1, 2)
+	check("dropping one of the duplicates", claire.ID, at(10, 10), []string{"m10", "m10"}, 0, 1)
+
+	// The all-day shape is matched on both of its halves, so two reminders on the same
+	// day at different times are two reminders.
+	one, two := 1, 2
+	allDay := func(days int, at string) domain.Reminder {
+		return domain.Reminder{DaysBefore: &days, AtTimeLocal: at}
+	}
+	check("switching to the all-day shape", claire.ID,
+		[]domain.Reminder{allDay(one, "09:00"), allDay(two, "09:00")},
+		[]string{"d1@09:00", "d2@09:00"})
+	check("adding another time on the same day", claire.ID,
+		[]domain.Reminder{allDay(one, "09:00"), allDay(one, "18:00"), allDay(two, "09:00")},
+		[]string{"d1@09:00", "d2@09:00", "d1@18:00"}, 0, 1)
+
+	// Clearing empties the list, and empties only it.
+	check("clearing the list", claire.ID, nil, []string{})
+	if got := rows(marc.ID); !slices.Equal(got, marcs) {
+		t.Errorf("Marc's reminders are %v after all of that, want %v: he saved once and nothing "+
+			"anyone else does may move his rows", got, marcs)
+	}
+}
+
 func TestPrefsDefaultsAndUpsert(t *testing.T) {
 	s, _, _ := newStore(t)
 	claire := mustUser(t, s, "claire@example.test", "Claire")
@@ -3909,6 +4477,128 @@ func TestActivityByIDSeesAReusedID(t *testing.T) {
 	// caller did not ask about is not there.
 	if _, err := s.ActivityByID(ctx(), nil, reused.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("ActivityByID with no calendars = %v; want ErrNotFound", err)
+	}
+
+	// And the two entries that shared the id are still told apart by the name each
+	// was logged with, which is the only thing here a reused id cannot imitate: the
+	// calendar can be reissued the same way and the instant is the same second.
+	if reused.ChangeUID == "" || cursor.ChangeUID == "" {
+		t.Fatalf("a logged change came back with no name: %q and %q", cursor.ChangeUID, reused.ChangeUID)
+	}
+	if reused.ChangeUID == cursor.ChangeUID {
+		t.Errorf("the entry that took the reused id is named %q, the same as the one it replaced: "+
+			"the outbox has nothing left to tell them apart by", reused.ChangeUID)
+	}
+}
+
+// TestEveryLoggedChangeIsNamedForItself: the names have exactly one job, so the test
+// is the obvious one. A family's decade of changes is a few thousand rows, and
+// crypto/rand.Text is 130 bits, so a repeat here means the name is not being generated
+// per row at all — a constant, or one read of the clock, both of which would look fine
+// in a single-row test.
+func TestEveryLoggedChangeIsNamedForItself(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+
+	clk.Set(baseTime) // stopped, as dev mode's is: the names cannot come from it
+	const changes = 200
+	for i := range changes {
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated,
+			Title: fmt.Sprintf("Sortie %d", i),
+			// Whatever a caller puts here is ignored: the store names the entry.
+			ChangeUID: "chosen-by-the-caller",
+		}); err != nil {
+			t.Fatalf("LogActivity %d: %v", i, err)
+		}
+	}
+	rows, err := s.ListActivity(ctx(), []int64{cal.ID}, changes, 0)
+	if err != nil || len(rows) != changes {
+		t.Fatalf("ListActivity = %d rows, %v; want %d", len(rows), err, changes)
+	}
+	seen := map[string]bool{}
+	for _, a := range rows {
+		if a.ChangeUID == "" || a.ChangeUID == "chosen-by-the-caller" {
+			t.Fatalf("%q is named %q; want a name the store minted", a.Title, a.ChangeUID)
+		}
+		if seen[a.ChangeUID] {
+			t.Fatalf("two changes are both named %q", a.ChangeUID)
+		}
+		seen[a.ChangeUID] = true
+	}
+}
+
+// TestEveryEventIsNamedForItself: the same job as the names above, for the other half of
+// the outbox. An event's name has one purpose — to be unlike every other, including the
+// events that held its id before it — so the test is the obvious one, and it is run on a
+// stopped clock because a name derived from the clock would pass a single-row test and
+// then hand two appointments the same one on the machine this matters most on.
+func TestEveryEventIsNamedForItself(t *testing.T) {
+	s, clk, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	cal := mustCalendar(t, s, u.ID, "Maison")
+	label := firstLabel(t, s, cal.ID)
+
+	clk.Set(baseTime)
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	seen := map[string]bool{}
+	for i := range 50 {
+		e, err := s.CreateEvent(ctx(), domain.Event{
+			CalendarID: cal.ID, Title: fmt.Sprintf("Sortie %d", i),
+			StartsAt: starts, EndsAt: starts.Add(time.Hour),
+			LabelID: label.ID, CreatedBy: u.ID,
+			// Whatever a caller puts here is ignored: the store names the event.
+			EventUID: "chosen-by-the-caller",
+		}, nil)
+		if err != nil {
+			t.Fatalf("CreateEvent %d: %v", i, err)
+		}
+		if e.EventUID == "" || e.EventUID == "chosen-by-the-caller" {
+			t.Fatalf("%q is named %q; want a name the store minted", e.Title, e.EventUID)
+		}
+		if seen[e.EventUID] {
+			t.Fatalf("two events are both named %q", e.EventUID)
+		}
+		seen[e.EventUID] = true
+
+		// And the name has to come back on the read paths too, or the planner
+		// rebuilds a different reference from the one it queued under.
+		got, err := s.EventByID(ctx(), e.ID)
+		if err != nil {
+			t.Fatalf("EventByID: %v", err)
+		}
+		if got.EventUID != e.EventUID {
+			t.Fatalf("EventByID(%d) is named %q, want %q", e.ID, got.EventUID, e.EventUID)
+		}
+	}
+
+	// The one that matters: an event created after the highest row has gone takes its
+	// id and must not take its name with it.
+	last, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Dentiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	if err := s.DeleteEvent(ctx(), last.ID); err != nil {
+		t.Fatalf("DeleteEvent: %v", err)
+	}
+	reused, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: cal.ID, Title: "Orthodontiste", StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label.ID, CreatedBy: u.ID,
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	if reused.ID != last.ID {
+		t.Fatalf("the replacement took id %d and the event it replaced had %d: this SQLite is not "+
+			"reusing the ids of deleted rows, so this test no longer says anything", reused.ID, last.ID)
+	}
+	if reused.EventUID == last.EventUID {
+		t.Errorf("the event that took the reused id %d is named %q, the same as the one it replaced: "+
+			"the outbox has nothing left to tell their reminders apart by", reused.ID, reused.EventUID)
 	}
 }
 

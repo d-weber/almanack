@@ -40,8 +40,31 @@ func (s *Server) devRoutes() []route {
 		{method: "POST", path: "/dev/clock", mutates: true, h: s.handleDevClock},
 		{method: "POST", path: "/dev/tick", mutates: true, h: s.handleDevTick},
 		{method: "POST", path: "/dev/seed", mutates: true, h: s.handleDevSeed},
+		{method: "POST", path: "/dev/ratelimits/reset", mutates: true, h: s.handleDevResetRateLimits},
 		{method: "GET", path: "/dev/login/{userID}", mutates: true, h: s.handleDevLogin},
 	}
+}
+
+// handleDevResetRateLimits empties the rate-limit buckets, which until now only
+// restarting the server could do: they live in memory and refill on a timer
+// (ratelimit.go).
+//
+// Everything that reaches that timer on a laptop is on this side of the login form. A
+// developer who mistypes a password eight times is locked out of their own machine for
+// the better part of three minutes. The browser suite signs in twice a run from one
+// address, and nothing gave the tokens back between runs, so a handful of `make e2e`
+// runs inside a minute exhausted the burst and the next one failed at the password box
+// with `toBeVisible() failed` and nothing anywhere saying 429 (#66): a real limit,
+// working as designed, reported as an application that had stopped rendering.
+//
+// What is dev-only here is the emptying, not the limit. The burst and the refill are the
+// same numbers in dev as in production, and dev mode still answers 429 at the ninth
+// attempt (TestLoginRateLimit runs in dev mode and asserts exactly that). The route
+// itself is only ever registered when cfg.Dev is set, so in production there is no path
+// to guess at and the buckets can still only be refilled by the clock —
+// TestTheLoginBucketCannotBeEmptiedOutsideDevMode holds that down.
+func (s *Server) handleDevResetRateLimits(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, r, http.StatusOK, map[string]any{"ok": true, "forgotten": s.limiter.forget()})
 }
 
 // handleDevLogin signs in as any account by navigating to a link, then redirects to
@@ -104,6 +127,15 @@ func (s *Server) handleDevDashboard(w http.ResponseWriter, r *http.Request) {
 		`<button class="btn" id="seed">Seed demo family</button></div>`)
 	b.WriteString(`<p class="muted">Advance the clock, run a pass, then read the two inboxes below.</p>`)
 	b.WriteString(`<pre id="result" class="result"></pre>`)
+	b.WriteString(`</article>`)
+
+	b.WriteString(`<article class="card"><h2>Rate limits</h2>`)
+	b.WriteString(`<div class="row"><button class="btn" id="ratelimits">Forget the buckets</button>` +
+		`<span class="muted" id="ratelimitsresult"></span></div>`)
+	b.WriteString(`<p class="muted">Login, signup and password reset are limited per address, ` +
+		`and a spent bucket refills on a timer rather than on a reload. Eight wrong passwords ` +
+		`— or a few runs of the browser suite in a minute — and the next attempt is a 429 that ` +
+		`looks like a login form that has stopped working.</p>`)
 	b.WriteString(`</article>`)
 
 	b.WriteString(`<article class="card"><h2>Inboxes</h2><ul class="links">`)
@@ -285,6 +317,12 @@ document.addEventListener('click', async (e) => {
   }
   if (e.target.id === 'tick') { show('running…'); show((await post('/dev/tick')).data); refresh(); return; }
   if (e.target.id === 'seed') { show('seeding…'); show((await post('/dev/seed')).data); refresh(); return; }
+  if (e.target.id === 'ratelimits') {
+    const out = await post('/dev/ratelimits/reset');
+    const el = document.getElementById('ratelimitsresult');
+    if (el) el.textContent = out.ok ? 'forgotten: ' + out.data.forgotten + ' bucket(s)' : 'failed';
+    return;
+  }
 });
 
 refresh();

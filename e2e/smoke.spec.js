@@ -21,6 +21,15 @@
 import { test, expect } from '@playwright/test';
 import { MEETING, HOSTILE_TITLE, HEADERS } from './fixtures.js';
 
+// The suite blocks service workers by default, because one that has claimed the page
+// answers /api/ before page.route can see the request (playwright.config.js, #79). The
+// last three tests in this file are about the worker itself — that it registers, that
+// the last-seen calendar stays readable offline, and that the API cache is capped — so
+// this is one of the two files that ask for it back. Blocked, those three would be
+// asserting that Chromium has an HTTP cache. Nothing here routes anything, so having a
+// worker costs the rest of the file nothing.
+test.use({ serviceWorkers: 'allow' });
+
 /**
  * Press Save and hand back the id of the event that was created.
  *
@@ -53,7 +62,26 @@ async function deleteEvent(page, id) {
 test('the seeded family calendar loads and shows its events', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText("Leo's dentist")).toBeVisible();
-  await expect(page.getByText('Swimming').first()).toBeVisible();
+
+  // The swimming series, which is what makes this more than a test that one row draws:
+  // expanding a recurrence and drawing an occurrence that was edited away from its
+  // series are things only the browser does, and the month is where they are done.
+  //
+  // Counted rather than found once. A single chip is also what a series that had
+  // stopped repeating after its first occurrence would leave, so the assertion that
+  // has to hold is that it repeats: the seed anchors the series to the first Tuesday
+  // of the month and the grid holds every Tuesday of the month, so the first and the
+  // third are always on it — the 21st at the very latest — with the second moved to
+  // the evening under its own title and the fourth cancelled. That invariant is the
+  // seed's, and it is pinned there too, on every date in a decade:
+  // TestTheDemoSeriesLandsOnTheMonthTheAppOpensOn in cmd/almanack/seed_test.go. It
+  // used to anchor the series to the next Tuesday after today instead, which on a
+  // Tuesday is seven days out and can be past the end of a five-row grid, so this test
+  // went red on whichever days the calendar fell badly and said nothing about why.
+  const swimming = page.getByText('Swimming', { exact: true });
+  await expect(swimming.first()).toBeVisible();
+  expect(await swimming.count(), 'a weekly series draws more than one occurrence in a month').toBeGreaterThan(1);
+  await expect(page.getByText('Swimming (later than usual)', { exact: true })).toBeVisible();
 });
 
 test('no console errors and no CSP violations on load', async ({ page }) => {

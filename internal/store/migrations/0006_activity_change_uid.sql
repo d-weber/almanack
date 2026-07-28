@@ -1,0 +1,48 @@
+-- A name for each logged change that no later change can take.
+--
+-- A queued notification is identified by (user, kind, source_ref, due_at), and the
+-- reference for an activity notification was built out of activity_log.id alone. That
+-- column is INTEGER PRIMARY KEY without AUTOINCREMENT, so SQLite hands the id of a
+-- deleted row out again: delete the calendar holding the newest entries and the next
+-- change made takes the id one of them had. Land it in the same second and the outbox
+-- cannot tell the two apart — INSERT OR IGNORE reads the announcement of the new change
+-- as a repeat of the announcement already made under that id, drops it, and nobody is
+-- told. Under a clock that only moves when it is told to, which is what dev mode runs
+-- on, every entry in the log shares one instant and so every reuse is that collision.
+--
+-- The other way to fix it was to stop reusing the ids: AUTOINCREMENT. SQLite has no
+-- ALTER for that, so it would mean rebuilding the table — copying a family's whole
+-- history into a new one, dropping the original and renaming — which is the opposite of
+-- the expand-only rule migrations here follow (CONVENTIONS §8), and much the larger
+-- thing to do to a calendar that already exists. It would also fix nothing that the
+-- reference itself does not: the outbox would still be keyed on a number whose meaning
+-- comes from another table's DDL, and a row that has already been given a reused id
+-- would still carry it. A column of its own answers the question where the question is.
+--
+-- Adding a column with a constant default is expand-only, and it is worth saying plainly
+-- what that does and does not buy, because the obvious claim is false: the previous binary
+-- does not go on running against this schema. It refuses to start, deliberately, the moment
+-- schema_migrations holds a version it does not know (Store.migrate), which is what stops a
+-- rolled-back release writing rows into a shape it cannot reason about. Every statement it
+-- issues against activity_log naming its columns is true and is not the point.
+--
+-- What expand-only buys is that this migration adds and never rewrites. Every column and
+-- every row the previous release wrote is still there, still meaning what it meant, so the
+-- file after the upgrade is the file before it plus one column — legible to a restore, to
+-- the sqlite3 shell, and to somebody in 2040 with neither this repository nor a working
+-- binary. Undoing it by hand is one DROP COLUMN and one DELETE from schema_migrations. A
+-- table rebuild would have copied a family's whole history into a new shape, and there is no
+-- comparable way back from that. Rolling back as this project practises it is still
+-- restoring the snapshot taken before the upgrade (docs/deployment.md); this is what keeps
+-- the other route open for the day the snapshot is the thing that is missing.
+--
+-- The default reads back as "this change has no name of its own" — which is the truth for
+-- every row written before this migration.
+--
+-- Those rows are deliberately not backfilled. Their notifications are already in the
+-- outbox under the old spelling, "activity:{id}", and leaving the column empty is what
+-- keeps that spelling theirs: a pass that re-walks the last day of the log recognises
+-- what it has already announced instead of announcing it a second time. Nothing logged
+-- from here on can collide with them, because every such row has a name and therefore a
+-- reference the old spelling cannot produce.
+ALTER TABLE activity_log ADD COLUMN change_uid TEXT NOT NULL DEFAULT '';

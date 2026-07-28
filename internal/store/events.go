@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -13,9 +14,10 @@ import (
 
 const (
 	eventColsBare = `id, calendar_id, title, all_day, starts_at, ends_at, start_date, end_date, ` +
-		`location, url, notes, label_id, recurrence_id, created_by, created_at, updated_by, updated_at`
+		`location, url, notes, label_id, recurrence_id, created_by, created_at, updated_by, updated_at, event_uid`
 	eventColsE = `e.id, e.calendar_id, e.title, e.all_day, e.starts_at, e.ends_at, e.start_date, e.end_date, ` +
-		`e.location, e.url, e.notes, e.label_id, e.recurrence_id, e.created_by, e.created_at, e.updated_by, e.updated_at`
+		`e.location, e.url, e.notes, e.label_id, e.recurrence_id, e.created_by, e.created_at, e.updated_by, ` +
+		`e.updated_at, e.event_uid`
 )
 
 func scanEvent(row rowScanner) (domain.Event, error) {
@@ -25,7 +27,7 @@ func scanEvent(row rowScanner) (domain.Event, error) {
 		&e.ID, &e.CalendarID, &e.Title, &e.AllDay,
 		instantCol{&e.StartsAt}, instantCol{&e.EndsAt}, &e.StartDate, &e.EndDate,
 		&e.Location, &e.URL, &e.Notes, &e.LabelID, &recurrenceID,
-		&e.CreatedBy, instantCol{&e.CreatedAt}, &e.UpdatedBy, instantCol{&e.UpdatedAt},
+		&e.CreatedBy, instantCol{&e.CreatedAt}, &e.UpdatedBy, instantCol{&e.UpdatedAt}, &e.EventUID,
 	)
 	if err != nil {
 		return domain.Event{}, mapErr(err)
@@ -57,9 +59,22 @@ func eventValueArgs(e domain.Event) []any {
 // recurrence_id, or an event whose participants half-landed, is not a state this
 // function can leave behind.
 //
-// The store assigns ID, CreatedAt and UpdatedAt. UpdatedBy defaults to CreatedBy.
-// A malformed event (all-day carrying instants, or timed carrying dates) is
-// domain.ErrInvalid, straight from the schema's CHECK.
+// The store assigns ID, CreatedAt, UpdatedAt and EventUID; whatever the caller left in
+// those is ignored. UpdatedBy defaults to CreatedBy. A malformed event (all-day carrying
+// instants, or timed carrying dates) is domain.ErrInvalid, straight from the schema's
+// CHECK.
+//
+// The name is minted here, beside the timestamps, because it has exactly one job — to be
+// unlike every other — and a caller is the wrong place to rely on for that. It is what
+// the notification outbox files this event's reminders under, since id will not do:
+// SQLite reissues the ids of deleted rows, and a reminder filed under a reused one is
+// taken for the reminder already sent under it (migration 0007).
+//
+// crypto/rand.Text is 130 bits and has no error to return; the second half is what
+// decides it. A household's decade of appointments needs nothing like that width,
+// whereas an error here would have to travel up through the edit's transaction and fail
+// the edit — an appointment that could not be saved because the machine was briefly
+// short of randomness.
 func (s *Store) CreateEvent(ctx context.Context, e domain.Event, rec *domain.Recurrence) (domain.Event, error) {
 	now := s.now()
 	if e.UpdatedBy == 0 {
@@ -77,14 +92,15 @@ func (s *Store) CreateEvent(ctx context.Context, e domain.Event, rec *domain.Rec
 			e.RecurrenceID = &created.ID
 		}
 		args := append(eventValueArgs(e),
-			putInt64Ptr(e.RecurrenceID), e.CreatedBy, mustInstant(now), e.UpdatedBy, mustInstant(now))
+			putInt64Ptr(e.RecurrenceID), e.CreatedBy, mustInstant(now), e.UpdatedBy, mustInstant(now), rand.Text())
 		args = append([]any{e.CalendarID}, args...)
 
 		var err error
 		out, err = scanEvent(tx.QueryRowContext(ctx, `
 			INSERT INTO events (calendar_id, title, search_norm, all_day, starts_at, ends_at, start_date, end_date,
-			                    location, url, notes, label_id, recurrence_id, created_by, created_at, updated_by, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                    location, url, notes, label_id, recurrence_id, created_by, created_at, updated_by,
+			                    updated_at, event_uid)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING `+eventColsBare, args...))
 		if err != nil {
 			return err
@@ -765,7 +781,7 @@ func collectSeries(rows *sql.Rows) ([]SeriesRow, error) {
 			&e.ID, &e.CalendarID, &e.Title, &e.AllDay,
 			instantCol{&e.StartsAt}, instantCol{&e.EndsAt}, &e.StartDate, &e.EndDate,
 			&e.Location, &e.URL, &e.Notes, &e.LabelID, &recurrenceID,
-			&e.CreatedBy, instantCol{&e.CreatedAt}, &e.UpdatedBy, instantCol{&e.UpdatedAt},
+			&e.CreatedBy, instantCol{&e.CreatedAt}, &e.UpdatedBy, instantCol{&e.UpdatedAt}, &e.EventUID,
 			&r.ID, &r.Freq, &r.Interval, &byWeekday, &byMonthday, &weekOrdinal,
 			&r.MonthLastDay, datePtrCol{&r.Until}, &r.DTStart,
 		)

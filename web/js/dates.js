@@ -15,18 +15,56 @@ import { t, weekdayName, monthName, currentLang, capitalize } from './i18n.js';
 
 let familyTz = 'Europe/Paris';
 let timeFormat = '24h';
+let unknownTz = null;
 
 const partFormatters = new Map();
 
+/**
+ * The configured zone exists for the server and not for this browser.
+ *
+ * The two sides read different copies of the tz database — the server's
+ * time.LoadLocation reads the operating system's, Intl reads whatever the browser
+ * shipped — and a zone young enough to be in one and not the other is accepted at
+ * startup and unusable here. America/Coyhaique, added in tzdata 2025a, is the case
+ * that was reported. Intl says only "Invalid time zone specified", from whichever
+ * date call happened to run first; this says which setting is wrong.
+ */
+export class UnknownTimezoneError extends Error {
+  constructor(tz) {
+    super(`timezone unknown to this browser: ${tz}`);
+    this.name = 'UnknownTimezoneError';
+    this.timezone = tz;
+  }
+}
+
 export function setTimezone(tz) {
-  if (typeof tz === 'string' && tz) {
-    familyTz = tz;
-    partFormatters.clear();
+  if (typeof tz !== 'string' || !tz) return;
+  familyTz = tz;
+  partFormatters.clear();
+  unknownTz = null;
+  // Asked here rather than left for the first date call, so that boot can decide what
+  // to do about it while there is still a whole screen to give the answer.
+  try {
+    partFormatter();
+  } catch (err) {
+    if (!(err instanceof UnknownTimezoneError)) throw err;
+    unknownTz = tz;
   }
 }
 
 export function timezone() {
   return familyTz;
+}
+
+/**
+ * The configured zone, when this browser cannot resolve it; null otherwise.
+ *
+ * The zone is kept rather than swapped for one that works. Every hour this app puts
+ * on a screen is a conversion through it, so a substitute would not degrade the
+ * calendar — it would rewrite it, plausibly, with nothing on screen to say so.
+ */
+export function unknownTimezone() {
+  return unknownTz;
 }
 
 export function setTimeFormat(fmt) {
@@ -40,12 +78,20 @@ export function is12h() {
 function partFormatter() {
   let f = partFormatters.get(familyTz);
   if (!f) {
-    f = new Intl.DateTimeFormat('en-US', {
-      timeZone: familyTz,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hourCycle: 'h23',
-    });
+    try {
+      f = new Intl.DateTimeFormat('en-US', {
+        timeZone: familyTz,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hourCycle: 'h23',
+      });
+    } catch (err) {
+      // The only thing here that can be out of range is the zone name — every other
+      // option is a literal. Anything else is a different fault and travels as itself
+      // rather than being renamed into this one.
+      if (err instanceof RangeError) throw new UnknownTimezoneError(familyTz);
+      throw err;
+    }
     partFormatters.set(familyTz, f);
   }
   return f;
@@ -206,13 +252,29 @@ export function instantToWall(instant) {
  * Two passes: the first guess uses the offset at the naive instant, the second
  * uses the offset at the corrected one, which is what makes DST changeovers land
  * on the right side of the transition.
+ *
+ * A third pass, only ever taken by a wall time the clocks skipped: correcting one
+ * of those can cross midnight, and where it does the answer is the other reading.
+ * A zone that jumps at midnight has no 00:30 on the day it jumps, and an event
+ * typed onto that day must not be saved onto the evening before it. The server
+ * resolves a broken hour through the same rule (domain.Date.at) and the two halves
+ * of the application must not disagree about one — see docs/architecture.md.
  */
 export function wallToInstant(dateISO, hhmm) {
   const { y, m, d } = parseDate(dateISO);
   const [hh, mm] = String(hhmm || '00:00').split(':').map(Number);
+  const wanted = fromParts(y, m, d);
+  const onWantedDay = (t) => {
+    const p = wallParts(new Date(t));
+    return fromParts(p.year, p.month, p.day) === wanted;
+  };
   const naive = Date.UTC(y, m - 1, d, hh || 0, mm || 0, 0);
   let ms = naive - offsetMs(new Date(naive));
   ms = naive - offsetMs(new Date(ms));
+  if (!onWantedDay(ms)) {
+    const alt = naive - offsetMs(new Date(ms));
+    if (onWantedDay(alt)) ms = alt;
+  }
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 

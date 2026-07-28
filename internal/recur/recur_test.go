@@ -432,6 +432,243 @@ func TestNext(t *testing.T) {
 	}
 }
 
+// TestLast covers the date a finished series is asked for. The cases that matter are the
+// ones where the answer is not Until and not DTStart: Until is only the last occurrence
+// when the rule happens to land on it, and DTStart is not an occurrence at all unless the
+// rule says so.
+func TestLast(t *testing.T) {
+	tests := []struct {
+		name   string
+		r      domain.Recurrence
+		want   string // "" means no last occurrence
+		wantOK bool
+	}{
+		{
+			name: "last/daily landing exactly on until",
+			r:    withUntil(daily("2026-03-01", 2), "2026-03-07"), want: "2026-03-07", wantOK: true,
+		},
+		{
+			// Every second day from the 1st: the 7th, then the 9th, which Until excludes.
+			name: "last/daily stopping short of until",
+			r:    withUntil(daily("2026-03-01", 2), "2026-03-08"), want: "2026-03-07", wantOK: true,
+		},
+		{
+			name: "last/a series of one day",
+			r:    withUntil(daily("2026-03-01", 1), "2026-03-01"), want: "2026-03-01", wantOK: true,
+		},
+		{
+			// The issue's rule. The anchor is Monday 5 January and the rule says Tuesday,
+			// so DTStart is not an occurrence and the last Tuesday on or before 27 January
+			// is the 27th itself.
+			name: "last/weekly whose anchor its own rule excludes",
+			r:    withUntil(weekly("2026-01-05", 1, time.Tuesday), "2026-01-27"),
+			want: "2026-01-27", wantOK: true,
+		},
+		{
+			// Same rule stopped two days early: the last Tuesday is a week before Until.
+			name: "last/weekly stopping between occurrences",
+			r:    withUntil(weekly("2026-01-05", 1, time.Tuesday), "2026-01-25"),
+			want: "2026-01-20", wantOK: true,
+		},
+		{
+			// Tuesdays and Thursdays every other week, from the week of 30 December: the
+			// last one is the Thursday, not the Tuesday that shares its week.
+			name: "last/weekly picks the latest weekday in the final week",
+			r:    withUntil(weekly("2025-12-30", 2, time.Tuesday, time.Thursday), "2026-01-31"),
+			want: "2026-01-29", wantOK: true,
+		},
+		{
+			// The only week the series has is DTStart's own, and its Tuesday is behind the
+			// anchor: a rule that is never satisfied inside its own bounds.
+			name:   "last/weekly whose only weekday precedes dtstart",
+			r:      withUntil(weekly("2026-01-07", 1, time.Tuesday), "2026-01-09"),
+			wantOK: false,
+		},
+		{
+			// The 31st is skipped, never clamped, so February and April cannot answer:
+			// the last occurrence is March, seven weeks before Until.
+			name: "last/monthly on the 31st backs up past the short months",
+			r:    withUntil(monthlyDay("2026-01-31", 1, 31), "2026-05-20"), want: "2026-03-31", wantOK: true,
+		},
+		{
+			// Only leap Februaries have a 29th, so this happens in 2024 and then not again
+			// until 2028 — the last occurrence is four years behind Until, further than
+			// the first probe reaches.
+			name: "last/monthly every twelve months on the 29th of february",
+			r:    withUntil(monthlyDay("2024-02-29", 12, 29), "2027-06-30"), want: "2024-02-29", wantOK: true,
+		},
+		{
+			name: "last/monthly last day of the month",
+			r:    withUntil(monthlyLast("2026-01-31", 1), "2026-03-15"), want: "2026-02-28", wantOK: true,
+		},
+		{
+			// The fifth Tuesday exists in March and June 2026 but not in April or May.
+			name: "last/monthly fifth tuesday skips the months without one",
+			r:    withUntil(monthlyNth("2026-01-01", 1, time.Tuesday, 5), "2026-05-31"), want: "2026-03-31", wantOK: true,
+		},
+		{
+			name: "last/yearly clamps 29 february in a common year",
+			r:    withUntil(yearly("2024-02-29", 1), "2026-06-01"), want: "2026-02-28", wantOK: true,
+		},
+		{
+			name: "last/yearly stopping before the next anniversary",
+			r:    withUntil(yearly("2020-06-15", 3), "2027-01-01"), want: "2026-06-15", wantOK: true,
+		},
+		{
+			// A long daily series is the case the probe exists for: the answer is at the
+			// far end, so the first window finds it without touching the other 7 000 days.
+			name: "last/daily running for twenty years",
+			r:    withUntil(daily("2006-01-01", 1), "2026-01-01"), want: "2026-01-01", wantOK: true,
+		},
+		{
+			name: "last/a rule with no until runs forever and has no last",
+			r:    daily("2026-03-01", 1), wantOK: false,
+		},
+		{
+			// Every period lands in February, which never has a 30th. There is no last
+			// occurrence because there is no occurrence.
+			name: "last/rule that can never occur",
+			r:    withUntil(monthlyDay("2026-02-15", 12, 30), "2046-02-15"), wantOK: false,
+		},
+		{
+			name: "last/invalid rule",
+			r:    withUntil(daily("2026-03-01", 0), "2026-03-31"), wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := lastWithin(t, tc.r)
+			if ok != tc.wantOK {
+				t.Fatalf("Last() ok = %v, want %v (got %s)", ok, tc.wantOK, got)
+			}
+			if ok && got.String() != tc.want {
+				t.Errorf("Last() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// lastCallBudget is six orders of magnitude more than Last has ever needed and a fiftieth
+// of the timeout it is here to pre-empt.
+const lastCallBudget = 10 * time.Second
+
+// lastWithin is Last with a deadline, because the row above it that matters most cannot
+// otherwise fail in a way anybody can read.
+//
+// Last's first line refuses a rule Validate rejects, and the "invalid rule" row is the
+// only thing holding that line in place. Take it away and Last hands an interval of zero
+// to eachDaily, which advances the date by nothing and never reaches the end of the
+// window: the test does not fail, it hangs, and the package reports "test timed out
+// after 10m0s" with a stack trace instead of "an unusable rule was expanded". That costs
+// the whole job's budget and names no defect, which is the worst of both — a guard whose
+// absence is indistinguishable from a slow machine is not a guard.
+//
+// Waiting on a channel rather than bounding the loop from inside because the bound
+// belongs to the test, not to Last: a rule Validate has accepted terminates by
+// construction, its probe widening until it has seen the series whole. The goroutine is
+// abandoned if the deadline passes, which is correct here — the process is about to fail
+// and exit, and there is nothing to clean up that outlives it.
+func lastWithin(t *testing.T, r domain.Recurrence) (domain.Date, bool) {
+	t.Helper()
+	type answer struct {
+		d  domain.Date
+		ok bool
+	}
+	done := make(chan answer, 1)
+	go func() {
+		d, ok := Last(r)
+		done <- answer{d, ok}
+	}()
+	select {
+	case a := <-done:
+		return a.d, a.ok
+	case <-time.After(lastCallBudget):
+		t.Fatalf("Last() did not answer within %s: it is expanding a rule it should have refused (%+v)", lastCallBudget, r)
+		return domain.Date{}, false
+	}
+}
+
+// TestLastAgreesWithExpand is the property that makes Last safe to route on: whatever it
+// answers must be an occurrence, and nothing may come after it. Expand over the whole
+// life of each series is the reference, which is affordable here and is exactly the work
+// Last exists to avoid doing per search result.
+func TestLastAgreesWithExpand(t *testing.T) {
+	rules := []struct {
+		name string
+		r    domain.Recurrence
+	}{
+		{"daily interval 4", withUntil(daily("2026-01-01", 4), "2026-06-13")},
+		{"weekly anchor excluded by its own rule", withUntil(weekly("2026-01-05", 1, time.Tuesday), "2026-01-27")},
+		{"weekly biweekly tue+thu", withUntil(weekly("2025-12-30", 2, time.Tuesday, time.Thursday), "2026-04-01")},
+		{"weekly triweekly sun+mon", withUntil(weekly("2026-01-04", 3, time.Sunday, time.Monday), "2026-09-09")},
+		{"monthly 31st", withUntil(monthlyDay("2026-01-31", 1, 31), "2027-02-15")},
+		{"monthly last day", withUntil(monthlyLast("2026-01-31", 1), "2026-11-04")},
+		{"monthly 5th tuesday", withUntil(monthlyNth("2026-01-01", 1, time.Tuesday, 5), "2027-07-20")},
+		{"monthly last friday every 2 months", withUntil(monthlyNth("2026-01-30", 2, time.Friday, -1), "2026-12-25")},
+		{"yearly leap day", withUntil(yearly("2024-02-29", 1), "2030-08-01")},
+		{"never occurs", withUntil(monthlyDay("2026-02-15", 12, 30), "2046-02-15")},
+	}
+
+	for _, rule := range rules {
+		t.Run(rule.name, func(t *testing.T) {
+			all := Expand(rule.r, rule.r.DTStart, *rule.r.Until)
+			got, ok := Last(rule.r)
+			if ok != (len(all) > 0) {
+				t.Fatalf("Last() ok = %v but Expand found %d occurrences", ok, len(all))
+			}
+			if !ok {
+				return
+			}
+			if want := all[len(all)-1]; !got.Equal(want) {
+				t.Fatalf("Last() = %s, want %s (the last of %v)", got, want, strs(all))
+			}
+			if !Occurs(rule.r, got) {
+				t.Errorf("Last() = %s but Occurs says it is not an occurrence", got)
+			}
+			// And nothing follows it, which is the half a wrong answer would still satisfy.
+			if n, ok := Next(rule.r, got); ok {
+				t.Errorf("Last() = %s but Next finds %s after it", got, n)
+			}
+		})
+	}
+}
+
+// TestLastProbesBackwardsInsteadOfWalking pins the cost. Last must be answered from the
+// end of the series, so a long series and a short one with the same final occurrence cost
+// about the same; a walk from DTStart would scale with the length instead.
+func TestLastProbesBackwardsInsteadOfWalking(t *testing.T) {
+	long := withUntil(daily("1946-01-01", 1), "2026-01-01")
+	short := withUntil(daily("2025-12-01", 1), "2026-01-01")
+
+	for _, r := range []domain.Recurrence{long, short} {
+		if got, ok := Last(r); !ok || got.String() != "2026-01-01" {
+			t.Fatalf("Last(dtstart=%s) = %s ok=%v, want 2026-01-01", r.DTStart, got, ok)
+		}
+	}
+
+	const repeats = 20000
+	run := func(r domain.Recurrence) time.Duration {
+		start := time.Now()
+		for i := 0; i < repeats; i++ {
+			if _, ok := Last(r); !ok {
+				t.Fatal("no last occurrence")
+			}
+		}
+		return time.Since(start)
+	}
+	fast := run(short)
+	slow := run(long)
+
+	// The honest ratio is 1: both probes read the same 32 days. Eighty years of walking
+	// would be four orders of magnitude. The slack keeps a scheduling hiccup on a
+	// sub-millisecond measurement from failing the build.
+	if limit := 10*fast + 50*time.Millisecond; slow > limit {
+		t.Errorf("a series running since 1946 took %s against %s for one that started weeks before it ended (limit %s):\n"+
+			"cost is scaling with the length of the series, so Last is walking from DTStart instead of probing back from Until", slow, fast, limit)
+	}
+}
+
 func TestOccurs(t *testing.T) {
 	tests := []struct {
 		name string

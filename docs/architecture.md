@@ -94,17 +94,48 @@ field and the wall clock wins again, later pass and all. The rule is asserted en
 `e2e/dst-fallback.spec.js`, which is where browser date behaviour gets tested: the frontend
 takes no dependencies, so there is no JavaScript unit runner to put it in.
 
-**And the server answers it the same way.** `internal/events` expands a series through Go's
-`time.Date`, which resolves a broken wall time by reading the fields as though they were UTC,
-taking the zone offset in force at that instant and correcting once — step for step the
-two-pass conversion `wallToInstant()` does. So an occurrence the server generates and a time
-the editor saves land on the same instant — as long as the two sides read the same timezone
-data, which is a real caveat and is spelled out under the table — and neither half of the
-application has a rule of its own. That is worth stating because it is an agreement between two implementations rather
+**And the server answers it the same way.** `domain.Date.at`, which every wall clock in the
+application becomes an instant through, resolves a broken wall time by reading the fields as
+though they were UTC, taking the zone offset in force at that instant and correcting once —
+step for step the two-pass conversion `wallToInstant()` does. So an occurrence the server
+generates and a time the editor saves land on the same instant — as long as the two sides
+read the same timezone data, which is a real caveat and is spelled out under the table — and
+neither half of the application has a rule of its own. That is worth stating because it is an agreement between two implementations rather
 than one piece of code, and it would break quietly: both sides say 02:30 whichever instant
 they pick. The two ambiguity rows below are therefore pinned twice, by
 `TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant` in `internal/events` and by
 `e2e/dst-fallback.spec.js`, each of which names the other.
+
+**One rule outranks that conversion: the answer is on the day it was asked
+for.** A zone that jumps at midnight has no 00:30 on the day it jumps, and correcting a
+negative offset backwards put that occurrence at 23:30 the previous evening — a day the
+family had asked nothing of, and one the series' own date then disagreed with. Nothing
+downstream could tell: an occurrence is a date *and* an instant, and every bucket in the
+application reads the day off the instant, because by then it is the only thing left. The
+day the series named answered zero occurrences, so it went from the month grid, the digest
+and the reminder at once (#57). A broken wall time has exactly two readings, being the
+offsets either side of the jump, so where the first leaves the date behind the other one is
+taken. It is on the requested date over every minute of every gap in the database between
+1970 and 2100, the exceptions being the six dates a zone deleted outright on crossing the
+date line, which nothing can help. Both halves apply it, and in Europe/Paris and
+America/New_York alike it never fires: this changes what a household in Santiago, Havana or
+the Azores sees, and nothing else.
+
+**Where a day *begins* is a different question, and it has a rule of its own.**
+`domain.Date.In` is the low end of the occurrence window in `Store.EventsInRange`, both ends
+of the activity count behind a summary, and the base an all-day reminder counts back from —
+all of which want the first instant of a date rather than a particular wall clock on it. A
+day can have no midnight, which is the last daylight-saving row of the table below; it can
+equally have *two*, where a zone puts its clocks back onto or across midnight, and there
+`time.Date` answers with the second, so a half-open window opens an hour into the day it
+named and drops whatever was in the gap — #57's symptom at the other end of the window. `In`
+therefore takes the earlier reading whenever both are on the date. `Date.At` deliberately
+does not, and the two are not interchangeable: which reading of an ambiguous *appointment*
+time the calendar picks follows the zone, is a promise made twice in two implementations,
+and is the autumn row below. This one is history — 120 (zone, date) pairs between 1970 and
+2100, the last of them in 2023, `Europe/Paris` on 26 September 1976 among them — and the
+browser needs no counterpart to it, because it buckets on date strings and never builds a
+day boundary at all.
 
 ### The recurrence policy table
 
@@ -118,17 +149,19 @@ These were decided deliberately, because every one of them has a plausible oppos
 | Interval anchoring | The series start is the anchor, for every frequency |
 | Monthly modes | Exactly one of: day-of-month, nth weekday (`1..5`, `-1` = last), or last calendar day |
 | A wall time in the hour the clocks repeat (autumn) | **The same instant on both sides, given the same tz database.** Both run one conversion — read the wall fields as though they were UTC, take the offset in force at that reading, apply it, and correct once — and those are the same function, checked over every transition in all 406 zones. Which of the two passes it lands on follows the zone rather than being a policy: the second in Europe/Paris, the first in a zone whose winter offset is negative. See the caveat below the table: the same *function* is not the same *answer* if the two sides disagree about the rules |
-| A wall time in the hour the clocks skip (spring) | **Moved by the length of the gap, in the direction the offset dictates** — forward where the standard offset is at or above zero, so 02:30 becomes 03:30 in Europe/Paris; backward where it is negative, so 02:30 becomes 01:30 in America/New_York. It is not a choice either implementation makes, but what falls out of the conversion above, and in a zone that jumps at midnight it can land on the **previous day** — a 00:30 series in America/Santiago resolves to 23:30 the day before, and is then bucketed on that day. Both sides again |
+| A wall time in the hour the clocks skip (spring) | **Moved by the length of the gap, in the direction the offset dictates** — forward where the standard offset is at or above zero, so 02:30 becomes 03:30 in Europe/Paris; backward where it is negative, so 02:30 becomes 01:30 in America/New_York. It is not a choice either implementation makes, but what falls out of the conversion above. Both sides again |
+| …when moving it that way would change the date | **The other reading, which is the one on the day that was asked for.** The single rule that overrides the conversion, reachable only where the missing hour touches a date boundary: America/Santiago has no 00:30 on 6 September 2026, and correcting backwards resolved it to 23:30 on the 5th, so the day the series named held nothing at all (#57). It now resolves to 01:30 on the 6th, and midnight itself to 01:00 — a day that begins at 01:00 because it had no midnight to begin at. Every zone that still jumps at midnight is west of Greenwich; Paris and New York jump at 02:00, so this row never fires for them. Pinned in `internal/domain` by example and over every minute of a year in the zones that break one |
 | Occurrence end | **Start plus the template's exact duration.** An occurrence spanning a daylight-saving change is therefore an hour longer or shorter in wall-clock terms, while being exactly as long in real time; RFC 5545 and Google Calendar do the same. Keeping both wall clocks instead would make an occurrence's length depend on the date it fell on, and collapse anything inside the missing spring hour to zero length or less |
 
 `internal/recur` is pure functions over dates with no I/O, which is why it can be tested
 exhaustively. Its test suite includes cases derived from a calendar independently of the
 implementation, and the first five policies above — the ones that are its own — were
 mutation-tested to confirm the suite actually catches their opposites. The rows below them
-belong to `internal/events`: they are about the instant an occurrence lands on rather than
-the date it falls on.
+belong to `internal/domain` and `internal/events`: they are about the instant an occurrence
+lands on, and — the row that took a bug to notice was missing — about that instant being on
+the date the occurrence is filed under.
 
-**The two daylight-saving rows say "the same conversion", not "the same answer".** The
+**The daylight-saving rows say "the same conversion", not "the same answer".** The
 conversion is provably one function written twice — but each side reads its own copy of the
 tz database, and those can be different vintages: Go prefers the system zoneinfo and falls
 back to the `time/tzdata` the binary embeds, while the browser carries whatever its engine
@@ -139,7 +172,11 @@ server on 2026b put `Europe/Chisinau` 2026-03-29 03:30 an hour apart, and put *e
 stopped changing its clocks. Nothing here can fix that from one side; what it means is that
 the guarantee is about the algorithm, and a household in a zone whose rules have just
 changed should expect an occurrence and a typed time to differ until the browser updates.
-France has not changed its rules since 1996.
+France has not changed its rules since 1996. The far end of the same disagreement is a zone
+the browser does not carry at all, which a recent addition can be — `America/Coyhaique`
+arrived in tzdata 2025a. There is then no conversion to compare, and the browser draws no
+calendar at all: it names the zone it cannot resolve and stops, rather than substituting
+one that works and moving every hour on the screen by an amount nothing there can reveal.
 
 ### Occurrences are never stored
 
@@ -167,8 +204,14 @@ every copy shows one series once per exception it has. So a copy is returned exa
 it matches the query and its own template does not — no duplicates and no silent misses,
 in one condition. Search deliberately has no window: it is over the whole calendar, past
 and finished series included, which is also why a series result sorts under the date its
-pattern began. The occurrence-relative date beside each result (`next_occurrence`) is
-computed per result by the handler, because only expansion knows it and SQL cannot ask.
+pattern began. The occurrence-relative dates on each result are computed per result by the
+handler, because only expansion knows them and SQL cannot ask: `next_occurrence` is the
+date beside the row, and `occurrence_date` is the day the row opens on — the same date
+while the series runs, and its final occurrence once it has stopped. They are two fields
+rather than one because a finished series has no next occurrence and still has to lead
+somewhere, and the client must not work that day out for itself. A series' anchor is not
+necessarily an occurrence of its own rule, so the obvious guess is wrong, and it fails as
+a 404 on the detail screen rather than as a day drawn slightly askew.
 
 That standalone event is the id the API then publishes for the occurrence, so the *second*
 thing anyone does to an edited occurrence arrives addressed to the copy rather than to the

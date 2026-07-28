@@ -22,9 +22,13 @@ const HOLIDAY = 'A week by the sea';
  *
  * Wednesday is the point: seven days from one crosses a week boundary whether the
  * reader's week begins on Monday or on Sunday, and lands in exactly two rows either
- * way. The seeded family's own seaside holiday runs from today + 10, so which day of
- * the week it starts on — and whether it is split at all — depends on the day the suite
- * happens to run, and a test that only fails on Fridays is worse than none.
+ * way. This used to be the difference between this fixture and the seeded family's own
+ * seaside holiday, which ran from today + 10 and so started on whichever weekday the
+ * suite happened to run on — sometimes split across two rows, sometimes not, and a test
+ * that only fails on Fridays is worse than none. The seed now pins that holiday to the
+ * second Saturday of the month it opens on (#72), which splits the same way, but this
+ * test still builds its own: what the demo puts on the calendar is the seed's to change,
+ * and this assertion is about how a bar is named, not about the demo.
  */
 function seasideWeek() {
   const now = new Date();

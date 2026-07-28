@@ -140,6 +140,27 @@ func (s *Store) UpdateCalendar(ctx context.Context, c domain.Calendar) error {
 // never re-checks that the event is still there: a reminder already materialised for
 // the next two days goes out for a calendar that no longer exists. Only undelivered
 // rows go; sent and skipped ones are history.
+//
+// "Undelivered" is sent_at IS NULL AND skipped IS NULL, which includes a row a dispatcher
+// has picked up and is in the middle of pushing: sending_started_at is set on that row and
+// is deliberately not tested here. So deleting a calendar under an in-flight push leaves
+// one `slog.Error("mark notification sent", …)` behind, reading `mark notification N sent:
+// not found` — the dispatcher coming back with the provider's acceptance for a row that
+// went out from under it. Reproduced, and left as it is. The push either reached the phone
+// or it did not, nothing is lost either way, and the row was going to be deleted a moment
+// later regardless; testing sending_started_at would keep it instead, which is the worse
+// end — a queued announcement for a calendar nobody has, surviving because a delivery
+// attempt happened to be running when it went. The window is not new and not particular to
+// activity: the reminder prune below has the same shape, and so does
+// DeleteUnsentBySourcePrefix, which internal/events runs on every deletion. It is written
+// down so the log line is not read as a defect by whoever meets it next.
+//
+// Both kinds a calendar can produce go, and they are found in different ways. A
+// reminder's reference begins with the id of the event it warns about, so the events
+// being deleted name their own rows. A change's does not mention the calendar at all —
+// it names the change — so there is no prefix that means "this calendar's", and the log
+// rows are what has to be asked instead. They are still here to be asked: the cascade
+// that takes them runs on the DELETE below, after this.
 func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -151,13 +172,92 @@ func (s *Store) DeleteCalendar(ctx context.Context, id int64) error {
 		// source_ref is "reminder:{eventID}:{occurrenceDate}:{reminderID}" — the layout
 		// internal/events.ReminderSourceRef writes and prunes by, which cannot be
 		// imported here (it depends on this package). TestDeletingACalendarPrunesTheOutbox
-		// in internal/events holds the two together.
+		// in internal/events holds the two together, and
+		// TestDeletingACalendarLeavesTheRemindersOfEventsItsIDPrefixes holds the boundary:
+		// the colon ending the pattern is the whole of what keeps event 1's prune off
+		// event 12's reminders.
+		//
+		// The id is read back out of the reference and matched on events.id for the reason
+		// the activity prune below does it, and this is where the two statements are the
+		// same statement. Without that line the pattern is only ever built: a string
+		// concatenated afresh for every (candidate row × event in the calendar) pair, so
+		// the cost is a product of the two and it is paid holding the write lock s.tx takes
+		// at BEGIN. events.id is INTEGER PRIMARY KEY, so the equality is a rowid seek and
+		// the inner loop stops being a loop.
+		//
+		// It cannot change which rows match, and that is an argument rather than a
+		// measurement: LIKE 'reminder:' || e.id || ':%' can only match a reference that
+		// begins "reminder:{e.id}:", and substr from the tenth character of such a
+		// reference begins "{e.id}:", which CAST reads up to the colon and no further. So
+		// the pattern implies the equality, and adding it as a conjunct excludes nothing.
+		// Confirmed at six sizes as well: the same rows pruned either way, every time.
+		//
+		// kind is not decoration here, it is what makes the equality safe. "activity:12:
+		// NAME" also casts to 12, and "digest:2026-08-04" casts to 26; it is only because
+		// the schema's CHECK allows four kinds and this is the one that carries this
+		// layout that reading digits from the tenth character means an event id at all.
+		// It also keeps the statement off every digest and announcement in the outbox.
+		//
+		// Which leaves the pattern redundant, and it stays anyway. Given kind, every
+		// reference here begins "reminder:{eventID}:", so the equality already decides and
+		// no test can tell the pattern from nothing — dropping it, or dropping the colon
+		// that used to be the whole of the boundary, leaves the suite green. What it is
+		// now is the assertion that the layout is the one this statement assumes, which is
+		// a thing this package can only state and never import, and which
+		// TestDeletingACalendarPrunesTheOutbox in internal/events exists to hold. It costs
+		// what it did not cost before: it used to run once per (row × event) and now runs
+		// once per row, against the single event the seek found. Belt to the equality's
+		// braces, at no price, in the one place two packages have to agree.
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM notification_queue
 			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND kind = 'reminder'
 			   AND EXISTS (SELECT 1 FROM events e
 			                WHERE e.calendar_id = ?
+			                  AND e.id = CAST(substr(notification_queue.source_ref, 10) AS INTEGER)
 			                  AND notification_queue.source_ref LIKE 'reminder:' || e.id || ':%')`, id); err != nil {
+			return mapErr(err)
+		}
+		// The two spellings internal/events.ActivitySourceRef writes, matched whole
+		// rather than by prefix: 'activity:1' is a prefix of 'activity:12', so a
+		// prefix would take eleven other changes' announcements with it, from
+		// calendars nobody has deleted. Both spellings are listed rather than
+		// reasoned about, because which one a given row carries depends on whether
+		// its change was logged before 0006. TestDeletingACalendarLeavesTheAnnouncements
+		// OfChangesItsIDPrefixes holds the boundary the first sentence is about.
+		//
+		// The id is read out of the reference and matched on activity_log.id, which is
+		// the whole of what makes this affordable. Without that line the two spellings
+		// are only ever *built*: every candidate row is compared against a pair of
+		// strings concatenated afresh for every row of the log, so the statement is
+		// quadratic — and it runs inside s.tx, which takes SQLite's write lock at BEGIN
+		// and stands every other writer still while it works. Measured on 20,000 changes
+		// and 30,000 queued rows: 3m07s, against 74ms with the id keyed, having gone
+		// 704ms, 2.9s, 11.7s, 45.0s over the doublings before it — 4x a doubling, which
+		// is the shape rather than the size being wrong. A family will not have 20,000
+		// changes; a family also cannot be asked to hold still while one calendar is
+		// deleted, and this is the one statement here that grows on two things at once.
+		//
+		// activity_log.id is INTEGER PRIMARY KEY, so the equality is a rowid lookup and
+		// the inner loop stops being a loop. substr from the tenth character is what
+		// follows 'activity:'; CAST reads the leading digits and stops at the colon, so
+		// both spellings arrive at the same number. The IN is still what decides, and the
+		// CAST only says which row to ask, so nothing about which rows match changes —
+		// a reference that merely starts with the right digits is refused exactly as it
+		// was. kind is there for the same reason it reads well: the schema's CHECK allows
+		// four values and only one of them can carry these references, so saying so keeps
+		// the statement off every reminder and digest in the outbox and says out loud
+		// what it is about.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM notification_queue
+			 WHERE sent_at IS NULL AND skipped IS NULL
+			   AND kind = 'activity'
+			   AND EXISTS (SELECT 1 FROM activity_log a
+			                WHERE a.calendar_id = ?
+			                  AND a.id = CAST(substr(notification_queue.source_ref, 10) AS INTEGER)
+			                  AND notification_queue.source_ref IN (
+			                        'activity:' || a.id,
+			                        'activity:' || a.id || ':' || a.change_uid))`, id); err != nil {
 			return mapErr(err)
 		}
 		return affected(tx.ExecContext(ctx, `DELETE FROM calendars WHERE id = ?`, id))

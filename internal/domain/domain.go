@@ -5,6 +5,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -103,6 +104,15 @@ type Event struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedBy    int64     `json:"updated_by"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// EventUID names this event and no other, for as long as the row exists. ID does
+	// not: SQLite reissues the ids of deleted rows, and the notification outbox —
+	// which recognises a reminder it has already queued by the reference it filed it
+	// under — then cannot tell an appointment that took a reused id from the one it
+	// replaced. The store assigns it; an event created before the column existed
+	// carries none. It answers a question the outbox asks and nobody else does, so it
+	// is not part of the API the browser sees.
+	EventUID string `json:"-"`
 }
 
 // Freq is the recurrence frequency.
@@ -186,6 +196,37 @@ type Reminder struct {
 	OffsetMinutes *int   `json:"offset_minutes,omitempty"`
 	DaysBefore    *int   `json:"days_before,omitempty"`
 	AtTimeLocal   string `json:"at_time_local,omitempty"` // "HH:MM" family tz
+}
+
+// Shape is what a reminder says — "30 minutes before", or "09:00 on the day before" —
+// and it is the whole of what a reminder is. There is no name, no note and no other
+// field, so two reminders of one shape fall due at the same instant, carry the same
+// sentence, and cannot be told apart by anything that reads them. They are therefore
+// the same reminder, which is why a list holding one twice is one warning written
+// twice rather than two warnings, and why matching a saved list against the rows
+// already stored can be done on this alone (#65).
+//
+// It is the identity the rest of the app already works in: web/js/views/event.js keys
+// its picker on exactly these fields and will not offer a shape the list is holding,
+// and its reminderSignature compares two lists the same way to decide whether a save
+// is worth sending at all.
+//
+// The fields are compared as they are written, character for character; normalising
+// "9:00" to "09:00" belongs to whatever accepts the request.
+//
+// A reminder with neither shape has none, and the empty string is what it gets: the
+// reminders table's CHECK refuses to store one and internal/store refuses to write
+// one, so this arises only on a database somebody has taken the constraint off — where
+// it must still be a value rather than a panic.
+func (r Reminder) Shape() string {
+	switch {
+	case r.OffsetMinutes != nil:
+		return fmt.Sprintf("m%d", *r.OffsetMinutes)
+	case r.DaysBefore != nil:
+		return fmt.Sprintf("d%d@%s", *r.DaysBefore, r.AtTimeLocal)
+	default:
+		return ""
+	}
 }
 
 // PushSubscription is one browser profile on one device. A user has as many as they
@@ -273,6 +314,15 @@ type Activity struct {
 	EventID    *int64         `json:"event_id,omitempty"`
 	Title      string         `json:"title"` // denormalized: survives the event's deletion
 	At         time.Time      `json:"at"`
+
+	// ChangeUID names this change and no other, for as long as the row exists. ID
+	// does not: SQLite reissues the ids of deleted rows, and the notification outbox
+	// — which recognises what it has already announced by the reference it filed it
+	// under — then cannot tell a change that took a reused id from the one it
+	// replaced. The store assigns it; a change logged before the column existed
+	// carries none. It answers a question the outbox asks and nobody else does, so it
+	// is not part of the API the browser sees.
+	ChangeUID string `json:"-"`
 }
 
 // Session is a logged-in browser. Tokens are stored hashed; the plaintext exists only

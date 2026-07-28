@@ -49,6 +49,18 @@ func TestDaysUntilMatchesAddDays(t *testing.T) {
 	}
 }
 
+// TestUTCHandleIsWhatInWasInUTC keeps the two ways of spelling "midnight UTC on d" the
+// same. AddDays and Weekday used to go through In(time.UTC) and now use the handle
+// directly, which is faster and says what it means — but only while the two agree, and
+// nothing else in the suite would notice if In grew a rule that reached UTC.
+func TestUTCHandleIsWhatInWasInUTC(t *testing.T) {
+	for d := MustParseDate("1900-01-01"); d.Before(MustParseDate("2200-01-01")); d = d.AddDays(19) {
+		if got, want := d.In(time.UTC), d.utcHandle(); !got.Equal(want) {
+			t.Fatalf("%s: In(UTC) = %v, handle = %v", d, got, want)
+		}
+	}
+}
+
 func TestAddMonthsRefusesToGuess(t *testing.T) {
 	// AddMonths deliberately reports failure rather than choosing between the
 	// skip and clamp policies, which differ by intent (a monthly bill skips, a
@@ -168,6 +180,349 @@ func TestAllDayHasNoTimezone(t *testing.T) {
 	}
 	if got := DateIn(d.In(paris), paris); !got.Equal(d) {
 		t.Errorf("midnight Paris on %s read back as %s", d, got)
+	}
+}
+
+// TestWallClockResolvesOntoTheDayItWasAskedFor pins what a Date does with a wall time
+// that a daylight-saving change broke, and it is two assertions at once.
+//
+// The first is that the existing rule is untouched. Which instant a skipped hour
+// resolves to follows the zone rather than a policy — forward in Europe/Paris, backward
+// in America/New_York — and both of those rows are pinned in internal/events and in a
+// real browser as well. A change here that moved either of them would be a change to a
+// documented promise, so they are restated in the two rows below that say "unchanged".
+//
+// The second is the rule this one is subordinate to: whatever the offsets do, the answer
+// is on the date that was asked for. A zone that jumps at midnight has no 00:30 on the
+// day it jumps, and until #57 the correction handed back 23:30 the previous evening —
+// a date every bucket in the application then disagreed with, having no way to know it
+// had been asked for a different one.
+func TestWallClockResolvesOntoTheDayItWasAskedFor(t *testing.T) {
+	cases := []struct {
+		name            string
+		zone, date      string
+		hour, min       int
+		wantUTC, wantHM string
+		note            string
+	}{
+		{
+			name: "an ordinary time is the ordinary answer",
+			zone: "Europe/Paris", date: "2026-03-31", hour: 16, min: 30,
+			wantUTC: "2026-03-31T14:30:00Z", wantHM: "16:30",
+			note: "the summer offset applied to a time that exists",
+		},
+		{
+			name: "Paris moves a skipped hour forward, unchanged",
+			zone: "Europe/Paris", date: "2026-03-29", hour: 2, min: 30,
+			wantUTC: "2026-03-29T01:30:00Z", wantHM: "03:30",
+			note: "02:30 never happens on this date; the day does not change, so neither does the answer",
+		},
+		{
+			name: "New York moves a skipped hour backward, unchanged",
+			zone: "America/New_York", date: "2026-03-08", hour: 2, min: 30,
+			wantUTC: "2026-03-08T06:30:00Z", wantHM: "01:30",
+			note: "the opposite direction from Paris, and still the 8th, so it stands",
+		},
+		{
+			name: "the repeated hour is untouched in either zone",
+			zone: "Europe/Paris", date: "2026-10-25", hour: 2, min: 30,
+			wantUTC: "2026-10-25T01:30:00Z", wantHM: "02:30",
+			note: "an hour that happens twice names two instants, not none, so nothing here applies to it",
+		},
+		{
+			name: "Santiago has no 00:30 on the day it jumps at midnight",
+			zone: "America/Santiago", date: "2026-09-06", hour: 0, min: 30,
+			wantUTC: "2026-09-06T04:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 2026-09-06T03:30:00Z, which is 23:30 on the 5th",
+		},
+		{
+			name: "and no midnight either, so the day starts at 01:00",
+			zone: "America/Santiago", date: "2026-09-06", hour: 0, min: 0,
+			wantUTC: "2026-09-06T04:00:00Z", wantHM: "01:00",
+			note: "Date.In is this case, and it is a day boundary in two range queries",
+		},
+		{
+			name: "the week either side of it is ordinary",
+			zone: "America/Santiago", date: "2026-09-13", hour: 0, min: 30,
+			wantUTC: "2026-09-13T03:30:00Z", wantHM: "00:30",
+			note: "00:30 exists on this date, and the summer offset is the one that says so",
+		},
+		{
+			name: "Havana, the other zone with a household in it",
+			zone: "America/Havana", date: "2026-03-08", hour: 0, min: 30,
+			wantUTC: "2026-03-08T05:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 23:30 on the 7th",
+		},
+		{
+			name: "the Azores, which is an hour from Lisbon and does the same thing",
+			zone: "Atlantic/Azores", date: "2026-03-29", hour: 0, min: 30,
+			wantUTC: "2026-03-29T01:30:00Z", wantHM: "01:30",
+			note: "the reading this replaces is 23:30 on the 28th",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no tzdata: %v", err)
+			}
+			d := MustParseDate(tc.date)
+			got := d.At(tc.hour, tc.min, loc)
+			if s := got.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s %02d:%02d in %s = %s, want %s (%s)", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantUTC, tc.note)
+			}
+			if s := got.In(loc).Format("15:04"); s != tc.wantHM {
+				t.Errorf("%s %02d:%02d in %s reads back as %s, want %s", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantHM)
+			}
+			// The one that matters to every caller: the instant is on the date.
+			if bucket := DateIn(got, loc); !bucket.Equal(d) {
+				t.Errorf("%s %02d:%02d in %s lands on %s, which is not the day it was asked for", tc.date, tc.hour, tc.min, tc.zone, bucket)
+			}
+
+			// The midnight rows belong to Date.In as much as to Date.At — it is the one
+			// that is a day boundary in Store.EventsInRange and in the activity count
+			// behind a summary — and asking only its neighbour leaves it free to go back
+			// to bare time.Date without a single test noticing. It is not a synonym for
+			// At(0, 0): a day with two midnights is In's business and not At's, which is
+			// why the answer is restated here rather than compared to the row above.
+			if tc.hour != 0 || tc.min != 0 {
+				return
+			}
+			first := d.In(loc)
+			if s := first.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s.In(%s) = %s, want %s (%s)", tc.date, tc.zone, s, tc.wantUTC, tc.note)
+			}
+			if bucket := DateIn(first, loc); !bucket.Equal(d) {
+				t.Errorf("%s.In(%s) lands on %s, which is not the day it was asked for", tc.date, tc.zone, bucket)
+			}
+		})
+	}
+}
+
+// TestNoWallTimeInAWholeYearLeavesItsDay is the same promise made exhaustively rather
+// than by example, because the examples above are the cases somebody thought of. Every
+// minute of every day of a year, in the zones that break one, must resolve onto the day
+// it names. Nothing else in this application would notice if one did not: an occurrence
+// carries no memory of the date it was asked for once it is an instant, which is exactly
+// why #57 was invisible until somebody queried the day and got nothing back.
+func TestNoWallTimeInAWholeYearLeavesItsDay(t *testing.T) {
+	// Every kind of zone that has ever been a problem: the two the household might use,
+	// the negative-offset one whose skipped hour moves the other way, and four that jump
+	// at midnight, one of them (Scoresbysund) having only just started to.
+	zones := []string{
+		"Europe/Paris", "America/New_York", "America/Santiago", "America/Havana",
+		"Atlantic/Azores", "America/Scoresbysund", "Australia/Lord_Howe", "Pacific/Chatham",
+	}
+	first, last := MustParseDate("2026-01-01"), MustParseDate("2026-12-31")
+	for _, zone := range zones {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("no tzdata: %v", err)
+		}
+		for d := first; !d.After(last); d = d.AddDays(1) {
+			for mins := 0; mins < 24*60; mins++ {
+				got := d.At(mins/60, mins%60, loc)
+				if bucket := DateIn(got, loc); !bucket.Equal(d) {
+					t.Fatalf("%s %02d:%02d in %s resolved to %s, which is %s",
+						d, mins/60, mins%60, zone, got.In(loc).Format(time.RFC3339), bucket)
+				}
+			}
+		}
+	}
+}
+
+// TestADayWithTwoMidnightsBeginsAtTheFirstOne is the other half of #57, and it arrives
+// at the same place from the opposite direction.
+//
+// A day fails to begin at midnight in two ways, not one. It can have no midnight — the
+// clocks going forward at 00:00, which is the case #57 was reported for and which
+// Date.at answers with 01:00. Or it can have two: the clocks going back onto or across
+// 00:00, so the wall clock reads midnight, runs on to the jump and reads midnight again
+// an hour or half an hour later. time.Date hands back the second of those, and every
+// half-open window built from it then opens an hour into the day it named — which is
+// exactly #57's symptom, at the other end of the window, and Store.EventsInRange and the
+// activity count behind a summary are both such windows.
+//
+// The rows below are the shapes this takes rather than a tour of the zones: an hour, a
+// half hour, three hours, and a zone that jumps at midnight the other way and must not
+// move. Every one of them is historical — nothing in the database needs this after 2023
+// — but Europe/Paris is on the list, which is the answer to "no household would ever
+// see it".
+func TestADayWithTwoMidnightsBeginsAtTheFirstOne(t *testing.T) {
+	cases := []struct {
+		name       string
+		zone, date string
+		wantUTC    string
+		note       string
+	}{
+		{
+			name: "an ordinary day begins at its only midnight",
+			zone: "Europe/Paris", date: "2026-07-15",
+			wantUTC: "2026-07-14T22:00:00Z",
+			note:    "the summer offset, and nothing here applies",
+		},
+		{
+			name: "a day with no midnight still begins at 01:00",
+			zone: "America/Santiago", date: "2026-09-06",
+			wantUTC: "2026-09-06T04:00:00Z",
+			note:    "the #57 case, which this must leave exactly where it is",
+		},
+		{
+			name: "Amman's clocks went back onto midnight, so the day has two",
+			zone: "Asia/Amman", date: "2021-10-29",
+			wantUTC: "2021-10-28T21:00:00Z",
+			note:    "time.Date answers 22:00Z, an hour of the day later than the day starts",
+		},
+		{
+			name: "and so did Paris, once, which is the zone this app defaults to",
+			zone: "Europe/Paris", date: "1976-09-26",
+			wantUTC: "1976-09-25T22:00:00Z",
+			note:    "France moved its clocks at 01:00 that year; the reading time.Date gives is 23:00Z",
+		},
+		{
+			name: "Colombo's was half an hour, so the gap need not be a whole one",
+			zone: "Asia/Colombo", date: "2006-04-15",
+			wantUTC: "2006-04-14T18:00:00Z",
+			note:    "+06:00 to +05:30 at 00:30; assuming an hour would answer 18:30Z",
+		},
+		{
+			name: "Casey's was three, so it need not be a small one either",
+			zone: "Antarctica/Casey", date: "2023-03-09",
+			wantUTC: "2023-03-08T13:00:00Z",
+			note:    "+11:00 to +08:00; time.Date answers 16:00Z, a quarter of the day in",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no tzdata: %v", err)
+			}
+			d := MustParseDate(tc.date)
+			got := d.In(loc)
+			if s := got.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s.In(%s) = %s, want %s (%s)", tc.date, tc.zone, s, tc.wantUTC, tc.note)
+			}
+			if bucket := DateIn(got, loc); !bucket.Equal(d) {
+				t.Errorf("%s.In(%s) lands on %s, which is not the day it was asked for", tc.date, tc.zone, bucket)
+			}
+			// "First" said as itself rather than as a number: the instant before the answer
+			// belongs to an earlier day. On a day that runs from one end to the other — every
+			// day but the three a zone deleted on crossing the date line — that is the whole
+			// of the promise.
+			if bucket := DateIn(got.Add(-time.Second), loc); bucket.Equal(d) {
+				t.Errorf("%s.In(%s) = %s, but a second earlier is still %s",
+					tc.date, tc.zone, got.UTC().Format(time.RFC3339), bucket)
+			}
+		})
+	}
+
+	// And exhaustively, over the years the case is thickest on the ground, because the
+	// rows above are the ones somebody thought of. Amman moved its clocks at midnight
+	// every autumn for a quarter of a century.
+	loc, err := time.LoadLocation("Asia/Amman")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	first, last := MustParseDate("1995-01-01"), MustParseDate("2022-12-31")
+	for d := first; !d.After(last); d = d.AddDays(1) {
+		got := d.In(loc)
+		if bucket := DateIn(got, loc); !bucket.Equal(d) {
+			t.Fatalf("%s.In(Asia/Amman) = %s, which is %s", d, got.UTC().Format(time.RFC3339), bucket)
+		}
+		if bucket := DateIn(got.Add(-time.Second), loc); bucket.Equal(d) {
+			t.Fatalf("%s.In(Asia/Amman) = %s, but a second earlier is still %s",
+				d, got.UTC().Format(time.RFC3339), bucket)
+		}
+	}
+}
+
+// TestADateAZoneDeletedSplitsAcrossItsNeighbours is the one case at's rule cannot help,
+// pinned because it is otherwise only described.
+//
+// Three dates in the database were deleted outright by a zone crossing the international
+// date line, and on those neither reading of a wall time is on the date asked for, so at
+// falls through to the standard resolution. Until this test that last line was
+// unreachable: returning the alternative reading unconditionally instead passed the
+// whole suite, which means the branch was documented and not decided.
+//
+// What it decides is which neighbour the day leaks onto, because it does leak — the day
+// splits rather than being empty. Both answers are wrong in the sense that matters, and
+// the standard one is the one the browser reaches through the same shape of code, so
+// the two halves stay together on the dates neither can get right.
+func TestADateAZoneDeletedSplitsAcrossItsNeighbours(t *testing.T) {
+	cases := []struct {
+		zone, date  string
+		hour, min   int
+		wantUTC     string
+		wantOnDate  string
+		description string
+	}{
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 0, min: 0,
+			wantUTC: "2011-12-29T10:00:00Z", wantOnDate: "2011-12-29",
+			description: "Samoa skipped 30 December 2011 entirely; the morning falls back a day",
+		},
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 9, min: 59,
+			wantUTC: "2011-12-29T19:59:00Z", wantOnDate: "2011-12-29",
+			description: "the last minute that still lands on the 29th",
+		},
+		{
+			zone: "Pacific/Apia", date: "2011-12-30", hour: 10, min: 0,
+			wantUTC: "2011-12-30T20:00:00Z", wantOnDate: "2011-12-31",
+			description: "and the first that lands on the 31st, which is where the day splits",
+		},
+		{
+			zone: "Pacific/Kwajalein", date: "1993-08-21", hour: 11, min: 59,
+			wantUTC: "1993-08-20T23:59:00Z", wantOnDate: "1993-08-20",
+			description: "the same shape eighteen years earlier and with the split at noon",
+		},
+		{
+			zone: "Pacific/Kwajalein", date: "1993-08-21", hour: 12, min: 0,
+			wantUTC: "1993-08-22T00:00:00Z", wantOnDate: "1993-08-22",
+			description: "Kwajalein went from -12:00 to +12:00, so its lost day is a whole one",
+		},
+	}
+
+	for _, tc := range cases {
+		name := tc.zone + " " + tc.date + " " + tc.description
+		t.Run(name, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.zone)
+			if err != nil {
+				t.Skipf("no tzdata: %v", err)
+			}
+			got := MustParseDate(tc.date).At(tc.hour, tc.min, loc)
+			if s := got.UTC().Format(time.RFC3339); s != tc.wantUTC {
+				t.Errorf("%s %02d:%02d in %s = %s, want %s", tc.date, tc.hour, tc.min, tc.zone, s, tc.wantUTC)
+			}
+			if bucket := DateIn(got, loc); bucket.String() != tc.wantOnDate {
+				t.Errorf("%s %02d:%02d in %s lands on %s, want %s", tc.date, tc.hour, tc.min, tc.zone, bucket, tc.wantOnDate)
+			}
+		})
+	}
+
+	// And what that does to a window, which is the part worth being able to point at.
+	// The half-open day the store builds out of Date.In is a well-formed 24 hours and
+	// covers exactly one calendar day — the wrong one. Asked for 30 December, it hands
+	// back the whole of the 29th and says nothing about having done so.
+	loc, err := time.LoadLocation("Pacific/Apia")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	d := MustParseDate("2011-12-30")
+	from, to := d.In(loc), d.AddDays(1).In(loc)
+	if got := to.Sub(from); got != 24*time.Hour {
+		t.Errorf("the window for the deleted day spans %v, want 24h", got)
+	}
+	wrongDay := MustParseDate("2011-12-29")
+	if got := DateIn(from, loc); !got.Equal(wrongDay) {
+		t.Errorf("the window for %s opens on %s, want %s", d, got, wrongDay)
+	}
+	if got := DateIn(to.Add(-time.Second), loc); !got.Equal(wrongDay) {
+		t.Errorf("the window for %s closes on %s, want %s", d, got, wrongDay)
 	}
 }
 

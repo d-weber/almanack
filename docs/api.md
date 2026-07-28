@@ -210,8 +210,18 @@ the family would not hear about it again.
 Case- and accent-insensitive (`ecole` matches `École`). A recurring series appears once, as
 its template — unless one occurrence was edited to carry text the series does not, in which
 case that occurrence answers for itself. No date filter: a series matches whether or not it
-still runs, and `next_occurrence` is the date to show.
-→ `{ "results": [ { "event": Event, "next_occurrence": "2026-09-01" } ] }`
+still runs.
+→ `{ "results": [ { "event": Event, "next_occurrence": "2026-09-01",
+                    "occurrence_date": "2026-09-01" } ] }`
+
+Two dates, because a result is asked two different things. `next_occurrence` is the date to
+**show** — when this happens next — and is `null` for a series that has run out.
+`occurrence_date` is the date to **open**: the same day whenever there is one, and the
+series' final occurrence once there is not, so it is always a day the event genuinely
+happened on and is safe to pass straight back as the `date` of `GET /events/{id}`. Do not
+derive it from the event: a series' `start_date` is only the interval anchor, and a rule
+can exclude the weekday it starts on. Both are `null` only for a rule with no occurrence
+anywhere, which no date could open.
 
 ## Notifications
 
@@ -261,4 +271,6 @@ for notification text. `fr` and `en`; anything else is a 404.
 - Dev mode only (`ALMANACK_DEV=1`), never mounted in production:
   `GET /dev/` (dashboard), `GET /dev/mail`, `GET /dev/notifications`,
   `POST /dev/clock {"advance":"26h"}` or `{"set":"2026-08-04T06:00:00Z"}`,
-  `POST /dev/tick` (run planner + scheduler immediately), `POST /dev/seed`.
+  `POST /dev/tick` (run planner + scheduler immediately), `POST /dev/seed`,
+  `POST /dev/ratelimits/reset` (empty the login, signup and password-reset buckets, which
+  otherwise refill on a timer and are cleared only by a restart).

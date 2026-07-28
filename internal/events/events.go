@@ -206,15 +206,21 @@ func (s *Service) expandSeries(sr store.SeriesRow, from, to domain.Date) []domai
 // shift moves a series template onto date d, preserving wall-clock time in the family
 // timezone. Doing the arithmetic in local time and converting to UTC afterwards is
 // what keeps a 16:30 event at 16:30 on both sides of a daylight-saving change.
+//
+// And the instant it lands on is on d, which is a second statement rather than the same
+// one: in a zone that jumps at midnight, keeping the wall clock and keeping the day are
+// different requirements, and domain.Date.AtTimeOf is where they are reconciled. It
+// matters here because nothing downstream can tell them apart — overlaps below reads an
+// occurrence's day off its instant, and so does the browser, so a series that resolved
+// onto the evening before simply left the day it had been asked for.
 func (s *Service) shift(template domain.Event, d domain.Date) domain.Occurrence {
 	e := template
 	if template.AllDay {
 		e.StartDate = d
 		e.EndDate = d.AddDays(s.spanDays(template))
 	} else {
-		wall := template.StartsAt.In(s.loc)
 		duration := template.EndsAt.Sub(template.StartsAt)
-		start := time.Date(d.Year, d.Month, d.Day, wall.Hour(), wall.Minute(), wall.Second(), 0, s.loc)
+		start := d.AtTimeOf(template.StartsAt, s.loc)
 		e.StartsAt = start.UTC()
 		e.EndsAt = start.Add(duration).UTC()
 	}

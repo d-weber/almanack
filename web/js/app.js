@@ -2,7 +2,9 @@
 //
 // Boot order matters: config first (it carries the family timezone, the app
 // version and the VAPID key), then the locale, then /me. Nothing renders before
-// the timezone is known — a screen drawn in the device zone would be wrong.
+// the timezone is known — a screen drawn in the device zone would be wrong — and
+// nothing renders at all when it is a zone this browser cannot resolve, which is
+// what refuseUnknownTimezone below is for.
 
 import { h, clear, mount } from './dom.js';
 import { icon } from './icons.js';
@@ -16,9 +18,10 @@ import {
 } from './state.js';
 import {
   todayISO, addDays, addMonths, startOfMonth, formatMonthTitle, formatDateShort,
+  unknownTimezone,
 } from './dates.js';
 import { normalizeHex, readableOn } from './colors.js';
-import { spinner, errorBox, banner } from './ui.js';
+import { spinner, errorBox, banner, button } from './ui.js';
 import { route, notFound, start, go, current, reload } from './router.js';
 import { confirmPush, needsIOSInstall } from './push.js';
 
@@ -38,6 +41,12 @@ const PUBLIC_PREFIXES = ['/login', '/forgot', '/reset/', '/join/', '/ios-install
 const REFRESH_THROTTLE_MS = 10000;
 const CONFIRM_THROTTLE_MS = 60 * 60 * 1000;
 
+// The environment variable the family timezone is configured with. It is an identifier
+// rather than prose, so it is spelled here and not in the catalogue (CONVENTIONS §6 is
+// about French and English sentences); see refuseUnknownTimezone for why it matters
+// that it does not travel inside one.
+const TZ_SETTING = 'ALMANACK_TZ';
+
 // The breakpoint where the sidebar exists. Two things move at it: the calendar
 // filters (sidebar above it, a row under the app bar below it) and the theme and
 // collapse controls. Crossing it has to repaint, or the filters end up nowhere.
@@ -55,6 +64,10 @@ let currentCleanup = null;
 let lastRefresh = 0;
 let lastConfirm = 0;
 let pendingHash = null;
+// Set once the timezone refusal has taken the screen. Nothing paints over it after
+// that: the shell it replaced is detached, and this stops the router from building
+// screens into elements no longer on the page.
+let refused = false;
 
 // ---------------------------------------------------------------------------
 // Shell
@@ -269,6 +282,15 @@ function release(cleanup) {
 
 /** Swap the main area, discarding results of a navigation that was superseded. */
 async function show(builder, { chrome = null, tabs = true } = {}) {
+  // A zone can also change under a tab that has been open for days: the server is
+  // restarted with a different ALMANACK_TZ, /me brings the new one back with the next
+  // refresh, and nothing has reloaded because app_version did not move. One click on
+  // "Week starts on" then repainted the whole shell — sidebar, tab bar, "July 2026" —
+  // over "Server error. Please try again." and a Retry that could never work, which is
+  // the browser's own trouble reported as the server's. Asked here it ends in the same
+  // screen as a bad zone at boot, which is what that state is.
+  if (refused || refuseIfUnknownTimezone()) return;
+
   const token = ++renderToken;
   release(currentCleanup);
   currentCleanup = null;
@@ -291,6 +313,9 @@ async function show(builder, { chrome = null, tabs = true } = {}) {
     mount(viewEl, node);
   } catch (err) {
     if (token !== renderToken) return;
+    // A builder that awaited /me is another way the zone can arrive mid-render, and
+    // the throw that follows is not a server error however much it looks like one.
+    if (refuseIfUnknownTimezone()) return;
     mount(viewEl, errorBox(err, () => reload()));
   }
   paintBanners();
@@ -500,9 +525,17 @@ function wireEvents() {
   bus.addEventListener('offline', () => paintBanners());
 
   bus.addEventListener('authenticated', async () => {
+    let signedIn = true;
     try {
       await loadSession();
-    } catch (err) {
+    } catch (_) {
+      signedIn = false;
+    }
+    // Before deciding this was a failed sign-in. The password was right — the answer
+    // came back 200 — and the only thing wrong is a zone /me has just delivered that
+    // this browser cannot resolve. Handing the login form back for that is the loop.
+    if (refuseIfUnknownTimezone()) return;
+    if (!signedIn) {
       clearSession();
       go('/login', { replace: true });
       return;
@@ -553,6 +586,79 @@ function afterLogin() {
   if (needsIOSInstall() && !iosDismissed()) go('/ios-install');
 }
 
+/**
+ * The screen shown instead of the application when the browser does not know the
+ * configured timezone. It replaces the shell rather than filling the main area:
+ * there is no calendar behind it and no tab bar back into one.
+ *
+ * Replacing means the class too. `#app` is the shell because of what it is called —
+ * `.app` is a two-column grid above 900px, with named areas for the sidebar, the bar
+ * and the view — so a card mounted into it while it still said `app` was auto-placed
+ * into the 232px sidebar column and drawn in ribbons in the top-left corner of every
+ * desktop browser. The element is handed over entirely, name and contents both.
+ *
+ * Falling back to a zone that does work was the other way and is worse than nothing
+ * here. Every hour this app shows is converted through the family timezone
+ * (CONVENTIONS §4), so a substitute does not remove some of the information — it
+ * changes all of it, by an amount nobody on the screen can see. UTC would put the
+ * dentist at the wrong hour and the last evening of a holiday on the wrong day; the
+ * device zone would be right most of the time and wrong for the trip that made
+ * somebody's laptop disagree, which is the version a household would believe. A
+ * banner over a plausible wrong calendar is a banner people stop reading. So the
+ * calendar is withheld, and the message says which setting to change: this is an
+ * operator's misconfiguration and the operator is in the same house.
+ *
+ * The prose comes from the catalogue like every other string (CONVENTIONS §6). The two
+ * identifiers do not, and they are their own element rather than substitutions into a
+ * sentence: t() falls back to the key when the catalogue is missing, and a key has no
+ * {tz} in it to substitute into, so interpolating them silently dropped both in exactly
+ * the cases this screen is likeliest to meet — a /config that answered while the locale
+ * fetch did not, or an offline start whose precache of the locale had failed (sw.js
+ * tolerates that by design). What was left read "error.timezone.title | error.timezone
+ * .body", with no zone anywhere on the one screen that exists to name one.
+ */
+function refuseUnknownTimezone(tz) {
+  root.className = 'fatal';
+  mount(root, h('div', { class: 'fatal-card', role: 'alert' },
+    icon('warning', { class: 'fatal-icon' }),
+    h('h1', { class: 'fatal-title' }, t('error.timezone.title')),
+    // Written as the configuration line an operator has to go and find, because that
+    // is what it is: almanack.conf holds ALMANACK_TZ=Europe/Paris.
+    h('code', { class: 'fatal-setting' }, `${TZ_SETTING}=${tz}`),
+    h('p', { class: 'fatal-body' }, t('error.timezone.body')),
+    h('p', { class: 'fatal-fix' }, t('error.timezone.fix')),
+    // Reloading is the whole recovery: /config is read again on every boot, so the
+    // family gets their calendar back the moment the server is corrected, without
+    // anybody having to explain what a hard refresh is.
+    button(t('action.retry'), { variant: 'quiet', onclick: () => location.reload() })));
+}
+
+/**
+ * Ask whether this browser can resolve the zone it has been given, and refuse if not.
+ *
+ * The zone arrives from two places, not one: /config at boot, and /me at every sign-in
+ * and every refresh (js/state.js). #58 asked only after /config, which left the login
+ * loop it describes fully reachable — one failed /config, a server still starting or a
+ * proxy blip, and the app sailed past the check on the built-in Europe/Paris, met the
+ * bad zone in /me instead, and read the throw as "not signed in". Every POST
+ * /auth/login answered 200 and every one of them came back to the login form.
+ *
+ * So the question is asked wherever an answer can have changed, rather than once. It is
+ * a null check on a module variable, and the alternative — reasoning about which
+ * arrival points exist today — is what was wrong before. The screen is drawn once: a
+ * later render asking again gets the same answer, and re-mounting would take the focus
+ * off the button under somebody's finger.
+ */
+function refuseIfUnknownTimezone() {
+  const tz = unknownTimezone();
+  if (!tz) return false;
+  if (!refused) {
+    refused = true;
+    refuseUnknownTimezone(tz);
+  }
+  return true;
+}
+
 async function boot() {
   // Invite and password-reset links were once emitted without the "#/", and some are
   // already in inboxes. Translate them rather than dropping their holder on the login
@@ -576,11 +682,23 @@ async function boot() {
 
   await loadLang(pickLang(rememberedLang())).catch(() => { /* keys render as keys */ });
 
+  // After the catalogue, so the refusal can be read, and before /me, because reading
+  // it sets the cursor to today and there is no today in a zone that does not resolve.
+  if (refuseIfUnknownTimezone()) return;
+
   try {
     await loadSession();
   } catch (_) {
     clearSession();
   }
+
+  // And again on the other side of it, because /config is not the only place the zone
+  // comes from. A /config that did not answer — a server still starting, a proxy blip,
+  // a 5xx — leaves the check above looking at the built-in Europe/Paris, which every
+  // browser resolves, and the real zone arrives with /me a moment later. A session
+  // already in the cookie jar reaches it here; somebody typing a password reaches it
+  // in the 'authenticated' handler above.
+  if (refuseIfUnknownTimezone()) return;
 
   registerRoutes();
   wireEvents();

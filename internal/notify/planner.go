@@ -238,7 +238,7 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		return err
 	}
 
-	recurrenceOfSeries := map[int64]*int64{}
+	templates := map[int64]domain.Event{}
 	var errs []error
 	for _, occ := range occs {
 		// Source references are keyed on the *series* event for a recurring
@@ -247,6 +247,25 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 		sourceEvent := occ.Event.ID
 		if occ.SeriesEventID != nil {
 			sourceEvent = *occ.SeriesEventID
+		}
+
+		// named is the row the reference names, which is the row whose id is in it.
+		// For a plain event and for an ordinary occurrence of a series the occurrence
+		// in hand already is that row — the expansion carries the template's fields —
+		// but the copy standing in for an edited occurrence is a row of its own, and
+		// the template it stands in for is what has to be read for those.
+		named := occ.Event
+		if sourceEvent != occ.Event.ID {
+			t, err := n.seriesTemplate(ctx, sourceEvent, templates)
+			if err != nil {
+				// Nothing can be filed for this occurrence without the row its
+				// reference names, and guessing a reference is how a reminder is
+				// queued a second time. The pass fails instead, which leaves the
+				// horizon marker where it was, so the next one tries again.
+				errs = append(errs, err)
+				continue
+			}
+			named = t
 		}
 
 		// An occurrence inherits its series' reminders until somebody changes them on
@@ -271,13 +290,11 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if detached[detachedPair{eventID: occ.Event.ID, userID: userID}] {
 				break // the copy's own list is the whole answer for this date
 			}
-			// An override copy is a standalone event row, so the reminders it
-			// inherits have to be found through the series template it stands in for.
-			rid, err := n.recurrenceOfSeries(ctx, sourceEvent, recurrenceOfSeries)
-			if err != nil {
-				errs = append(errs, err)
-			} else if rid != nil {
-				cands = append(cands, byRecurrence[*rid]...)
+			// An override copy is a standalone event row and names no recurrence of
+			// its own, so the reminders it inherits are found through the series
+			// template it stands in for — which is the row already read above.
+			if named.RecurrenceID != nil {
+				cands = append(cands, byRecurrence[*named.RecurrenceID]...)
 			}
 		case occ.RecurrenceID != nil:
 			cands = append(cands, byRecurrence[*occ.RecurrenceID]...)
@@ -314,7 +331,14 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 			if due.Before(from) && !p.eventStillAhead(from, n.loc) {
 				continue
 			}
-			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID)
+			// The name qualifies the id beside it — it says which of the events
+			// that id has named this one is — so both are read off the one row.
+			// Not the payload's: an occurrence edited between its warning and its
+			// hour is the same warning about the same appointment, and reading the
+			// name off the copy that edit left behind moved the reference of every
+			// reminder the family had already been sent, past the delivered row
+			// that was supposed to absorb the re-plan.
+			ref := events.ReminderSourceRef(sourceEvent, occ.OccurrenceDate, r.ID, named.EventUID)
 			if err := n.enqueue(ctx, userID, domain.KindReminder, ref, p, due); err != nil {
 				errs = append(errs, err)
 			}
@@ -323,22 +347,30 @@ func (n *Notifier) planUserReminders(ctx context.Context, userID int64, rs []dom
 	return errors.Join(errs...)
 }
 
-// recurrenceOfSeries resolves a series template event id to its recurrence id,
-// memoised for the pass. It is how an edited occurrence finds the reminders it
-// inherits: the copy standing in for it is a standalone event row and names no
-// recurrence of its own, so the series it belongs to is the only place to ask —
-// and asking the series it actually belongs to, rather than any series, is what
-// keeps one family's judo reminder off another lesson.
-func (n *Notifier) recurrenceOfSeries(ctx context.Context, eventID int64, cache map[int64]*int64) (*int64, error) {
-	if rid, ok := cache[eventID]; ok {
-		return rid, nil
+// seriesTemplate reads a series template event, memoised for the pass. It is the row
+// an edited occurrence has to be resolved back to twice over, and both answers are
+// about the template rather than about the copy standing in for that date.
+//
+// Its recurrence id is how the copy finds the reminders it inherits: the copy is a
+// standalone event row and names no recurrence of its own, so the series it belongs
+// to is the only place to ask — and asking the series it actually belongs to, rather
+// than any series, is what keeps one family's judo reminder off another lesson. Its
+// name is what the reference is qualified by, because the id in that reference is the
+// template's.
+//
+// Memoised because a series with a dozen edited occurrences is one row read a dozen
+// times otherwise, on every tick, and the planner already reads the reminders and the
+// detachments once for the whole pass for the same reason.
+func (n *Notifier) seriesTemplate(ctx context.Context, eventID int64, cache map[int64]domain.Event) (domain.Event, error) {
+	if e, ok := cache[eventID]; ok {
+		return e, nil
 	}
 	e, err := n.st.EventByID(ctx, eventID)
 	if err != nil {
-		return nil, fmt.Errorf("series template %d: %w", eventID, err)
+		return domain.Event{}, fmt.Errorf("series template %d: %w", eventID, err)
 	}
-	cache[eventID] = e.RecurrenceID
-	return e.RecurrenceID, nil
+	cache[eventID] = e
+	return e, nil
 }
 
 // lead is how far ahead of its occurrence a reminder fires, used only to size the
@@ -586,26 +618,46 @@ type activityCursor struct {
 	id         int64
 	calendarID int64
 	at         time.Time
+	uid        string
 }
 
 // cursorAt is the cursor that stands at a change.
 func cursorAt(a domain.Activity) activityCursor {
-	return activityCursor{id: a.ID, calendarID: a.CalendarID, at: a.At}
+	return activityCursor{id: a.ID, calendarID: a.CalendarID, at: a.At, uid: a.ChangeUID}
 }
 
 // vouched reports whether the cursor carries the witness that lets it be checked. A
 // database written by a release that did not record one does not.
+//
+// The name is not required here, and that is deliberate. A change logged before 0006
+// genuinely has none, so requiring it would leave an upgraded household re-walking the
+// log on every tick for as long as its newest settled change is an old one. What the
+// name is for is the comparison in names() below, where its absence on one side and
+// its presence on the other is itself the answer.
 func (c activityCursor) vouched() bool { return c.calendarID != 0 && !c.at.IsZero() }
 
-// names reports whether a is the change this cursor was set from. The instant alone
-// would not do it: dev mode runs on a stopped clock and every entry shares one, so a
-// reused id would look like the row it replaced.
+// names reports whether a is the change this cursor was set from.
+//
+// All four fields, because the first three are all reusable together. The instant alone
+// would not do it: dev mode runs on a stopped clock and every entry shares one. Nor do
+// the instant and the calendar, which was the gap this closed — calendars.id is INTEGER
+// PRIMARY KEY without AUTOINCREMENT exactly as activity_log.id is, so deleting a
+// calendar, making another and logging a change in it hands back the id, the calendar
+// number and, on a stopped clock, the second. The witness then vouched for a cursor
+// standing above rows nobody had been told about, and since activity is not reconcilable
+// and nothing re-walks past a cursor it trusts, those announcements were gone for good.
+//
+// domain.Activity.ChangeUID is minted per row and is the part reuse cannot reach. A
+// cursor with no name against a row that has one disagrees, which is the right answer for
+// a witness written before the name was recorded: the cursor is repaired once and the
+// name goes in. Both empty is a change logged before 0006 still sitting where it was,
+// since nothing logged since can be nameless.
 func (c activityCursor) names(a domain.Activity) bool {
-	return a.ID == c.id && a.CalendarID == c.calendarID && a.At.Equal(c.at)
+	return a.ID == c.id && a.CalendarID == c.calendarID && a.At.Equal(c.at) && a.ChangeUID == c.uid
 }
 
 func (c activityCursor) same(o activityCursor) bool {
-	return c.id == o.id && c.calendarID == o.calendarID && c.at.Equal(o.at)
+	return c.id == o.id && c.calendarID == o.calendarID && c.at.Equal(o.at) && c.uid == o.uid
 }
 
 // readActivityCursor reads the cursor and its witness. The second result is false when
@@ -648,6 +700,14 @@ func (n *Notifier) readActivityCursor(ctx context.Context) (activityCursor, bool
 			c.at = at.UTC()
 		}
 	}
+	// A name is free-form text the store minted, so there is nothing to parse and
+	// nothing it can be wrong in the way a number or an instant can. Missing is a
+	// meaningful value here and reads as "no name", which names() compares like any
+	// other: a database written before this key existed disagrees with the row it
+	// stands at, and is repaired once.
+	if c.uid, err = n.st.GetMeta(ctx, MetaActivityCursorUID); err != nil {
+		return activityCursor{}, false, err
+	}
 	return c, true, nil
 }
 
@@ -664,7 +724,10 @@ func (n *Notifier) setActivityCursor(ctx context.Context, c activityCursor) erro
 	if err := n.st.SetMeta(ctx, MetaActivityCursorCalendar, strconv.FormatInt(c.calendarID, 10)); err != nil {
 		return err
 	}
-	return n.st.SetMeta(ctx, MetaActivityCursorAt, instantOrEmpty(c.at))
+	if err := n.st.SetMeta(ctx, MetaActivityCursorAt, instantOrEmpty(c.at)); err != nil {
+		return err
+	}
+	return n.st.SetMeta(ctx, MetaActivityCursorUID, c.uid)
 }
 
 // instantOrEmpty keeps year 1 out of a stored value and a log line, where it reads as
@@ -698,10 +761,10 @@ func instantOrEmpty(t time.Time) string {
 // newest entry and one change made before the next tick, is not one of them.
 //
 // So the cursor is checked against the change it was set from, which is the only thing
-// a reused id cannot imitate: the id, the calendar and the instant are kept together,
-// and the row is read back and looked at. Gone, or no longer that row, and the cursor
-// has stopped meaning what it meant. That covers every depth of reuse at once, because
-// it asks nothing about how far the ids have climbed.
+// a reused id cannot imitate: the id, the calendar, the instant and the change's own name
+// are kept together, and the row is read back and looked at. Gone, or no longer that row,
+// and the cursor has stopped meaning what it meant. That covers every depth of reuse at
+// once, because it asks nothing about how far the ids have climbed.
 //
 // Deciding on the instant alone — reading the log by `at`, or vouching for the cursor by
 // `at` — was the other candidate and is not enough. `at` is stored to the second, a
@@ -709,7 +772,12 @@ func instantOrEmpty(t time.Time) string {
 // the first place), and dev mode runs on a stopped clock where *every* entry shares an
 // instant. A reused id would pass an instant-only check there, which is to say it would
 // pass it exactly where the fault is easiest to hit. The calendar is in the witness for
-// that reason.
+// that reason — and the name is in it because the calendar is reused too. calendars.id is
+// INTEGER PRIMARY KEY without AUTOINCREMENT like everything else here, so deleting the
+// newest calendar, making another and logging a change in it reproduces all three of id,
+// calendar and second, and a witness of three said the stranded cursor was sound. That
+// is the miss this whole function exists to prevent, arriving through the check meant to
+// prevent it. See activityCursor.names.
 //
 // What it is reset to is a separate decision. Resetting to the log's highest id loses
 // the changes logged between the deletion and this pass: those carry reused ids below
@@ -739,8 +807,9 @@ func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor activi
 		case err != nil:
 			return activityCursor{}, err
 		case !cursor.names(row):
-			reason = fmt.Sprintf("id %d now belongs to a change in calendar %d logged at %s, not calendar %d at %s",
-				row.ID, row.CalendarID, instantOrEmpty(row.At), cursor.calendarID, instantOrEmpty(cursor.at))
+			reason = fmt.Sprintf("id %d now belongs to change %q in calendar %d logged at %s, not %q in calendar %d at %s",
+				row.ID, row.ChangeUID, row.CalendarID, instantOrEmpty(row.At),
+				cursor.uid, cursor.calendarID, instantOrEmpty(cursor.at))
 		default:
 			return cursor, nil
 		}
@@ -756,6 +825,7 @@ func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor activi
 	}
 	slog.Warn("the activity cursor no longer names the change it was set from and has been reset",
 		"cursor", cursor.id, "cursor_calendar", cursor.calendarID, "cursor_at", instantOrEmpty(cursor.at),
+		"cursor_change", cursor.uid,
 		"reset_to", reset.id, "reset_to_at", instantOrEmpty(reset.at), "reason", reason)
 	if err := n.setActivityCursor(ctx, reset); err != nil {
 		return activityCursor{}, err
@@ -806,7 +876,7 @@ func (n *Notifier) planOneActivity(ctx context.Context, a domain.Activity, prefs
 	if a.EventID != nil {
 		p.EventID = *a.EventID
 	}
-	ref := events.ActivitySourceRef(a.ID)
+	ref := events.ActivitySourceRef(a)
 
 	var errs []error
 	for _, m := range members {

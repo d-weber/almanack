@@ -58,21 +58,170 @@ func (d Date) String() string {
 // IsZero reports whether d is the zero Date, which is used to mean "unset".
 func (d Date) IsZero() bool { return d == Date{} }
 
-// In returns midnight at the start of d in loc. Where a DST transition means that
-// midnight does not exist, Go normalizes forward to the first valid instant.
+// In returns the first instant of d in loc.
+//
+// That is midnight nearly always, and a day can fail to begin at one in two ways rather
+// than the one #57 was reported for. Where a zone moves its clocks forward at midnight
+// the day has no midnight at all and begins at 01:00; at handles that, and In inherits
+// it. Where a zone moves them back onto or across midnight the day has two, an hour or
+// a half hour or three hours apart — the wall clock reads 00:00, runs on to the jump and
+// reads 00:00 again — and time.Date answers with the second of them. A half-open window
+// built from that opens an hour into the day it named and silently drops whatever was in
+// the interval, which is #57's symptom seen from the other end of the window: this is a
+// day boundary in Store.EventsInRange and both ends of the activity count behind a
+// summary, and the same hour that goes missing at the low end is counted twice at the
+// high one.
+//
+// So where midnight has two readings the earlier is the answer. At does not do this and
+// must not: which reading of an ambiguous wall time an appointment lands on follows the
+// zone rather than a policy anyone chose, and that is pinned as such by the recurrence
+// policy table in docs/architecture.md and from the browser's side. "The first instant
+// of d" is a different question, and unlike "when is the 00:30 lesson" it has one answer.
+//
+// Every date this changes is in the past — 120 of them across 23 zones between 1970 and
+// 2100, the most recent in 2023, none of them reachable through the POSIX rule that
+// governs the far end of that range. Europe/Paris is one of the 23, on 26 September
+// 1976, which is the answer to the objection that no household would ever be in a zone
+// that does this.
 func (d Date) In(loc *time.Location) time.Time {
-	return time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, loc)
+	t := d.at(0, 0, 0, loc)
+	// The other reading, where there is one: midnight under the offset in force before
+	// the zone period t belongs to began. On an ordinary day that period started months
+	// ago and the offset either matches or belongs to the other season, so the reading is
+	// the same instant or one on the day before — and both fail the test below, which is
+	// what keeps this to the days that genuinely have two midnights.
+	//
+	// The early return is a guard rather than a rule, and no test can tell it apart from
+	// its absence: a location with nothing before the period t belongs to — UTC, a fixed
+	// zone, any date inside a zone's opening LMT — has one reading of everything, so
+	// removing the line changes no answer in the database at all, checked over 1700 to
+	// 2100 in every zone, where the case arises 47 million times. It stays because the
+	// alternative is knowing what offset the zero time reports, which is a worse thing to
+	// have to know than a line that says what it means.
+	start, _ := t.ZoneBounds()
+	if start.IsZero() {
+		return t
+	}
+	_, before := start.Add(-time.Nanosecond).Zone()
+	alt := time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, time.UTC).
+		Add(-time.Duration(before) * time.Second)
+	if alt.Before(t) && DateIn(alt, loc).Equal(d) {
+		return alt
+	}
+	return t
 }
 
-// At returns the instant on d at the wall-clock time hour:min in loc.
+// At returns the instant on d at the wall-clock time hour:min in loc, where there is
+// one.
+//
+// Where there is not — the hour a spring-forward skips names no moment at all — what it
+// promises is the date and not the clock. A wall time that never happened has no reading
+// that is both on the day and at the clock asked for, and this type answers with the
+// day: the result is on d, at hour:min moved by the length of the gap in whichever
+// direction the conversion in at dictates. That is an hour in every zone anyone lives
+// in, and up to seven in the database — Antarctica/Vostok has no 00:00 on 1 November
+// 1994 and At(0, 0) there reads 07:00, still on the 1st. Callers that need the clock
+// back can read it off the answer; callers that need the date can rely on having it.
 func (d Date) At(hour, min int, loc *time.Location) time.Time {
-	return time.Date(d.Year, d.Month, d.Day, hour, min, 0, 0, loc)
+	return d.at(hour, min, 0, loc)
+}
+
+// AtTimeOf returns the instant on d at the same wall-clock time of day that t reads in
+// loc, under At's caveat about an hour the clocks skipped. It is how a series template is
+// carried onto another date: the arithmetic happens in local wall-clock and converts
+// afterwards, which is what keeps a 16:30 event at 16:30 on both sides of a
+// daylight-saving change (CONVENTIONS §4).
+func (d Date) AtTimeOf(t time.Time, loc *time.Location) time.Time {
+	wall := t.In(loc)
+	return d.at(wall.Hour(), wall.Minute(), wall.Second(), loc)
+}
+
+// at is where a wall clock in the family timezone becomes an instant — one place rather
+// than the three copies of time.Date it replaced — and it is a function of its own
+// because one of the answers the standard library can give to that question is unusable
+// here. In is the only caller that looks at the answer twice, and only for midnight.
+//
+// A wall time inside the hour a spring-forward skips names no moment at all, so
+// time.Date resolves it: it reads the fields as though they were UTC, applies the offset
+// in force at that reading and corrects once. Which side of the jump that lands on
+// follows the sign of the zone's offset rather than any policy anyone chose — 02:30
+// becomes 03:30 in Europe/Paris and 01:30 in America/New_York — and that is the
+// documented behaviour, pinned from the server's side and the browser's. It stays.
+//
+// What it may not do is answer with a different day, and it can, whenever the hour that
+// went missing touches a date boundary. A zone that jumps at midnight has no 00:30 on
+// the day it jumps, and correcting a negative offset backwards puts that occurrence at
+// 23:30 the previous evening — so every date bucket in the application is wrong about it
+// at once. The day the series named returns nothing at all, while the month grid, the
+// digest and the reminder file it under a day nobody asked for. Every zone that still
+// does this is west of Greenwich (America/Santiago and America/Havana are the populous
+// ones, Atlantic/Azores the nearest), and Paris jumps at 02:00, which is the whole reason
+// the household this was built for never saw it. The mirror case — a zone that abolishes
+// the last hour of a day rather than the first — is rarer and mostly historical, and
+// comes out here the same way.
+//
+// A broken wall time has exactly two readings, being the offsets either side of the
+// jump, so where the first leaves the date behind the other one is the answer. Over
+// every minute of every gap in the timezone database between 1970 and 2100 it lands on
+// the date that was asked for, with three exceptions: 21 August 1993, 31 December 1994
+// and 30 December 2011, each of them a date a zone deleted outright on crossing the
+// international date line. Five zones and six names — Apia, Fakaofo, Kanton with
+// Enderbury pointing at it, Kiritimati, Kwajalein — and neither reading is on the date,
+// so the last line below is what they get.
+//
+// "A day that never happened can hold nothing" is the comfortable version of that and
+// not the true one. The day does not vanish, it splits: in Apia every wall time before
+// 10:00 resolves onto the 29th and every one from 10:00 onwards onto the 31st, so a
+// series asked for the 30th gets an instant on one neighbour or the other depending on
+// what o'clock it was. The occurrence keeps the 30th as its identity, so overlaps()
+// compares that against an instant reading the 29th or the 31st and drops it: a day view
+// of the 30th is empty, and so is one of either neighbour, since expansion never reaches
+// a date outside the window it was given. Only a window wide enough to expand the 30th
+// returns it at all, and then the month grid draws it on the neighbour — absent where it
+// was put and present where nobody put anything, which is #57's shape exactly. The
+// window built from In has
+// the matching fault and a quieter one: In(the 30th) and In(the 31st) are 24 hours apart
+// and everything between them is on the 29th, so a query for the deleted date is a
+// well-formed day covering its neighbour, with nothing anywhere to say so.
+//
+// Nothing is done about it. The three dates are decades past, the zones are five Pacific
+// islands, and only a timed series reaches it at all — an all-day event is stored as a
+// Date and never becomes an instant. Refusing the date would be a rule in domain, a
+// string in two catalogs and a branch in the editor, for a household that would have to
+// be on Kiritimati and entering something for New Year's Eve 1994.
+func (d Date) at(hour, min, sec int, loc *time.Location) time.Time {
+	t := time.Date(d.Year, d.Month, d.Day, hour, min, sec, 0, loc)
+	if DateIn(t, loc).Equal(d) {
+		return t
+	}
+	// The offset in force at an answer that was corrected across the jump is the one on
+	// the far side of it from the offset that produced the answer, which is what makes
+	// applying it to the same fields the other reading rather than the same one again.
+	_, off := t.Zone()
+	alt := time.Date(d.Year, d.Month, d.Day, hour, min, sec, 0, time.UTC).
+		Add(-time.Duration(off) * time.Second)
+	if DateIn(alt, loc).Equal(d) {
+		return alt
+	}
+	return t
 }
 
 // AddDays returns the date n days after d (n may be negative).
 func (d Date) AddDays(n int) Date {
-	t := d.In(time.UTC).AddDate(0, 0, n)
+	t := d.utcHandle().AddDate(0, 0, n)
 	return Date{t.Year(), t.Month(), t.Day()}
+}
+
+// utcHandle is midnight UTC on d used as an integer calendar and never as a moment,
+// which is what makes date arithmetic immune to the rules In exists to deal with. The
+// browser's dates.js spells the same idea toUTC(), and for the same reason.
+//
+// Not In(time.UTC), which would be the same answer arrived at through a lookup for a
+// second reading that a zone with no transitions cannot have. AddDays is called once per
+// day of every expansion in internal/recur, and going through In costs it half as much
+// again — 66ns against 42ns, measured — to ask a question with one possible answer.
+func (d Date) utcHandle() time.Time {
+	return time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, time.UTC)
 }
 
 // AddMonths returns the date n months after d WITHOUT normalization: if the target
@@ -90,7 +239,7 @@ func (d Date) AddMonths(n int) (_ Date, ok bool) {
 }
 
 // Weekday returns the day of the week d falls on.
-func (d Date) Weekday() time.Weekday { return d.In(time.UTC).Weekday() }
+func (d Date) Weekday() time.Weekday { return d.utcHandle().Weekday() }
 
 // Compare returns -1, 0 or +1 as d sorts before, with, or after o.
 func (d Date) Compare(o Date) int {

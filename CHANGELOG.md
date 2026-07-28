@@ -635,6 +635,353 @@ Notable changes to this project. The format follows
   per run, for a fixture left behind by a run that was interrupted, and stops with the answer —
   run `make seed` — instead of letting three unrelated-looking tests go red.
   ([#52](https://github.com/d-weber/almanack/issues/52))
+- **In a few countries, one occurrence a year fell off the calendar on the morning the
+  clocks went forward.** Where a country moves its clocks at midnight rather than at two in
+  the morning — Chile, Cuba and the Azores still do; Brazil and Paraguay did — the day
+  the change lands on has no 00:30 and no midnight at all: the clock goes from 23:59 the
+  evening before straight to 01:00. A repeating event in that hour has to be put somewhere,
+  and it was being put at 23:30 on the *previous* day. Not moved on screen — gone. The day
+  the series named held nothing, so the month grid drew nothing there, the day view was
+  empty, and the digest for that morning and the reminder for that occurrence went with it,
+  because all four ask the calendar for a day and the calendar no longer thought the event
+  was on one. Meanwhile it appeared on the evening before, where nobody had put anything. A
+  reminder set for "the day before at 09:00" fired two days before instead. Such an event
+  now resolves to 01:30 that morning, which is where every other calendar puts it, and
+  midnight resolves to 01:00 — the day starts when the day starts. The rule is that the
+  conversion may do what the zone's offsets dictate, which is what keeps 16:30 at 16:30 and
+  is unchanged everywhere else, but it may not hand back a different day than the one it was
+  asked for; the alternative reading of an hour that never happened is always the one that
+  stays. A day can also fail to start at midnight the other way round — where the clocks go
+  *back* onto midnight the day has two of them, an hour or a half hour apart, and the app
+  was taking the second, so a query for that day began an hour after the day did and
+  anything in the gap was invisible on its own date. It now takes the first, which is when
+  the day starts. That half is history rather than news: it last happened anywhere in 2023,
+  and never again between now and 2100 on the current timezone data. **Nothing changes for a
+  calendar kept in Paris, London or New York on any date this century**: all three change
+  their clocks at two in the morning, so the hour they break is nowhere near a date boundary
+  and neither rule fires there. (Paris did move its clocks at one in the morning until 1976,
+  and a calendar showing that September is an hour better for the second rule.) It was
+  checked against every minute of
+  every clock change in the timezone database between 1970 and 2100 before being written
+  down, and the editor in the browser applies the same rule as the server, because a
+  calendar whose two halves disagree about an hour is worse than one that gets it wrong
+  twice. Reminders already queued keep the name they were queued under, so the upgrade
+  strands none of them; an occurrence inside the next two days at the moment of the upgrade
+  can be announced twice, an hour apart, which is the trade this application always makes in
+  that direction. **A daily digest or an activity summary set for a time in that hour moves
+  the same way**, for the same reason — the slot is a wall clock in the family timezone like
+  any other — so one already queued for the day of the upgrade can also arrive twice, an
+  hour apart, and once thereafter. Nothing changed in the database.
+  ([#57](https://github.com/d-weber/almanack/issues/57))
+- **Searching for a late-night activity that has finished, and tapping it, said "Not
+  found."** Search lists events rather than occurrences, so the results screen has to work
+  out which day each row should open on. For a series that has already ended there is no
+  next occurrence to open on, and for that one case it fell back to reading the day
+  straight off the stored text — which is in UTC. Anything between midnight and one in the
+  morning in France is stored under the previous day there, so the row linked to a date the
+  series never happened on, and the screen behind it reported the event as missing. It
+  needed a repeat that had run out and a start time in that one hour — a shift handover, a
+  babysitter booked past midnight, the last train — so most families would never have met
+  it, and the ones who did could not tell it from the event having been deleted. The
+  window is wider the further east the family is, and is the whole evening in Tokyo. The
+  day is now read in the family's own timezone, as everywhere else in the app. The expiry
+  date on an invite link was reading UTC the same way and showed the day before for a link
+  made late in the evening; that is corrected too. Nothing was ever stored wrongly, so no
+  calendar needs repairing — the events were always there, on the day they always were.
+  ([#64](https://github.com/d-weber/almanack/issues/64))
+- **Tapping a search result for a finished repeat could still say "Not found.", even for
+  an all-day one.** The same symptom as above and a different cause, so fixing the
+  timezone did nothing for it. A repeat that has run out has no next date to open on, and
+  the results screen fell back to the day the repeat *started* — which is not necessarily
+  a day it ever happened. Set something up to repeat on Tuesdays while you happen to be
+  creating it on a Monday, and Monday is the day the search result pointed at; the same
+  goes for a monthly repeat set to a day of the month other than the one you started on.
+  The screen then reported the activity as missing, which looks exactly like somebody
+  having deleted it. The results screen no longer works the day out at all: the server
+  says which day each row opens on, and for a repeat that has finished it now says the
+  **last day it ran** — which is the one you were looking for if you are searching for
+  something that is over. Everything still running is unaffected and opens on its next
+  date, as before. Nothing was stored wrongly, so nothing needs repairing.
+  ([#69](https://github.com/d-weber/almanack/issues/69))
+
+- **Tidying up and then adding something straight afterwards could tell nobody about it.**
+  A notification waiting to go out is filed under what it is for, and for a change to a
+  calendar that was the number of the entry in the change log — a number SQLite hands out
+  again as soon as the row holding it has been deleted. So delete the holiday calendar and
+  add something to the family one in the same second, and the entry recording what you added
+  takes the number of an entry that has gone; the outbox already held a notification filed
+  under that number, took the new one for the same announcement arriving twice, and dropped
+  it. Nothing looked wrong: the change is in the activity feed, everyone else's notifications
+  carried on as normal, and a notification that was never prepared leaves nothing to find.
+  This is the third thing that number was being asked to do that it cannot — the marker that
+  ran past the end of the log ([#44](https://github.com/d-weber/almanack/issues/44)) was the
+  second — and it is a separate fault from that one: finding the change again is no use if
+  the announcement of it is then discarded. Each change is now given a name of its own when
+  it is logged, and its notification is filed under that name, so a number handed out twice
+  no longer files two changes as one. In a household this needed the deletion and the change
+  after it to land inside the same second, which is narrow but is exactly what tidying up and
+  then adding the thing you tidied up for looks like. On a development server it was not
+  narrow at all: dev mode runs a clock that moves only when it is told to, so every entry in
+  the log shares one instant and every reused number was this fault — which matters most for
+  whoever reproduces a notification problem there and takes this for the bug they were
+  chasing. This one does change the database: an existing calendar gains a column holding
+  that name, and upgrades in place with nothing to do. Notifications already queued are left
+  exactly as they are and go out as they always would; the changes already logged keep the
+  name they never had, on purpose, so that the first pass after the upgrade recognises what
+  it has already announced instead of announcing it a second time.
+  ([#59](https://github.com/d-weber/almanack/issues/59))
+- **Deleting an appointment and putting it back could leave nobody warned about the new
+  one.** A reminder waiting to go out is filed under what it is for, and for a reminder that
+  was three numbers: the appointment, the day it falls on, and the reminder itself. SQLite
+  hands every one of those out again as soon as the rows holding them have been deleted. So
+  delete the dentist you had just put in, enter it again as the orthodontist on the same day
+  with the same reminder, and the new reminder is filed under exactly what the old one was.
+  The outbox still held the reminder it had already sent for the appointment that is gone —
+  it keeps what it has delivered, because that record is what stops a notification going out
+  a second time — so it read the new reminder as that one arriving again and dropped it.
+  Nobody was warned about the appointment the family actually has, and there was nothing to
+  find: the entry sits in the calendar looking right, and the outbox looks like it did its
+  job. A missed reminder is the failure this application exists to prevent, so this is the
+  worse half of the same fault as [#59](https://github.com/d-weber/almanack/issues/59),
+  which was the same collision on the notifications that announce a change. Every event is
+  now given a name of its own when it is created and its reminders are filed under that
+  name, so numbers handed out twice no longer file two appointments as one. In a household
+  it needed the deleted appointment to have held the highest number and the replacement to
+  fall on the same day with the same reminder — narrow, but "delete the thing I have just
+  made and do it again properly" is exactly that shape. On a development server it was not
+  narrow at all: dev mode runs a clock that moves only when it is told to, so the same
+  reminder instant comes free. This one does change the database: an existing calendar gains
+  a column holding that name and upgrades in place with nothing to do. The events already in
+  it keep the name they never had, on purpose, so that nothing already queued is re-filed
+  and no reminder that has just gone out goes out again; everything created from the upgrade
+  onwards has a name, so an appointment made today can never be mistaken for one that has
+  been deleted.
+  ([#60](https://github.com/d-weber/almanack/issues/60))
+- **Deleting a calendar could go on announcing its changes for a day afterwards.**
+  Deleting a calendar clears out the notifications it was about to produce, so that a
+  reminder for something nobody has any more does not go off two days later. It only ever
+  cleared out half of them. The reminders were found through the events being deleted; the
+  notifications that announce a change — "Claire added Piscine" — name the change and never
+  the calendar it was made in, so nothing matched them and they went out as normal: news
+  about a calendar the reader no longer has, and tapping it opens an event that went with
+  it. At most a day's worth, because an announcement more than a day late is dropped rather
+  than sent, and nothing was lost either way. It is written down because the note above
+  that query claimed it was already doing this, which is the kind of thing that misleads
+  whoever reads it next.
+  ([#61](https://github.com/d-weber/almanack/issues/61))
+- **Saving a reminder you had not changed could send it a second time.** Open the reminder
+  editor on an appointment you have already been warned about, press save without touching
+  anything, and the warning went out again — and again on the save after that, so a
+  household that did it twice got three copies. A reminder waiting to go out is filed under
+  what it is for, and part of that is the reminder's own number. Saving a list threw all of
+  its rows away and wrote them out again, so they came back under numbers they had never had
+  unless they happened to be the last rows in the table; the warning already sent no longer
+  matched the one being prepared, so it was prepared afresh. It was then sent rather than
+  quietly dropped, because a reminder whose moment has gone by is still delivered while the
+  appointment itself is ahead — a late warning beats none. A duplicate rather than a silence
+  is the right way round for this application, and it was bounded to reminders whose moment
+  had passed while the appointment was still to come; it is worth fixing because pressing
+  save is not a thing anyone should have to avoid doing. Saving a list now keeps the rows
+  for the reminders it still contains instead of writing the whole list out again, so a list
+  you have not changed is left exactly as it was. Changing a reminder to another time is
+  still a different reminder, and what was queued for the old time is dropped rather than
+  left to fire: the planner works out the next two days again on every pass and removes
+  anything it would no longer prepare. Nothing about the database changes, and nothing
+  already queued or already sent is disturbed.
+  ([#65](https://github.com/d-weber/almanack/issues/65))
+- **The same warning asked for twice was set up twice, and nothing limited how many an
+  appointment could carry.** A reminder is the moment it goes off and nothing else — there
+  is no name and no note to tell two of them apart — so asking for "30 minutes before"
+  twice is asking for one warning, written twice. It was set up as two: two of everything
+  prepared, and the same sentence pushed to every phone twice for every occurrence, for
+  good, until somebody opened the list and deleted one of two identical lines. And there
+  was no limit at all: a single request could put something like a hundred thousand
+  reminders on one appointment, each of them worked out again for every occurrence every
+  time the app looks ahead. Neither was reachable by using the app — the editor will not
+  offer a warning the list is already holding, and its whole menu is fifteen — so both
+  needed a request built by hand, but a household running its own server is exactly who
+  might write one. A repeat is now folded into the warning it repeats, so what is saved is
+  what was asked for, and a list of more than twenty is refused with a message rather than
+  quietly shortened. Twenty is far more than the editor can produce and more than anyone
+  plausibly wants: a warning every morning of the fortnight before a holiday, with a few
+  more on the day, still fits. A household that had already saved a repeat keeps both until
+  the next time they save that list, which now heals it; nothing about the database
+  changes, and nothing already queued or already sent is disturbed.
+  ([#70](https://github.com/d-weber/almanack/issues/70))
+
+- **A timezone the server was perfectly happy with could leave the browser unable to show
+  anything at all.** The two halves of this application read different copies of the timezone
+  database: `ALMANACK_TZ` is checked at startup against the one on the machine, and the browser
+  resolves the same name against whatever its own engine shipped with. A zone young enough to
+  be in one and not the other — `America/Coyhaique` was added to tzdata in 2025a — therefore
+  started the server without a murmur and then failed in every browser that had not caught up.
+  Every date this app puts on a screen is converted through that zone, so the first conversion
+  to run threw `Invalid time zone specified` and the application stopped there: signed out you
+  were given the login form, and typing the right password gave you the login form again, and
+  again, with nothing anywhere saying why. The browser now says which setting is wrong instead
+  of showing a calendar — `ALMANACK_TZ` and its value, written as the line to go and change,
+  the fact that this browser has never heard of that zone, and the two things that fix it:
+  update the browser, or choose a zone it knows. A button reloads, because correcting the
+  server is all it takes. The zone reaches the browser from two places and both are checked:
+  it arrives with the configuration at startup, and again with the signed-in reply on every
+  sign-in and every refresh. Asking only about the first would have left the worst of this
+  untouched — one configuration request that did not answer, a server still starting or a
+  proxy between restarts, and the browser runs on its built-in default, past the check, and
+  meets the real zone at sign-in instead, where a failure is indistinguishable from a wrong
+  password. Asking at both also covers a tab left open across a restart that changed the
+  setting, which otherwise ended in "Server error. Please try again." over a full calendar
+  screen that could not draw a calendar. The zone and the setting are put on that screen
+  directly rather than written into a sentence to be translated, so they are still there on
+  the one occasion the message is likeliest to be needed and least likely to be readable: a
+  browser that reached the server but not its translations. It refuses rather than
+  falling back, and that is the decision in this change: substituting UTC, or the device's own
+  zone, would not show a smaller calendar but the same one with every hour moved, by an amount
+  nothing on the screen can reveal, in the one kind of application where a plausible wrong hour
+  is the whole of the damage. Reading "dentist, 16:30" and arriving four hours late is a worse
+  thing to do to a household than telling it the calendar cannot be drawn. The server is
+  unchanged and still accepts any zone its own database knows: it cannot see what the browsers
+  in the house support, and the browser can.
+  ([#58](https://github.com/d-weber/almanack/issues/58))
+- **The demo calendar could open on a swimming series with nothing to show for itself, and
+  the browser tests went red on the days it did.** `almanack seed` started the weekly
+  series at the next Tuesday after the day it was run, which on a Tuesday means the one
+  after that, seven days out. A month that fits in five rows is drawn in five, so a series
+  beginning a week ahead can begin after the last day on the screen: seeded on the wrong
+  day, the demo opened on a calendar with no swimming lesson in it, no occurrence moved to
+  the evening and no cancelled one either — three of the four things that series is in the
+  seed to show, and the reason the seed prints a line about it. The browser smoke test
+  asserts the series is on the month, so it went red on those days as well, in CI, which
+  seeds a fresh database on every run, and in `make e2e` locally. It read as a broken
+  application, because nothing in the test said it depended on the day it ran. The series
+  is now counted from the first Tuesday of the month rather than from today, which puts
+  its first occurrence no later than the 7th, the moved one no later than the 14th and the
+  cancelled one no later than the 28th — all of them days of the month the app opens on,
+  and every day of a month is on that month's grid. The last-day-of-month rule beside it
+  in the seed was already anchored that way. No real calendar is affected: this is the
+  demo data and the test that reads it. The test was tightened rather than merely
+  unblocked, since a fix that made it pass on every date would have been worth less than
+  the bug — it now counts the occurrences instead of finding one, so a series that had
+  stopped repeating after its first would fail it, and the arithmetic is pinned in
+  `cmd/almanack` on every date in a decade rather than on whichever one CI happens to run.
+  ([#62](https://github.com/d-weber/almanack/issues/62))
+- **A browser spec added later could have been filed into the wrong project, with nothing
+  anywhere saying so.** Three of the specs are routed to a project by filename, and the
+  patterns doing it were unanchored: `/timezone\.spec\.js/` matches anywhere in a path, so
+  a later `device-timezone.spec.js` would have been dropped from the ordinary project and
+  picked up by the Lisbon one instead — a different device timezone, a different session —
+  and it would still have run, still have passed, and said nothing about the project it
+  was written for. It had cost nothing yet, and had been worked around once by naming a
+  file `unknown-tz.spec.js` so that it would not collide. The patterns are now anchored to
+  the whole basename.
+  ([#63](https://github.com/d-weber/almanack/issues/63))
+- **Running the browser suite a few times in a row failed at the password box, and nothing
+  on the screen said why.** The login endpoint is rate limited per address — a burst of eight
+  attempts, refilling at one per twenty seconds — and the suite signs in twice a run: once
+  through the real form, and once more in the project that tests signing out, which needs a
+  session of its own to destroy. Nothing gave those tokens back between runs, since the
+  buckets are in memory and only a restart empties them, so five `make e2e` runs inside a
+  minute spent the burst and the sixth failed in two specs with
+  `expect(locator).toBeVisible() failed` against a button that was never going to appear —
+  a real limit, working exactly as designed, reported as an application that had stopped
+  rendering. Only the server's log mentioned 429. CI never saw it, because it starts a fresh
+  process every run, so the whole cost fell on whoever runs the suite locally, which is the
+  case that target exists for. The limiter itself is unchanged: the same burst and the same
+  refill in dev mode as in production, and dev mode still answers 429 on the ninth attempt.
+  What dev mode gains is a way to empty the buckets without restarting the server —
+  `POST /dev/ratelimits/reset`, with a button for it on the dev dashboard, which is also the
+  answer for a developer who has just mistyped their own password eight times. The suite
+  calls it once at the start of every run, before it spends anything: `make seed` gives the
+  run a clean database and this gives it a clean bucket. The route is registered only when
+  `ALMANACK_DEV` is set, as every `/dev` route is — not registered and guarded — so in
+  production there is no path to guess at and the clock is still the only thing that refills
+  a bucket; a test holds that down by emptying the burst on a non-dev server, trying the
+  route and three spellings of it, and finding the next attempt still refused. The symptom
+  names itself now as well: the suite checks what the login request answered rather than
+  waiting on what should have appeared afterwards, so a 429 fails as a 429, with the reason
+  and the remedy in the failure.
+  ([#66](https://github.com/d-weber/almanack/issues/66))
+- **Two more of the demo's events could open off the bottom of the calendar.** The cinema
+  outing and the guitar lesson were still counted from the next Saturday and the next
+  Wednesday after the day the seed ran — up to seven days out, and on the last days of a
+  month past the end of the five-row grid the app opens on. It is the same defect as the
+  swimming series above with nothing to go red over it, so it only ever made the demo
+  thinner than the seeder's own summary says it is. They are fixed differently, because
+  they are different things. The guitar lesson is a fortnightly series whose entire point
+  is the week it skips, which a single occurrence cannot show, so like the swimming series
+  it is now counted from the first Wednesday of the month: two occurrences on the opening
+  screen, the 7th and the 21st at the latest. The cinema is a one-off evening out and is
+  meant to sit near the day the demo was made — pinning it to a fixed Saturday would have
+  left it three weeks stale by the end of a month — so it takes the coming Saturday
+  counting today, rather than reading "today is Saturday" as next week, and steps back a
+  week instead of crossing into the next month. Either way it is within six days of the
+  seeded day and on the month the app opens on. Both are pinned in `cmd/almanack` on every
+  date in a decade.
+  ([#67](https://github.com/d-weber/almanack/issues/67))
+- **The demo's seaside holiday could open nowhere at all, and on nearly a quarter of days
+  it did.** It ran from the tenth day after the seed to the sixteenth, so unlike the three
+  events fixed above it was not merely its far end that could fall off the calendar — the
+  whole week could. On 164 of the 730 days of 2026 and 2027 no part of it was on the
+  five-row grid the app opens on, and on a third of them no part of it was in the seeded
+  month at all, while the seeder's summary went on advertising a multi-day holiday. Two
+  issues had already been through this seed without catching it, because nothing asserted
+  the holiday. A span is bounded at both ends, which is what makes it a different problem
+  from the events fixed before it: seven days need seven consecutive days of the month, so
+  a week fits only if it starts on or before the 22nd of a 28-day February. That leaves no
+  room to keep it near the day the demo was made, the way the cinema outing is kept — past
+  the middle of a month the only week that fits is the one ending on its last day, so
+  clamping the old anchor rather than replacing it would have jammed the holiday against
+  the month's edge on more than half of the days the seed can be run, which reads as an
+  artefact of seeding rather than as a holiday anyone booked. It is pinned like the two
+  series instead: the second Saturday of the month and the six days after it, so it starts
+  no earlier than the 8th and ends no later than the 20th, clear of both ends of every
+  month. Saturday because that is the day a week by the sea starts on, and because seven
+  days from one are drawn in two week rows for both of the week starts the settings screen
+  offers — the continuation a multi-day bar is in the demo to show, which a week sitting in
+  a single row would not. The seed's last remaining blind offset went with it: the parents'
+  evening was tomorrow, which leaves the month on the last day of one and the grid as well
+  when that day ends a week, so it steps back to yesterday there rather than crossing. Both
+  are pinned in `cmd/almanack` on every date in a decade.
+  ([#72](https://github.com/d-weber/almanack/issues/72))
+- **A browser test asserted that the demo's holiday was on a screen it is not on for a
+  third of every month.** The test that checks a device in another timezone still sees the
+  family's dates read the *agenda* for the seeded seaside holiday, and the agenda renders
+  from today forward — while the fix above had just pinned that holiday to the second
+  Saturday of the seeded month. Measured on every day of July 2026: the month grid holds
+  the holiday on all thirty-one, and the agenda holds no part of it on fourteen of them,
+  which for a span running from the 8th-to-14th to the 14th-to-20th is between eleven and
+  seventeen days of any month. It passed anyway, by finding the month grid's copy of the
+  title before the agenda replaced the screen — a race, lost about one run in eight, and a
+  test that fails one run in eight for a reason that has nothing to do with its subject
+  teaches everyone to re-run CI rather than read it. What it was not doing was the thing it
+  is named for: "visible somewhere on the page" is satisfied by a holiday drawn a day early
+  exactly as well as by one drawn on the right day, and a build in which every all-day
+  event was bucketed one day earlier passed it six times out of six. It now reads the week
+  screen, which puts each day under a heading of its own; it asks the API which days the
+  holiday covers rather than keeping a copy of the seed's rule; and it asserts day by day,
+  scoped to each day's own section, that the holiday is on the days the server says and on
+  none of the others. On that day-early build it now fails, naming the day. One assertion
+  in the same file had the same shape and was tightened with it: a 16:30 that was asked for
+  on the whole page, and so was answered by the month chip behind the detail screen it was
+  written for. The demo data is unchanged.
+  ([#78](https://github.com/d-weber/almanack/issues/78))
+- **A browser spec that answers an API request for itself was racing the service worker, and
+  nothing anywhere said so.** `web/sw.js` calls `skipWaiting()` and `clients.claim()` and its
+  fetch handler answers `/api/`, so it takes control partway through a visit rather than on
+  the next one — and the requests it then makes are its own rather than the page's, which
+  `page.route` never sees. Whichever of the two won decided whether the spec was reading the
+  answer it had set up or the server's. Three specs already turned service workers off one at
+  a time, each having found the constraint the expensive way, and nothing recorded it
+  anywhere else: the next person to write a `page.route` spec would have met an intermittent
+  failure of the shape that passes on the re-run, which is the kind that costs an afternoon.
+  The suite now blocks service workers by default, and the two files that are *about* the
+  worker — the offline and cache-cap tests, and the one that signs out of its cache — ask for
+  it back in a line each, in the file whose subject it is. Measured: the spec that answers
+  `/api/v1/me` for itself fails ten runs out of ten with a worker in play and passes with it
+  blocked, and taking either opt-in away fails exactly the four tests that exercise the
+  worker and nothing else — which is what stops the new default from switching them off
+  quietly.
+  ([#79](https://github.com/d-weber/almanack/issues/79))
+
 ## [0.2.0] — 2026-07-27
 
 Everything an adversarial review of 0.1.0 found and fixed, an English demo

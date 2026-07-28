@@ -11,13 +11,23 @@
 // cookie, and ending it server-side would fail all of them at their first request for a
 // reason that has nothing to do with what they test. A different account in a context of
 // its own means the sign-out below can only reach the session this test created, whatever
-// the server does with it. That costs one extra sign-in; the login bucket allows a burst
-// of eight, and the suite now uses two.
+// the server does with it. That costs one extra sign-in: the login bucket allows a burst
+// of eight and the suite spends two of them. It used not to give them back, which is how
+// a fifth run inside a minute came to fail here at the password box (#66); auth.setup.js
+// now empties the bucket at the start of every run, and signIn() below says plainly when
+// it is a 429 that has stopped this test rather than a sign-out that has stopped working.
 //
 // CacheStorage is per-context too, so the purge asserted here cannot empty anything the
 // other projects are relying on either.
 
 import { test, expect } from '@playwright/test';
+import { signIn } from './fixtures.js';
+
+// The other of the two files that ask for a service worker back. The suite blocks them
+// by default, because one that has claimed the page answers /api/ before page.route can
+// see the request (playwright.config.js, #79) — but the cache this test signs out of is
+// the worker's, so blocked there would be nothing here to purge and nothing to prove.
+test.use({ serviceWorkers: 'allow' });
 
 const CREDENTIALS = { email: 'dad@example.org', password: 'password' };
 
@@ -36,9 +46,7 @@ function cachedApiResponses(page) {
 
 test('signing out takes the cached calendar off the device', async ({ page, context }) => {
   await page.goto('/');
-  await page.getByLabel(/Email address/i).fill(CREDENTIALS.email);
-  await page.getByLabel(/Password/i).fill(CREDENTIALS.password);
-  await page.getByRole('button', { name: /Sign in/i }).click();
+  await signIn(page, CREDENTIALS);
   await expect(page.getByText("Leo's dentist")).toBeVisible();
 
   // The worker has to be in control, or nothing below passes through it and this would be
