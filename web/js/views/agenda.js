@@ -76,6 +76,11 @@ export function renderAgenda({ date }) {
         if (observer) observer.disconnect();
       } else {
         footer.appendChild(sentinel);
+        // Re-observed, not merely re-attached. A failed chunk disconnects below, and
+        // Retry then loaded one more and stopped for good: the sentinel was back in the
+        // page with nothing watching it, so scrolling never asked for another. Observing
+        // a target already observed does nothing, so this is safe on the ordinary path.
+        if (observer) observer.observe(sentinel);
       }
     } catch (err) {
       clear(footer);

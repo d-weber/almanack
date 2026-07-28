@@ -981,3 +981,34 @@ func TestSenderPublicKey(t *testing.T) {
 		t.Errorf("PublicKey() = %s, want %s", s.PublicKey(), key.Public)
 	}
 }
+
+// A key pair configured in the standard base64 alphabet parses and signs correctly —
+// decodeKeyMaterial accepts '+' and '/' on purpose — but what a Sender publishes has to
+// be base64url whatever it was given. The configured string used to be published
+// verbatim, so a key pasted from a generator that emits the standard alphabet went into
+// the `k=` parameter of the Authorization header and into PublicKey() as something no
+// push service or browser can decode, while everything else about the server looked
+// correct.
+func TestTheAdvertisedKeyIsBase64URLWhateverWasConfigured(t *testing.T) {
+	pub, priv, err := GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	// The same key, spelled in the alphabet decodeKeyMaterial tolerates.
+	standard := strings.NewReplacer("-", "+", "_", "/").Replace(pub)
+
+	s, err := NewSender(standard, priv, "mailto:almanack@example.org", nil)
+	if err != nil {
+		t.Fatalf("new sender with a standard-alphabet key: %v", err)
+	}
+	if got := s.PublicKey(); got != pub {
+		t.Errorf("PublicKey() = %q, want the base64url spelling %q", got, pub)
+	}
+	if strings.ContainsAny(s.PublicKey(), "+/=") {
+		t.Errorf("PublicKey() = %q, which is not base64url", s.PublicKey())
+	}
+	// It must still be the key that was configured, not merely a well-formed one.
+	if _, err := base64.RawURLEncoding.DecodeString(s.PublicKey()); err != nil {
+		t.Errorf("PublicKey() does not decode as base64url: %v", err)
+	}
+}

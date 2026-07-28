@@ -2230,6 +2230,92 @@ func TestRemovingAMemberTakesTheirRowsWithThem(t *testing.T) {
 	}
 }
 
+// TestRemovingAMemberTakesTheirDetachmentsWithThem: the third table keyed on users
+// rather than on membership, and the one that was left behind.
+//
+// A detachment says this member has set their own reminders on one edited occurrence —
+// an empty list included, which is how "no reminder, just for this one" is said — and it
+// outranks the series' list for that date. Deleting the reminders without it left the
+// pair contradicting each other, and a re-invited member inherited nothing on exactly
+// the occurrence the row named: the planner reads the copy's own list, which is empty,
+// while every other date of the series announces itself normally.
+func TestRemovingAMemberTakesTheirDetachmentsWithThem(t *testing.T) {
+	s, _, _ := newStore(t)
+	creator := mustUser(t, s, "claire@example.test", "Claire")
+	leaver := mustUser(t, s, "marc@example.test", "Marc")
+	shared := mustCalendar(t, s, creator.ID, "Maison")
+	elsewhere := mustCalendar(t, s, leaver.ID, "Travail")
+	if err := s.AddMember(ctx(), shared.ID, leaver.ID); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	// A detachment is only ever about an edited occurrence, so each calendar needs a
+	// series and the standalone copy standing in for one of its dates.
+	copyEvent := mustOverrideCopy(t, s, shared.ID, creator.ID, "Piscine", "2026-08-11")
+	kept := mustOverrideCopy(t, s, elsewhere.ID, leaver.ID, "Réunion", "2026-08-11")
+
+	// Marc silences this one occurrence, which is the empty list that writes the row.
+	if err := s.ReplaceReminders(ctx(), &copyEvent.ID, nil, leaver.ID, nil); err != nil {
+		t.Fatalf("silence the occurrence: %v", err)
+	}
+	// Claire does the same on it, and Marc does elsewhere; neither is this call's business.
+	if err := s.ReplaceReminders(ctx(), &copyEvent.ID, nil, creator.ID, nil); err != nil {
+		t.Fatalf("the creator's detachment: %v", err)
+	}
+	if err := s.ReplaceReminders(ctx(), &kept.ID, nil, leaver.ID, nil); err != nil {
+		t.Fatalf("a detachment elsewhere: %v", err)
+	}
+	if detached, _ := s.RemindersDetached(ctx(), copyEvent.ID, leaver.ID); !detached {
+		t.Fatal("the detachment was never recorded, so this test proves nothing")
+	}
+
+	if err := s.RemoveMember(ctx(), shared.ID, leaver.ID); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+
+	if detached, err := s.RemindersDetached(ctx(), copyEvent.ID, leaver.ID); err != nil {
+		t.Fatalf("RemindersDetached: %v", err)
+	} else if detached {
+		t.Error("the ex-member's detachment survived; re-inviting them silences that occurrence")
+	}
+	if detached, _ := s.RemindersDetached(ctx(), copyEvent.ID, creator.ID); !detached {
+		t.Error("removing somebody else took the creator's detachment with it")
+	}
+	if detached, _ := s.RemindersDetached(ctx(), kept.ID, leaver.ID); !detached {
+		t.Error("the ex-member's detachment in a calendar they are staying in was deleted")
+	}
+}
+
+// mustOverrideCopy builds what editing one occurrence of a series leaves behind: a
+// weekly series, a standalone copy of one of its dates, and the override row tying the
+// two together. A reminder_detachments row is only ever written against such a copy.
+func mustOverrideCopy(t *testing.T, s *Store, calendarID, actor int64, title, occDate string) domain.Event {
+	t.Helper()
+	starts := time.Date(2026, 8, 4, 14, 30, 0, 0, time.UTC)
+	label := firstLabel(t, s, calendarID).ID
+	series, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: calendarID, Title: title, StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		LabelID: label, CreatedBy: actor,
+	}, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		DTStart: domain.MustParseDate("2026-08-04"),
+	})
+	if err != nil {
+		t.Fatalf("create the series for %s: %v", title, err)
+	}
+	copyEvent, err := s.CreateEvent(ctx(), domain.Event{
+		CalendarID: calendarID, Title: title + " (modifié)", StartsAt: starts.AddDate(0, 0, 7),
+		EndsAt: starts.AddDate(0, 0, 7).Add(time.Hour), LabelID: label, CreatedBy: actor,
+	}, nil)
+	if err != nil {
+		t.Fatalf("create the copy for %s: %v", title, err)
+	}
+	if err := s.SetOverride(ctx(), *series.RecurrenceID, domain.MustParseDate(occDate), &copyEvent.ID); err != nil {
+		t.Fatalf("record the override for %s: %v", title, err)
+	}
+	return copyEvent
+}
+
 func TestInviteExpiryAndRevocation(t *testing.T) {
 	s, _, _ := newStore(t)
 	u := mustUser(t, s, "claire@example.test", "Claire")

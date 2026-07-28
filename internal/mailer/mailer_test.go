@@ -1113,3 +1113,78 @@ func TestSafeName(t *testing.T) {
 		})
 	}
 }
+
+// A body carrying what used to be the fixed boundary must not be able to restructure
+// the message around it. The delimiter was a compile-time constant, so a line reading
+// "--almanack-boundary-x7f3a9" in an event title closed the part it was inside and let
+// whatever followed describe parts of its own — the author of a title choosing the
+// structure of a message somebody else receives.
+func TestABodyCannotForgeTheMultipartBoundary(t *testing.T) {
+	const forged = "--almanack-boundary-x7f3a9"
+	msg := Message{
+		To:      testTo,
+		Subject: "Rappel",
+		Text: forged + "\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" +
+			"Texte que personne n'a écrit\r\n" + forged + "--",
+		HTML: "<p>Bonjour</p>",
+	}
+	m := parseMessage(t, build(testFrom, msg))
+
+	_, params, err := mime.ParseMediaType(m.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatalf("Content-Type does not parse: %v", err)
+	}
+	if params["boundary"] == forged[2:] {
+		t.Fatal("the boundary is still the constant the body can be written to match")
+	}
+
+	// Exactly the two parts this message really has, with the forgery inert inside the
+	// first of them.
+	r := multipart.NewReader(m.Body, params["boundary"])
+	var types []string
+	for {
+		part, err := r.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("next part: %v", err)
+		}
+		mt, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("part Content-Type does not parse: %v", err)
+		}
+		types = append(types, mt)
+		if _, err := io.ReadAll(part); err != nil {
+			t.Fatalf("read part: %v", err)
+		}
+	}
+	if len(types) != 2 || types[0] != "text/plain" || types[1] != "text/html" {
+		t.Errorf("parts = %v, want exactly [text/plain text/html]: the body added parts of its own", types)
+	}
+}
+
+// Two messages never share a delimiter, which is what makes it unguessable to whatever
+// is composing the body.
+func TestEachMessageGetsItsOwnBoundary(t *testing.T) {
+	msg := Message{To: testTo, Subject: "Rappel", Text: "Bonjour", HTML: "<p>Bonjour</p>"}
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		m := parseMessage(t, build(testFrom, msg))
+		_, params, err := mime.ParseMediaType(m.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("Content-Type does not parse: %v", err)
+		}
+		b := params["boundary"]
+		if b == "" {
+			t.Fatal("no boundary parameter")
+		}
+		if len(b) > 70 {
+			t.Errorf("boundary %q is %d characters, over the RFC 2046 limit of 70", b, len(b))
+		}
+		if seen[b] {
+			t.Fatalf("boundary %q was reused between messages", b)
+		}
+		seen[b] = true
+	}
+}

@@ -373,7 +373,13 @@ func removeStaleTemps(dir string) error {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) < staleTempAfter {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+			// Already gone is the outcome this wanted. Two runs overlapping — a timer
+			// and somebody running it by hand — each list the directory and each try to
+			// remove the same stale partial, and the one that loses the race used to
+			// fail the whole backup over a file that had just been tidied up exactly as
+			// intended. That is an operator woken by a failure mail and a 503 from
+			// /healthz for a backup that was doing its job.
 			return fmt.Errorf("remove stale partial %s: %w", e.Name(), err)
 		}
 	}

@@ -129,6 +129,17 @@ func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) out
 
 	user, err := n.st.UserByID(ctx, q.UserID)
 	if err != nil {
+		// Only an account that is genuinely gone retires the row. Skipping on any
+		// error at all read a database that was briefly busy as a departed member,
+		// and the reading is permanent: nothing returns a skipped row to the queue,
+		// boot catch-up passes over it, and re-planning cannot replace it because the
+		// outbox's UNIQUE key is still held by the row that was retired. One
+		// SQLITE_BUSY during a checkpoint and a live reminder was gone for good, with
+		// "recipient no longer exists" recorded as the reason it had been a decision.
+		if !errors.Is(err, domain.ErrNotFound) {
+			slog.Error("load notification recipient", "user", q.UserID, "id", q.ID, "error", err)
+			return outcomeDeferred
+		}
 		n.skip(ctx, q, "recipient no longer exists", now)
 		return outcomeSkipped
 	}
@@ -159,7 +170,7 @@ func (n *Notifier) deliver(ctx context.Context, q domain.QueuedNotification) out
 		// A summary's content does not exist when its row is planned, so it is
 		// resolved now. A day with nothing to report is skipped rather than
 		// pushed: "0 changements aujourd'hui" is not worth a notification.
-		filled, err := n.fillSummary(ctx, q.UserID, p)
+		filled, err := n.fillSummary(ctx, q.UserID, p, prefs.SummaryTime)
 		if err != nil {
 			slog.Error("build activity summary", "user", q.UserID, "day", p.Day, "error", err)
 			return outcomeDeferred
@@ -468,9 +479,24 @@ func digestPayload(day domain.Date, occs []domain.Occurrence) payload {
 	return p
 }
 
-// fillSummary counts the day's changes across the calendars this user can see,
-// excluding their own and the ones they have muted.
-func (n *Notifier) fillSummary(ctx context.Context, userID int64, p payload) (payload, error) {
+// fillSummary counts the changes this summary reports, across the calendars this user
+// can see and excluding their own and the ones they have muted.
+//
+// The window ends at the summary's own slot and reaches back to the previous day's,
+// rather than covering the calendar day the row is named after. A summary sent at 20:00
+// that counted [00:00, 24:00) of its own day could never report the evening it was sent
+// in — those hours belonged to a summary that had already gone out, and the next day's
+// window began after them — so an edit made after dinner was announced to nobody. Both
+// ends are wall-clock times in the family timezone, which keeps the window 24 hours
+// across a daylight-saving change, and ListActivityBetween is half-open, so no change
+// falls in two windows or in none.
+//
+// summaryTime is the recipient's slot, read from the preferences delivery has already
+// loaded. An unreadable one falls back to the day: planSummaries skips a user whose slot
+// cannot be parsed, so a queued row means it parsed when the row was written, and a
+// preference edited into nonsense since is better answered with the old window than with
+// no summary at all.
+func (n *Notifier) fillSummary(ctx context.Context, userID int64, p payload, summaryTime string) (payload, error) {
 	if p.Day.IsZero() {
 		return p, nil
 	}
@@ -492,9 +518,11 @@ func (n *Notifier) fillSummary(ctx context.Context, userID int64, p payload) (pa
 		return p, nil
 	}
 
-	dayStart := p.Day.In(n.loc)
-	dayEnd := p.Day.AddDays(1).In(n.loc)
-	acts, err := n.st.ListActivityBetween(ctx, ids, dayStart, dayEnd, 500)
+	from, to := p.Day.In(n.loc), p.Day.AddDays(1).In(n.loc)
+	if h, m, ok := parseHM(summaryTime); ok {
+		from, to = p.Day.AddDays(-1).At(h, m, n.loc), p.Day.At(h, m, n.loc)
+	}
+	acts, err := n.st.ListActivityBetween(ctx, ids, from, to, 500)
 	if err != nil {
 		return p, err
 	}

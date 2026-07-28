@@ -232,3 +232,177 @@ func TestCancellingANonOccurrenceIsRefused(t *testing.T) {
 		t.Error("cancelling a Wednesday on a Tuesday series was accepted")
 	}
 }
+
+// "This and following" at the *first* occurrence takes a different branch from every
+// test above: splitting there would leave an empty first half, so it is an edit of the
+// whole series instead. That shortcut used to skip the re-anchoring the split does, so
+// the pattern stayed on Tuesdays while DTStart moved to a Wednesday — and since a series
+// is only ever read through its rule, the moved occurrence did not exist and neither did
+// the one it came from. The edit answered 200 with both gone.
+func TestFollowingFromTheFirstOccurrenceMovesTheWholePattern(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+
+	// The very first lesson moves to Wednesday the 8th. As everywhere else in this
+	// scope, the client sends no recurrence: the server owns the split.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeUpcoming, domain.MustParseDate("2026-04-07"), Input{
+		Title: "Piscine", StartsAt: f.at("2026-04-08", 18, 0), EndsAt: f.at("2026-04-08", 19, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("move the first occurrence: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, o := range f.occurrences(t, "2026-04-01", "2026-05-10") {
+		got[o.OccurrenceDate.String()] = true
+	}
+	if !got["2026-04-08"] {
+		t.Error("the occurrence the user moved to Wednesday 8 April does not exist")
+	}
+	for _, want := range []string{"2026-04-15", "2026-04-22"} {
+		if !got[want] {
+			t.Errorf("the series did not follow the move to Wednesdays: %s is missing", want)
+		}
+	}
+	if got["2026-04-14"] || got["2026-04-21"] {
+		t.Error("the series is still producing Tuesdays after its first occurrence moved to a Wednesday")
+	}
+}
+
+// The monthly equivalent, which fails the same way: the first rent payment moves from
+// the 15th to the 20th and the rule has to move with it.
+func TestFollowingFromTheFirstOccurrenceMovesTheDayOfMonth(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	day := 15
+	series := f.timed(t, "Loyer", "2026-01-15", 9, 0, &domain.Recurrence{
+		Freq: domain.FreqMonthly, Interval: 1, ByMonthday: &day,
+	})
+
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeUpcoming, domain.MustParseDate("2026-01-15"), Input{
+		Title: "Loyer", StartsAt: f.at("2026-01-20", 9, 0), EndsAt: f.at("2026-01-20", 10, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("move the first occurrence: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, o := range f.occurrences(t, "2026-01-01", "2026-03-31") {
+		got[o.OccurrenceDate.String()] = true
+	}
+	for _, want := range []string{"2026-01-20", "2026-02-20", "2026-03-20"} {
+		if !got[want] {
+			t.Errorf("%s is missing: the rent did not follow the move to the 20th", want)
+		}
+	}
+	if got["2026-02-15"] {
+		t.Error("the series is still producing occurrences on the 15th after the move")
+	}
+}
+
+// A whole-series edit that does carry a pattern must keep the recur package's documented
+// freedom for DTStart to sit outside the rule it anchors — a weekly series anchored on a
+// Monday with by_weekday of Tuesday starts the day after. Re-anchoring the first-
+// occurrence branch must not tighten that into a rejection.
+func TestAWholeSeriesEditMayStartBeforeItsFirstOccurrence(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+	})
+	// 6 April 2026 is a Monday; the rule still says Tuesdays.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeAll, domain.Date{}, Input{
+		Title: "Piscine", StartsAt: f.at("2026-04-06", 17, 30), EndsAt: f.at("2026-04-06", 18, 30),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+		Recurrence: &domain.Recurrence{
+			Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday},
+		},
+	}); err != nil {
+		t.Fatalf("whole-series edit anchored the day before its first occurrence: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, o := range f.occurrences(t, "2026-04-01", "2026-04-30") {
+		got[o.OccurrenceDate.String()] = true
+	}
+	if !got["2026-04-07"] || !got["2026-04-14"] {
+		t.Error("the series stopped producing its Tuesdays")
+	}
+}
+
+// "Delete this and following" from a date past the end of a series used to *extend* it:
+// the until date was written as the split minus a day whatever it was, so occurrences
+// between the real end and the new one came back from the dead. Deleting must only ever
+// bring a series' end forward.
+func TestDeletingFollowingPastTheEndCannotResurrectOccurrences(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	until := domain.MustParseDate("2026-04-14")
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}, Until: &until,
+	})
+	before := len(f.occurrences(t, "2026-04-01", "2026-05-31"))
+	if before != 2 {
+		t.Fatalf("expected the two Tuesdays the series runs for, got %d", before)
+	}
+
+	// 12 May is well past the series' own end, so there is nothing there to delete.
+	if err := f.svc.Delete(ctx, f.maman, series.ID, domain.ScopeUpcoming,
+		domain.MustParseDate("2026-05-12")); err != nil {
+		t.Fatalf("delete this and following past the end: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, o := range f.occurrences(t, "2026-04-01", "2026-05-31") {
+		got[o.OccurrenceDate.String()] = true
+	}
+	for _, gone := range []string{"2026-04-21", "2026-04-28", "2026-05-05"} {
+		if got[gone] {
+			t.Errorf("%s came back from the dead: deleting extended the series instead of ending it", gone)
+		}
+	}
+	if !got["2026-04-07"] || !got["2026-04-14"] {
+		t.Error("the occurrences the series really had were lost")
+	}
+}
+
+// The same unclamped until on the split path: "edit this and following" at a date past
+// the series' end extended the half being closed, so occurrences that never existed
+// appeared behind the split.
+func TestSplittingPastTheEndCannotResurrectOccurrences(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	until := domain.MustParseDate("2026-04-14")
+	series := f.timed(t, "Piscine", "2026-04-07", 17, 30, &domain.Recurrence{
+		Freq: domain.FreqWeekly, Interval: 1, ByWeekday: []time.Weekday{time.Tuesday}, Until: &until,
+	})
+
+	// Split at 12 May, past the end, moving the (non-existent) occurrence to the 13th.
+	if _, err := f.svc.Update(ctx, f.maman, series.ID, domain.ScopeUpcoming, domain.MustParseDate("2026-05-12"), Input{
+		Title: "Piscine", StartsAt: f.at("2026-05-13", 18, 0), EndsAt: f.at("2026-05-13", 19, 0),
+		LabelID: f.labels[0].ID, Participants: []int64{f.maman},
+	}); err != nil {
+		t.Fatalf("split past the end: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, o := range f.occurrences(t, "2026-04-01", "2026-05-31") {
+		got[o.OccurrenceDate.String()] = true
+	}
+	for _, gone := range []string{"2026-04-21", "2026-04-28", "2026-05-05"} {
+		if got[gone] {
+			t.Errorf("%s came back from the dead: the closed half of the split was extended", gone)
+		}
+	}
+	if !got["2026-04-07"] || !got["2026-04-14"] {
+		t.Error("the occurrences the series really had were lost")
+	}
+}

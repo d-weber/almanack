@@ -67,6 +67,12 @@ type patchMeRequest struct {
 // Changing a password logs every *other* browser out: that is the point of changing it.
 // This browser is issued a fresh session in the same response, so the person who just
 // typed their new password is not immediately thrown back to the login screen.
+//
+// Everything in the request is checked before any of it is written. The password used to
+// be changed first and the rest of the payload validated afterwards, so a request that
+// carried both a new password and, say, an empty display name answered 400 — having
+// already changed the password and logged every other device out. Nothing on screen said
+// so, and the old password no longer worked.
 func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	var req patchMeRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -77,12 +83,18 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := userOf(ctx)
 
+	// The hash of the new password, or empty when the request carries no password
+	// change. Verifying the current one and hashing the new one are reads and pure
+	// computation, so both belong on this side of the first write.
+	var newHash string
 	if req.NewPassword != nil || req.CurrentPassword != nil {
 		if req.CurrentPassword == nil || req.NewPassword == nil {
 			fail(w, r, invalidf("a password change needs both current_password and new_password"))
 			return
 		}
-		if err := s.changePassword(w, r, user, *req.CurrentPassword, *req.NewPassword); err != nil {
+		var err error
+		newHash, err = s.checkPasswordChange(ctx, user, *req.CurrentPassword, *req.NewPassword)
+		if err != nil {
 			fail(w, r, err)
 			return
 		}
@@ -140,37 +152,47 @@ func (s *Server) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if newHash != "" {
+		if err := s.applyPasswordChange(ctx, w, user.ID, newHash); err != nil {
+			fail(w, r, err)
+			return
+		}
+	}
 	writeJSON(w, r, http.StatusOK, map[string]any{"user": updated})
 }
 
-func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, user domain.User, current, next string) error {
-	ctx := r.Context()
+// checkPasswordChange verifies the current password and returns the hash of the new one.
+// It writes nothing: the verification and the argon2id hashing are the whole of what can
+// legitimately refuse a password change, and doing them before the request's first write
+// is what lets a rejection leave the account exactly as it was.
+func (s *Server) checkPasswordChange(ctx context.Context, user domain.User, current, next string) (string, error) {
 	hash, err := s.store.UserPasswordHash(ctx, user.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	ok, err := auth.VerifyPassword(hash, current)
 	if err != nil {
-		return fmt.Errorf("stored password hash for user %d: %w", user.ID, err)
+		return "", fmt.Errorf("stored password hash for user %d: %w", user.ID, err)
 	}
 	if !ok {
-		return domain.ErrUnauthorized
+		return "", domain.ErrUnauthorized
 	}
 	if err := validatePassword(next); err != nil {
-		return err
+		return "", err
 	}
-	newHash, err := auth.HashPassword(next)
-	if err != nil {
-		return err
-	}
-	if err := s.store.SetPassword(ctx, user.ID, newHash); err != nil {
+	return auth.HashPassword(next)
+}
+
+// applyPasswordChange writes the new hash and ends every session it belonged to.
+func (s *Server) applyPasswordChange(ctx context.Context, w http.ResponseWriter, userID int64, newHash string) error {
+	if err := s.store.SetPassword(ctx, userID, newHash); err != nil {
 		return err
 	}
 	// Every session goes, including this one; a fresh cookie keeps the caller signed in.
-	if err := s.store.DeleteUserSessions(ctx, user.ID); err != nil {
+	if err := s.store.DeleteUserSessions(ctx, userID); err != nil {
 		return err
 	}
-	return s.startSession(ctx, w, user.ID)
+	return s.startSession(ctx, w, userID)
 }
 
 // handlePutAvatar takes raw image bytes and stores only what imgproc produces: a 128 px

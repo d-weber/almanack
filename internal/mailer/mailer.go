@@ -13,6 +13,7 @@ package mailer
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -144,7 +145,7 @@ func validate(m Message) error {
 // accents in "Rappel : Dentiste Léo" are not ASCII.
 func build(from string, m Message) []byte {
 	var b strings.Builder
-	boundary := "almanack-boundary-x7f3a9"
+	boundary := newBoundary()
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + m.To + "\r\n")
 	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", m.Subject) + "\r\n")
@@ -164,6 +165,24 @@ func build(from string, m Message) []byte {
 	b.WriteString(normalizeCRLF(m.HTML) + "\r\n")
 	b.WriteString("--" + boundary + "--\r\n")
 	return []byte(b.String())
+}
+
+// newBoundary mints the delimiter separating the parts of a multipart message.
+//
+// It is random per message rather than a constant, which is the only way a delimiter can
+// be guaranteed not to appear in the text it delimits. A fixed string put that guarantee
+// in the hands of whatever went into the body: a line reading "--almanack-boundary-…"
+// closes the part it is inside and opens whatever the next lines describe, so the sender
+// of an event title chooses the structure of a message somebody else receives. Nothing
+// composes an HTML part today, so this closes the door before it is opened rather than
+// after.
+//
+// crypto/rand.Text is at least 128 bits in the RFC 4648 base32 alphabet, which is well
+// inside both the RFC 2046 limit of 70 characters and the characters a boundary may be
+// spelled with. It returns no error — since Go 1.24 crypto/rand cannot fail — so there
+// is no failure branch here to get wrong, or to leave untested.
+func newBoundary() string {
+	return "almanack-" + rand.Text()
 }
 
 func normalizeCRLF(s string) string {

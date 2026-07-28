@@ -26,6 +26,22 @@ function parseHash() {
   return { path: path.startsWith('/') ? path : `/${path}`, query };
 }
 
+/**
+ * decodeURIComponent throws a URIError on a malformed escape — '%' alone is enough, and
+ * a hash is something anybody can type or paste. Uncaught it came straight out of
+ * dispatch(), which is called from boot: one bad character in the address bar and the
+ * app rendered nothing at all, on that URL and on every reload of it. The raw segment is
+ * the honest fallback: it is what was asked for, and the route it reaches decides what
+ * to make of it.
+ */
+function decodeSegment(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch (_) {
+    return raw;
+  }
+}
+
 function match(path) {
   const segs = path.split('/').filter(Boolean);
   for (const r of routes) {
@@ -34,7 +50,7 @@ function match(path) {
     let ok = true;
     for (let i = 0; i < r.parts.length; i++) {
       const p = r.parts[i];
-      if (p.startsWith(':')) params[p.slice(1)] = decodeURIComponent(segs[i]);
+      if (p.startsWith(':')) params[p.slice(1)] = decodeSegment(segs[i]);
       else if (p !== segs[i]) { ok = false; break; }
     }
     if (ok) return { route: r, params };

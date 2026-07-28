@@ -291,6 +291,8 @@ async function show(builder, { chrome = null, tabs = true } = {}) {
   // screen as a bad zone at boot, which is what that state is.
   if (refused || refuseIfUnknownTimezone()) return;
 
+  // Returned to the caller so that work continuing after `show()` resolves can ask
+  // whether it is still the current navigation — see panelScreen.
   const token = ++renderToken;
   release(currentCleanup);
   currentCleanup = null;
@@ -319,12 +321,16 @@ async function show(builder, { chrome = null, tabs = true } = {}) {
     mount(viewEl, errorBox(err, () => reload()));
   }
   paintBanners();
+  return token;
 }
 
 // ---------------------------------------------------------------------------
 // Screens
 // ---------------------------------------------------------------------------
 
+// calendarScreen returns show()'s token, so a caller that goes on to open something
+// over the calendar can tell whether the navigation it belongs to is still the one on
+// screen.
 async function calendarScreen(view, ctx) {
   setView(view);
   const date = ctx.query.get('d') || state.cursor || todayISO();
@@ -332,7 +338,7 @@ async function calendarScreen(view, ctx) {
 
   const header = calendarHeader(view, date);
 
-  await show(async () => {
+  return show(async () => {
     if (view === 'agenda') return renderAgenda({ date: todayISO() });
     const r = view === 'week' ? weekRange(date, weekStart()) : monthRange(date, weekStart());
     await loadRange(r.from, r.to);
@@ -392,13 +398,21 @@ function asCloseButton(node) {
 // panelScreen renders an event next to the calendar on a wide screen, and full
 // screen on a narrow one. The calendar underneath is re-rendered first, so the panel
 // always opens against the month or week you were actually looking at.
+//
+// Rendering that calendar is awaited, and a navigation can land inside the await —
+// tapping an event and then the Month tab is enough. The panel used to open regardless,
+// over whichever screen that navigation had drawn, and it opened *after* the newer
+// screen's own show() had closed it, so nothing took it down again. Comparing the token
+// the calendar render took against the current one is what says the navigation this
+// panel belongs to is still the one on screen.
 async function panelScreen(builder, ctx) {
   if (!DESKTOP.matches) {
     return plainScreen(builder);
   }
   const date = panelDate(ctx);
   const view = state.view === 'agenda' ? 'agenda' : state.view;
-  await calendarScreen(view, { query: new URLSearchParams(`d=${date}`) });
+  const rendered = await calendarScreen(view, { query: new URLSearchParams(`d=${date}`) });
+  if (rendered !== renderToken) return;
 
   const token = ++panelToken;
   openPanel();
@@ -440,7 +454,11 @@ function registerRoutes() {
 
   route('/day/:date', async (ctx) => {
     if (!guardAuth(ctx)) return;
-    await calendarScreen('month', { query: new URLSearchParams(`d=${ctx.params.date}`) });
+    // Same supersession check as panelScreen, for the same reason: the day sheet is an
+    // overlay opened after an awaited render, and a navigation during that await would
+    // otherwise pop it over a screen the reader has already moved on to.
+    const rendered = await calendarScreen('month', { query: new URLSearchParams(`d=${ctx.params.date}`) });
+    if (rendered !== renderToken) return;
     openDaySheet(ctx.params.date);
   });
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -434,6 +435,81 @@ func TestPasswordChangeInvalidatesOtherSessions(t *testing.T) {
 	e.get("/api/v1/me").expect(http.StatusOK)
 	// …every other one does not.
 	e.request(other, http.MethodGet, "/api/v1/me", nil).expect(http.StatusUnauthorized)
+}
+
+// An account and its membership are created together or not at all. Written separately,
+// a failure between them left an account that exists and can sign in but belongs to no
+// calendar — and there is no way out of that state from the outside: signing up again
+// with the same address collides on the unique email, and an invite is the only route in.
+func TestASignupThatCannotJoinCreatesNoAccount(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+
+	var invite inviteResponse
+	e.post(fmt.Sprintf("/api/v1/calendars/%d/invites", cal.ID), nil).
+		expect(http.StatusCreated).decode(&invite)
+
+	// Make joining fail the way any write can, without touching the account path. The
+	// store API has no way to say "fail this statement", so this reaches past it through
+	// Store.DB, which exists for exactly that.
+	if _, err := e.store.DB().ExecContext(t.Context(),
+		`ALTER TABLE calendar_members RENAME TO calendar_members_unavailable`); err != nil {
+		t.Fatalf("install the failure: %v", err)
+	}
+
+	e.request(e.newClient(), http.MethodPost, "/api/v1/auth/signup", map[string]string{
+		"invite_token": invite.Token, "email": "papa@example.org", "password": "un-bon-mot-de-passe",
+		"display_name": "Papa", "color": "#2980b9", "lang": "fr",
+	}).expect(http.StatusInternalServerError)
+
+	if _, err := e.store.DB().ExecContext(t.Context(),
+		`ALTER TABLE calendar_members_unavailable RENAME TO calendar_members`); err != nil {
+		t.Fatalf("clear the failure: %v", err)
+	}
+
+	if _, err := e.store.UserByEmail(t.Context(), "papa@example.org"); err == nil {
+		t.Error("an account was left behind that belongs to no calendar and cannot sign up again")
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UserByEmail: %v", err)
+	}
+
+	// The address is still free, so the invite still works.
+	e.request(e.newClient(), http.MethodPost, "/api/v1/auth/signup", map[string]string{
+		"invite_token": invite.Token, "email": "papa@example.org", "password": "un-bon-mot-de-passe",
+		"display_name": "Papa", "color": "#2980b9", "lang": "fr",
+	}).expect(http.StatusCreated)
+}
+
+// A rejected PATCH must leave the password alone. The password used to be changed first
+// and the rest of the payload validated afterwards, so one request answered 400 while
+// having already changed the password and signed every other device out — and nothing
+// said so. The next sign-in with the password the family thought they had failed.
+func TestARejectedPatchDoesNotChangeThePassword(t *testing.T) {
+	e := newEnv(t)
+	user, _ := e.family()
+	other := e.login(e.newClient(), user.Email)
+
+	// A valid password change carried alongside a display name that is not allowed.
+	e.do(http.MethodPatch, "/api/v1/me", map[string]any{
+		"current_password": testPassword,
+		"new_password":     "un-nouveau-mot-de-passe",
+		"display_name":     "   ",
+	}).expect(http.StatusBadRequest)
+
+	// The other session is untouched, which is the visible half of the same fact.
+	e.request(other, http.MethodGet, "/api/v1/me", nil).expect(http.StatusOK)
+
+	// And the old password still works, which is the half the family finds out about.
+	fresh := e.newClient()
+	e.request(fresh, http.MethodPost, "/api/v1/auth/login", map[string]any{
+		"email": user.Email, "password": testPassword,
+	}).expect(http.StatusOK)
+
+	// The new one was never set.
+	rejected := e.newClient()
+	e.request(rejected, http.MethodPost, "/api/v1/auth/login", map[string]any{
+		"email": user.Email, "password": "un-nouveau-mot-de-passe",
+	}).expect(http.StatusUnauthorized)
 }
 
 func TestMeBootstrapPayload(t *testing.T) {

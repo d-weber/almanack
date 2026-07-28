@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -730,6 +732,69 @@ func TestLeaveTransfersTheCalendar(t *testing.T) {
 		expect(http.StatusNoContent)
 	if _, err := e.store.CalendarByID(t.Context(), cal.ID); err == nil {
 		t.Errorf("an empty calendar was left behind")
+	}
+}
+
+// A calendar's members all leaving at the same moment used to strand it. Counting the
+// members and acting on the count were separate transactions, so every request read a
+// count above one, every one took the "somebody is still here" branch, and every
+// membership went — leaving a calendar with no members, which no query returns to
+// anybody and which nothing left in the application can reach, its events included.
+//
+// Whichever request is last must find itself alone and take the calendar with it. Which
+// one that is does not matter and is not asserted; the two states this leaves are "gone"
+// and "still has a member", and the bug is the third.
+func TestMembersLeavingAtOnceDoNotStrandTheCalendar(t *testing.T) {
+	e := newEnv(t)
+	owner, cal := e.family()
+
+	members := []domain.User{owner}
+	clients := []*http.Client{e.client}
+	for _, name := range []string{"papa", "leo", "mamie"} {
+		u := e.createUser(name+"@example.org", name)
+		if err := e.store.AddMember(t.Context(), cal.ID, u.ID); err != nil {
+			t.Fatalf("add member %s: %v", name, err)
+		}
+		members = append(members, u)
+		clients = append(clients, e.login(e.newClient(), u.Email))
+	}
+
+	path := fmt.Sprintf("/api/v1/calendars/%d/leave", cal.ID)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			// Any answer is legitimate — a request that loses the race for the lock may
+			// find the calendar already gone — so the status is not what is asserted.
+			e.request(c, http.MethodPost, path, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	_, err := e.store.CalendarByID(t.Context(), cal.ID)
+	if err == nil {
+		// It survived, so somebody must still be in it.
+		count, err := e.store.CountMembers(t.Context(), cal.ID)
+		if err != nil {
+			t.Fatalf("CountMembers: %v", err)
+		}
+		if count == 0 {
+			t.Error("the calendar survived with no members: it is unreachable, and so is everything in it")
+		}
+		return
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("CalendarByID: %v", err)
+	}
+	// It was deleted, which is the other correct outcome: nobody is left in it.
+	for _, u := range members {
+		if member, _ := e.store.IsMember(t.Context(), cal.ID, u.ID); member {
+			t.Errorf("user %d is a member of a calendar that was deleted", u.ID)
+		}
 	}
 }
 
@@ -1652,4 +1717,63 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A feed row about a recurring event has to link to a date the series actually lands
+// on. The client built the link from the instant the change was made, and the day
+// somebody edits a swimming lesson is almost never a Tuesday: GET /events/{id} answers
+// 404 for a date the rule does not produce, so tapping the row reported the event as
+// missing. The date is derived on the server for the same reason a search result's is —
+// a series' anchor need not be an occurrence of its own rule, so there is nothing the
+// browser could correctly guess from what it holds.
+func TestActivityRowsLinkToARealOccurrence(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+	series := e.weeklySeries(cal, labels[4].ID)
+
+	// A change made on a Wednesday, which the Tuesday series never lands on.
+	e.clk.Set(time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC))
+	e.do(http.MethodPatch, fmt.Sprintf("/api/v1/events/%d?scope=all", series.ID), map[string]any{
+		"calendar_id": cal.ID, "title": "Piscine (nouveau créneau)", "label_id": labels[4].ID,
+		"starts_at": "2026-08-04T15:30:00Z", "ends_at": "2026-08-04T16:15:00Z",
+		"recurrence": map[string]any{
+			"freq": "weekly", "interval": 1, "by_weekday": []int{int(time.Tuesday)}, "until": "2026-12-31",
+		},
+	}).expect(http.StatusOK)
+
+	var feed struct {
+		Activity []activityView `json:"activity"`
+	}
+	e.get("/api/v1/activity").expect(http.StatusOK).decode(&feed)
+
+	var row *activityView
+	for i, a := range feed.Activity {
+		if a.EventID != nil && *a.EventID == series.ID && a.Action == domain.ActionEventUpdated {
+			row = &feed.Activity[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("no update row for the series in %+v", feed.Activity)
+	}
+	if row.OccurrenceDate == nil {
+		t.Fatal("occurrence_date is null, so the row has nowhere to link and the family sees an error")
+	}
+	if row.OccurrenceDate.Weekday() != time.Tuesday {
+		t.Errorf("occurrence_date = %s, a %s: the series only ever lands on Tuesdays",
+			row.OccurrenceDate, row.OccurrenceDate.Weekday())
+	}
+	// The date the row links to must actually open.
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", series.ID, row.OccurrenceDate)).expect(http.StatusOK)
+
+	// A deleted event keeps its row and loses its link: there is nothing left to open.
+	e.do(http.MethodDelete, fmt.Sprintf("/api/v1/events/%d?scope=all", series.ID), nil).
+		expect(http.StatusNoContent)
+	e.get("/api/v1/activity").expect(http.StatusOK).decode(&feed)
+	for _, a := range feed.Activity {
+		if a.Action == domain.ActionEventDeleted && a.OccurrenceDate != nil {
+			t.Errorf("a deleted event's row links to %s", a.OccurrenceDate)
+		}
+	}
 }

@@ -270,14 +270,34 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const url = (event.notification.data && event.notification.data.url) || '/';
   event.waitUntil((async () => {
-    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const client of clients) {
+    // One window, one way of reaching it. Messaging *and* navigating meant the reload
+    // always stomped the in-place route wherever WindowClient.navigate exists — which
+    // is everywhere it matters — so the message that exists to keep the tab's state was
+    // thrown away every time; and a navigate() that then rejected fell out of the try
+    // and left the loop to focus and message a second window as well.
+    //
+    // A window this worker controls has the app's listener wired to it (see app.js), so
+    // it is routed in place: no reload, nothing lost.
+    const controlled = await self.clients.matchAll({ type: 'window' });
+    for (const client of controlled) {
       try {
         await client.focus();
         client.postMessage({ type: 'navigate', url });
-        if ('navigate' in client) await client.navigate(url);
         return;
-      } catch (_) { /* try the next client */ }
+      } catch (_) { /* try the next window */ }
+    }
+    // An uncontrolled one — open since before this worker installed, or loaded by a
+    // hard reload — may never act on that message, so it is navigated instead. That
+    // reloads the tab, which is worse than routing it and much better than a
+    // notification that does nothing when tapped.
+    const uncontrolled = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of uncontrolled) {
+      if (!('navigate' in client)) continue;
+      try {
+        await client.focus();
+        await client.navigate(url);
+        return;
+      } catch (_) { /* try the next window */ }
     }
     await self.clients.openWindow(url);
   })());

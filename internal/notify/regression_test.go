@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1754,5 +1755,268 @@ func TestDeletingACalendarTakesItsQueuedAnnouncementsWithIt(t *testing.T) {
 	}
 	if got := len(e.push.received()); got != 1 {
 		t.Errorf("%d pushes went out, want 1 — the surviving calendar's", got)
+	}
+}
+
+// A transient database failure while reading the recipient used to retire the row
+// permanently, with "recipient no longer exists" recorded as the reason. Every other
+// read in deliver() defers on error; this one skipped, and a skipped row is never
+// returned again by DueNotifications, never revived by boot catch-up, and cannot be
+// re-planned because the outbox's UNIQUE key is still held by the skipped row. One
+// unlucky SQLITE_BUSY and a live reminder was gone for good, with an audit line saying
+// it had been a decision.
+func TestATransientRecipientReadDoesNotRetireTheRow(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+
+	e.breakUserReads()
+	e.clk.Set(time.Date(2027, 6, 1, 6, 30, 0, 0, time.UTC))
+	e.dispatch()
+
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminder rows, want 1", len(rows))
+	}
+	if rows[0].Skipped != "" {
+		t.Fatalf("the row was retired on a database error: %q", rows[0].Skipped)
+	}
+	if !rows[0].SentAt.IsZero() {
+		t.Fatal("a row was marked sent although its recipient could not be read")
+	}
+
+	// The database answers again and the reminder goes out.
+	e.userReadsWorkAgain()
+	e.clk.Set(time.Date(2027, 6, 1, 6, 32, 0, 0, time.UTC))
+	e.dispatch()
+
+	rows = e.queueOfKind(domain.KindReminder)
+	if rows[0].SentAt.IsZero() {
+		t.Fatalf("the retry did not deliver: %+v", rows[0])
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("push deliveries = %d, want 1", got)
+	}
+}
+
+// A recipient who really has gone is still retired, which is the case the skip is
+// there for: the row can never become deliverable and would otherwise sit at the head
+// of the queue forever.
+func TestAVanishedRecipientStillRetiresTheRow(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+
+	// Removing an account normally takes its queue rows with it — notification_queue
+	// references users ON DELETE CASCADE — so a row whose recipient is missing arrives
+	// from outside that path: a restored backup, or a database somebody edited by hand.
+	// That is exactly what the skip is defensive about, and reaching the state needs
+	// the constraint out of the way.
+	if _, err := e.st.DB().ExecContext(e.ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("suspend the constraint: %v", err)
+	}
+	if _, err := e.st.DB().ExecContext(e.ctx, `DELETE FROM users WHERE id = ?`, u.ID); err != nil {
+		t.Fatalf("delete the recipient: %v", err)
+	}
+	if _, err := e.st.DB().ExecContext(e.ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("restore the constraint: %v", err)
+	}
+	e.clk.Set(time.Date(2027, 6, 1, 6, 30, 0, 0, time.UTC))
+	e.dispatch()
+
+	rows := e.queueOfKind(domain.KindReminder)
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminder rows, want 1", len(rows))
+	}
+	if rows[0].Skipped == "" {
+		t.Error("a row for an account that no longer exists was left in the queue forever")
+	}
+}
+
+// breakUserReads makes reading an account fail the way any database read can, without
+// deleting anything: the row is still there, the query is what stops working. The store
+// API has no way to say "fail this query", so this reaches past it through Store.DB, as
+// breakSubscriptionReads does.
+func (e *env) breakUserReads() {
+	e.t.Helper()
+	if _, err := e.st.DB().ExecContext(e.ctx,
+		`ALTER TABLE users RENAME TO users_unavailable`); err != nil {
+		e.t.Fatalf("install the failure: %v", err)
+	}
+}
+
+func (e *env) userReadsWorkAgain() {
+	e.t.Helper()
+	if _, err := e.st.DB().ExecContext(e.ctx,
+		`ALTER TABLE users_unavailable RENAME TO users`); err != nil {
+		e.t.Fatalf("clear the failure: %v", err)
+	}
+}
+
+// Two planning passes can genuinely overlap: the scheduler goroutine runs one every
+// tick and POST /dev/tick runs another on the request's goroutine. They shared one
+// unsynchronised map of what the pass had decided should exist, which the race detector
+// catches and Go's runtime turns into a fatal "concurrent map writes" — taking the
+// scheduler with it. Worse than the crash was the quiet case: reconcile deletes every
+// undelivered row the pass no longer calls for, so a pass reading half of the other's
+// decisions deleted reminders that were wanted.
+func TestTwoPlanningPassesAtOnceDoNotCorruptTheOutbox(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+	for i, title := range []string{"Dentiste", "Piscine", "Courses", "Judo"} {
+		ev := e.timedEvent(cal, u.ID, title, 2027, 6, 1, 9+i, 0, time.Hour, nil)
+		e.reminderMinutes(ev, u.ID, 30)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = e.n.Plan(e.ctx)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+	}
+
+	if got := len(e.queueOfKind(domain.KindReminder)); got != 4 {
+		t.Errorf("the outbox holds %d reminders, want 4: a pass deleted rows the other had"+
+			" just planned", got)
+	}
+}
+
+// A summary is delivered at its slot but used to count the whole calendar day it is
+// named after, so the evening it was sent in belonged to a summary that had already
+// gone out — and the next day's window began after it. Changes made between the slot
+// and midnight were reported to nobody. The window now ends at the slot and reaches
+// back to the previous day's, which covers every hour exactly once.
+func TestChangesAfterTheSummarySlotAreReportedTheNextDay(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 3, 0, 0, 0, time.UTC)) // 05:00 Paris
+	watcher := e.user("alice")
+	actor := e.user("bruno")
+	cal := e.calendar("Famille", actor.ID)
+	e.join(cal.ID, watcher.ID)
+	e.subscribe(watcher.ID, "iphone")
+	e.setPrefs(domain.NotificationPrefs{
+		UserID: watcher.ID, DigestTime: "07:30", DailySummaryMode: true,
+		SummaryTime: "20:00", EmailReminders: true, ActivityPush: true,
+	})
+	e.plan()
+
+	// A change made at 22:00, after the 20:00 summary for the 1st has gone out.
+	e.clk.Set(time.Date(2027, 6, 1, 20, 0, 0, 0, time.UTC)) // 22:00 Paris
+	e.timedEvent(cal, actor.ID, "Courses", 2027, 6, 4, 10, 0, time.Hour, nil)
+
+	// The next day's summary is the only one left that can report it.
+	next, ok := findRow(e.queueOfKind(domain.KindSummary), events.SummarySourceRef(date(2027, 6, 2)))
+	if !ok {
+		t.Fatal("no summary was planned for the 2nd")
+	}
+	filled, err := e.n.fillSummary(e.ctx, watcher.ID, e.payloadOf(next), "20:00")
+	if err != nil {
+		t.Fatalf("fill summary: %v", err)
+	}
+	if filled.Total != 1 {
+		t.Errorf("the summary for the 2nd counted %d changes, want the one made at 22:00 on the"+
+			" 1st: nothing else will ever report it", filled.Total)
+	}
+}
+
+// The other half of the same window: a change made before the slot is reported by that
+// day's summary and not again by the next one.
+func TestAChangeIsReportedByExactlyOneSummary(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 3, 0, 0, 0, time.UTC))
+	watcher := e.user("alice")
+	actor := e.user("bruno")
+	cal := e.calendar("Famille", actor.ID)
+	e.join(cal.ID, watcher.ID)
+	e.subscribe(watcher.ID, "iphone")
+	e.setPrefs(domain.NotificationPrefs{
+		UserID: watcher.ID, DigestTime: "07:30", DailySummaryMode: true,
+		SummaryTime: "20:00", EmailReminders: true, ActivityPush: true,
+	})
+	e.plan()
+
+	e.clk.Set(time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)) // 14:00 Paris, before the slot
+	e.timedEvent(cal, actor.ID, "Courses", 2027, 6, 4, 10, 0, time.Hour, nil)
+
+	counted := map[string]int{}
+	for _, day := range []domain.Date{date(2027, 6, 1), date(2027, 6, 2)} {
+		row, ok := findRow(e.queueOfKind(domain.KindSummary), events.SummarySourceRef(day))
+		if !ok {
+			t.Fatalf("no summary was planned for %s", day)
+		}
+		filled, err := e.n.fillSummary(e.ctx, watcher.ID, e.payloadOf(row), "20:00")
+		if err != nil {
+			t.Fatalf("fill summary for %s: %v", day, err)
+		}
+		counted[day.String()] = filled.Total
+	}
+	if counted["2027-06-01"] != 1 {
+		t.Errorf("the summary for the 1st counted %d changes, want 1", counted["2027-06-01"])
+	}
+	if counted["2027-06-02"] != 0 {
+		t.Errorf("the summary for the 2nd counted %d changes, want 0: it was already reported",
+			counted["2027-06-02"])
+	}
+}
+
+// The "send me a test" button files a row under the reminder kind on purpose, so that
+// it travels the real delivery path rather than a special one that could work while the
+// real one is broken. Reconciliation deletes undelivered reminder rows a planning pass
+// no longer calls for, and no pass ever calls for this one — so the next tick deleted
+// it, which on a thirty-second tick is almost always. The button reported success and
+// nothing arrived.
+func TestATestNotificationSurvivesTheNextPlanningPass(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+
+	now := e.clk.Now().UTC().Truncate(time.Second)
+	ref := events.TestSourceRef(u.ID, now.UnixNano())
+	if err := e.st.EnqueueNotification(e.ctx, domain.QueuedNotification{
+		UserID: u.ID, Kind: domain.KindReminder, SourceRef: ref,
+		Payload: `{"kind":"reminder","title":"Test"}`, DueAt: now,
+	}); err != nil {
+		t.Fatalf("queue the test notification: %v", err)
+	}
+
+	e.plan()
+
+	if _, ok := findRow(e.queueOfKind(domain.KindReminder), ref); !ok {
+		t.Fatal("the test notification was deleted by the planning pass that followed it")
+	}
+
+	// And it goes out, which is the whole point of the button.
+	e.dispatch()
+	row, ok := findRow(e.queueOfKind(domain.KindReminder), ref)
+	if !ok {
+		t.Fatal("the test notification disappeared during delivery")
+	}
+	if row.SentAt.IsZero() {
+		t.Errorf("the test notification was never sent: %+v", row)
+	}
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("push deliveries = %d, want 1", got)
 	}
 }

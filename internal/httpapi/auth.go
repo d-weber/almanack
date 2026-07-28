@@ -12,6 +12,7 @@ import (
 	"almanack/internal/auth"
 	"almanack/internal/domain"
 	"almanack/internal/mailer"
+	"almanack/internal/store"
 )
 
 const sessionCookie = "almanack_session"
@@ -237,21 +238,28 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	user, err := s.store.CreateUser(ctx, domain.User{
-		Email:       email,
-		DisplayName: name,
-		Color:       color,
-		Lang:        lang,
-		WeekStart:   time.Monday,
-		TimeFormat:  "24h",
-		IsAdmin:     count == 0,
-	}, hash)
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-
-	if err := s.store.AddMember(ctx, invite.CalendarID, user.ID); err != nil {
+	// The account and its membership are one transaction. Created separately, a failure
+	// between them — a cancelled request is enough — left an account that exists, can
+	// sign in, and belongs to no calendar: the invite it was created from is spent as
+	// far as that address is concerned, since signing up again collides on the unique
+	// email, and there is no other way in.
+	var user domain.User
+	if err := s.store.InTx(ctx, func(st *store.Store) error {
+		var err error
+		user, err = st.CreateUser(ctx, domain.User{
+			Email:       email,
+			DisplayName: name,
+			Color:       color,
+			Lang:        lang,
+			WeekStart:   time.Monday,
+			TimeFormat:  "24h",
+			IsAdmin:     count == 0,
+		}, hash)
+		if err != nil {
+			return err
+		}
+		return st.AddMember(ctx, invite.CalendarID, user.ID)
+	}); err != nil {
 		fail(w, r, err)
 		return
 	}
