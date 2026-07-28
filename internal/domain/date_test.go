@@ -49,6 +49,18 @@ func TestDaysUntilMatchesAddDays(t *testing.T) {
 	}
 }
 
+// TestUTCHandleIsWhatInWasInUTC keeps the two ways of spelling "midnight UTC on d" the
+// same. AddDays and Weekday used to go through In(time.UTC) and now use the handle
+// directly, which is faster and says what it means — but only while the two agree, and
+// nothing else in the suite would notice if In grew a rule that reached UTC.
+func TestUTCHandleIsWhatInWasInUTC(t *testing.T) {
+	for d := MustParseDate("1900-01-01"); d.Before(MustParseDate("2200-01-01")); d = d.AddDays(19) {
+		if got, want := d.In(time.UTC), d.utcHandle(); !got.Equal(want) {
+			t.Fatalf("%s: In(UTC) = %v, handle = %v", d, got, want)
+		}
+	}
+}
+
 func TestAddMonthsRefusesToGuess(t *testing.T) {
 	// AddMonths deliberately reports failure rather than choosing between the
 	// skip and clamp policies, which differ by intent (a monthly bill skips, a
