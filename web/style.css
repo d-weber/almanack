@@ -48,6 +48,10 @@
   --radius-sm: 9px;
   --radius-lg: 22px;
   --tap: 44px;
+  /* The tab bar's own height, before the phone's safe-area inset. The round add
+     button is centred on its top edge, so the two have to agree. */
+  --tabbar-h: 60px;
+  --fab-size: 56px;
   --gap: 12px;
   --pad: 14px;
 
@@ -210,6 +214,9 @@ a { color: var(--accent); }
   display: flex;
   align-items: stretch;
   gap: 2px;
+  /* Stated rather than left to the contents, because the round add button is positioned
+     against this edge: a tab bar that quietly grew would leave it floating. */
+  min-height: var(--tabbar-h);
   background: var(--surface);
   border-top: 1px solid var(--line);
   padding-bottom: var(--safe-b);
@@ -239,6 +246,54 @@ a { color: var(--accent); }
 .tab .icon { width: 24px; height: 24px; }
 .tab-label { font-size: 11px; }
 .tab.is-active { color: var(--accent); font-weight: 600; }
+
+/* The round "new event" button, on phones only.
+   
+   It straddles the line between the calendar and the tab bar — half over each — which
+   is the piece of screen a thumb is already nearest and the one place nothing else is
+   drawn. Fixed rather than absolute: the calendar scrolls underneath it, and an add
+   button that scrolls away is one you have to hunt for.
+   
+   The tab bar is 60px of content plus whatever the phone reserves below it, so the
+   button sits at that height less its own radius, and the safe-area inset comes along
+   for the ride. z-index above the tab bar so the overlap reads as one thing in front of
+   another rather than a button clipped by it. */
+.fab {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--safe-b) + var(--tabbar-h) - var(--fab-size) / 2);
+  transform: translateX(-50%);
+  z-index: 5;
+  width: var(--fab-size);
+  height: var(--fab-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  /* Lifted off both surfaces it sits across, or the overlap looks like a mistake. */
+  box-shadow: 0 2px 10px rgb(0 0 0 / 0.28);
+}
+
+.fab .icon { width: 26px; height: 26px; }
+.fab:active { filter: brightness(0.92); }
+
+/* The month and year is the button that goes back to today on a phone. It is a button
+   inside the <h1> rather than instead of it, so the heading survives; everything here
+   is undoing what a button looks like. */
+.app-title-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.app-title-btn:active { opacity: 0.6; }
 
 /* ---------------------------------------------------------------- app bar */
 
@@ -298,6 +353,15 @@ a { color: var(--accent); }
 .view-switch {
   flex: 0 1 auto;
   min-width: 0;
+}
+
+/* The phone's bar is the month and the mode and nothing else, so the switch is exactly
+   as wide as its two words. The responsive rules below are written for the bar that also
+   carries Today, the arrows and the actions, where the switch grows to share a line with
+   them; here it would only stretch across empty space. Specificity, not order, is what
+   makes this win — those rules live in media queries further down. */
+.app-bar-row.is-compact .view-switch {
+  flex: 0 0 auto;
 }
 
 .view-switch .segment {
@@ -1115,6 +1179,16 @@ a { color: var(--accent); }
   flex-direction: column;
 }
 
+/* The round add button sits half over the calendar (see .fab), centred, so it lands on
+   the middle column of the last week. Without this the third chip there is drawn
+   underneath it — and the third is the cap rather than an overflow, so there is no "+N"
+   to reveal what is hidden: the event is simply not on the screen.
+   The grid gives up the button's half instead. Rows are flexed, so the cost is spread
+   across all six rather than taken out of the last one, and none of them drops a chip. */
+@media (max-width: 899px) {
+  .month-grid { padding-bottom: calc(var(--fab-size) / 2); }
+}
+
 .week-row {
   position: relative;
   flex: 1 1 0;
@@ -1215,38 +1289,6 @@ a { color: var(--accent); }
 }
 
 .day-chips > * { pointer-events: auto; }
-
-/* --------------------------------------------------------------- week */
-
-.week-view {
-  display: flex;
-  flex-direction: column;
-}
-
-.week-day {
-  padding: var(--gap) var(--pad);
-  border-bottom: 1px solid var(--line);
-}
-
-.week-day.is-today { background: var(--accent-soft); }
-
-.week-day-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.week-day-title {
-  flex: 1 1 auto;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.week-day-holiday {
-  font-size: 12px;
-  color: var(--holiday);
-}
 
 /* ------------------------------------------------------------- agenda */
 
@@ -1810,19 +1852,23 @@ a { color: var(--accent); }
     grid-template-columns: 68px minmax(0, 1fr) minmax(360px, 30vw);
   }
 
-  /* With a column given to the panel, the calendar's own bar is genuinely narrow —
-     narrow enough that fitting five controls on one line clipped the month and year.
-     The view switch takes its own line here, exactly as it does on a phone, which is
-     the same trade for the same reason. */
+  /* Opening the panel takes a column away from the calendar, so the bar can run out of
+     room for its controls. It wraps when that happens and not before: one line for as
+     long as everything fits, a second only once it does not.
+
+     This used to be decided by the class rather than by the width — the switch was
+     given a whole line of its own the moment the panel opened, on every screen, and
+     stretched across it. On a wide monitor that put a full-width grey pill under the
+     month with nothing beside it, and the bar changed shape every time an event was
+     opened. Two things carry the layout instead of that rule: flex-wrap, which moves a
+     control down only when the line is full, and a nav group that will not shrink past
+     its own content, so the row wraps rather than the month and year ellipsing to "J"
+     underneath the switch — which is what it did before the wrap existed at all. */
   .app.is-panel-open .app-bar-row { flex-wrap: wrap; }
-  .app.is-panel-open .app-bar-nav { flex: 1 1 auto; }
-  .app.is-panel-open .app-bar-actions { flex: 0 0 auto; }
-  .app.is-panel-open .view-switch {
-    order: 3;
-    flex: 1 0 100%;
-    margin-left: 0;
-  }
-  .app.is-panel-open .view-switch .segment { flex: 1 1 0; }
+  .app.is-panel-open .app-bar-nav { min-width: min-content; }
+  /* Its two words wide, wherever it lands. It is a pill with a background of its own,
+     so stretching it never read as a control given room, only as a second bar. */
+  .app.is-panel-open .view-switch { flex: 0 0 auto; }
 
   .app.is-panel-open .panel:not([hidden]) {
     display: block;

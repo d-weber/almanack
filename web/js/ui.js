@@ -219,6 +219,26 @@ export function memberSelector(members, selectedIds, onchange) {
 // Overlays
 // ---------------------------------------------------------------------------
 
+// Every overlay currently open, in the order they were opened. Overlays deliberately
+// stack — a confirmation over a sheet is a real thing this app does, and the Tab
+// handling below reasons about the stack — but they belong to the screen that opened
+// them, and a navigation has to take them down. Without that, moving between two day
+// routes left two day sheets on top of each other: closing the front one revealed a
+// sheet for the day you had just left.
+const openOverlays = new Set();
+
+/** Close every open overlay. Called when a navigation replaces the screen beneath them. */
+export function closeOverlays() {
+  // A copy, because closing removes from the set as it goes.
+  for (const close of [...openOverlays]) close();
+}
+
+// The width at which this app is a desktop: the sidebar exists, the event panel opens
+// beside the calendar, and the top bar carries controls a phone puts elsewhere. One
+// definition, imported by everything that has to agree with it — it is already stated a
+// second time in the stylesheet, and a third would be one too many.
+export const DESKTOP = window.matchMedia('(min-width: 900px)');
+
 function modalRoot() {
   let root = document.getElementById('modal-root');
   if (!root) {
@@ -272,6 +292,7 @@ export function openOverlay(content, { onClose, dismissible = true, variant = 's
   const close = () => {
     if (closed) return;
     closed = true;
+    openOverlays.delete(close);
     document.removeEventListener('keydown', onKey, true);
     overlay.remove();
     if (!root.firstChild) document.body.classList.remove('has-overlay');
@@ -348,6 +369,7 @@ export function openOverlay(content, { onClose, dismissible = true, variant = 's
   }, panel);
 
   root.appendChild(overlay);
+  openOverlays.add(close);
   document.body.classList.add('has-overlay');
   document.addEventListener('keydown', onKey, true);
   // Focus once the panel is in the document, so that a control hidden by CSS is not

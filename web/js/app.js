@@ -17,16 +17,15 @@ import {
   iosDismissed, calendarImageURL,
 } from './state.js';
 import {
-  todayISO, addDays, addMonths, startOfMonth, formatMonthTitle, formatDateShort,
+  todayISO, addMonths, startOfMonth, formatMonthTitle,
   unknownTimezone,
 } from './dates.js';
 import { normalizeHex, readableOn } from './colors.js';
-import { spinner, errorBox, banner, button } from './ui.js';
+import { spinner, errorBox, banner, button, closeOverlays, DESKTOP } from './ui.js';
 import { route, notFound, start, go, current, reload } from './router.js';
 import { confirmPush, needsIOSInstall } from './push.js';
 
 import { renderMonth, monthRange, openDaySheet } from './views/month.js';
-import { renderWeek, weekRange } from './views/week.js';
 import { renderAgenda } from './views/agenda.js';
 import { renderEventDetail, renderEventEditor } from './views/event.js';
 import { renderSearch } from './views/search.js';
@@ -46,11 +45,6 @@ const CONFIRM_THROTTLE_MS = 60 * 60 * 1000;
 // about French and English sentences); see refuseUnknownTimezone for why it matters
 // that it does not travel inside one.
 const TZ_SETTING = 'ALMANACK_TZ';
-
-// The breakpoint where the sidebar exists. Two things move at it: the calendar
-// filters (sidebar above it, a row under the app bar below it) and the theme and
-// collapse controls. Crossing it has to repaint, or the filters end up nowhere.
-const DESKTOP = window.matchMedia('(min-width: 900px)');
 
 const root = document.getElementById('app');
 let chromeEl = null;
@@ -110,7 +104,7 @@ function paintBanners() {
 
 function tab(name, iconName, labelKey, path) {
   const active = current().path === path || current().path.startsWith(`${path}/`)
-    || (name === 'calendar' && ['/month', '/week', '/agenda', '/day'].some((p) => current().path.startsWith(p)));
+    || (name === 'calendar' && ['/month', '/agenda', '/day'].some((p) => current().path.startsWith(p)));
   return h('button', {
     class: ['tab', active ? 'is-active' : ''].filter(Boolean).join(' '),
     type: 'button',
@@ -207,22 +201,15 @@ function calendarChips() {
 }
 
 function calendarHeader(view, date) {
-  const target = (dir) => (view === 'week' ? addDays(date, dir * 7) : startOfMonth(addMonths(date, dir)));
-  const step = (dir) => go(`/${view}?d=${target(dir)}`);
+  const step = (dir) => go(`/${view}?d=${startOfMonth(addMonths(date, dir))}`);
   // No catalog string says "previous month", so the arrows announce where they
   // lead — which is more useful anyway.
-  const stepLabel = (dir) => (view === 'week' ? formatDateShort(target(dir)) : formatMonthTitle(target(dir)));
-
-  let title;
-  if (view === 'week') {
-    const r = weekRange(date, weekStart());
-    title = `${formatDateShort(r.from)} – ${formatDateShort(r.to)}`;
-  } else {
-    title = formatMonthTitle(date);
-  }
+  const stepLabel = (dir) => formatMonthTitle(startOfMonth(addMonths(date, dir)));
+  const title = formatMonthTitle(date);
+  const today = () => go(`/${view}?d=${todayISO()}`);
 
   const viewSwitch = h('div', { class: 'segmented view-switch' },
-    ...[['month', 'view.month'], ['week', 'view.week'], ['agenda', 'view.agenda']].map(([v, key]) =>
+    ...[['month', 'view.month'], ['agenda', 'view.agenda']].map(([v, key]) =>
       h('button', {
         class: ['segment', v === view ? 'is-active' : ''].filter(Boolean).join(' '),
         type: 'button',
@@ -230,28 +217,66 @@ function calendarHeader(view, date) {
         onclick: () => go(`/${v}?d=${date}`),
       }, t(key))));
 
-  // One line: navigation on the left, the view switch centred, and the two things
-  // you start rather than navigate — search and add — on the right.
-  const bar = h('header', { class: 'app-bar' },
+  // A phone gets the month and the mode, and nothing else. Today and the month arrows
+  // become gestures there instead of buttons — swipe the grid sideways to change month,
+  // tap the title to come back to today — and search already has a tab along the bottom,
+  // so a second way in cost three controls' worth of bar for nothing. What that buys is
+  // the room to keep the calendar filters on screen underneath, and a top row a thumb
+  // never has to reach.
+  //
+  // The title stays an <h1> with a button inside rather than becoming one: it is still
+  // the heading of the screen, and the shell's refusal screen and more than one test
+  // find it by that role.
+  if (!DESKTOP.matches) {
+    return h('header', { class: 'app-bar' },
+      // is-compact marks the two-element row, which the responsive rules written for
+      // the three-group bar would otherwise reshape: they stretch the view switch to
+      // pair it with the actions group, and there is no actions group here.
+      h('div', { class: 'app-bar-row is-compact' },
+        h('h1', { class: 'app-title' },
+          h('button', {
+            class: 'app-title-btn',
+            type: 'button',
+            'aria-label': `${title} — ${t('action.today')}`,
+            onclick: today,
+          }, title)),
+        viewSwitch),
+      calendarChips());
+  }
+
+  // One line: navigation on the left, the view switch centred, and on the right the one
+  // thing you start rather than navigate to. Search is not there — the sidebar already
+  // carries it, and the same door twice in one screen is one of them wasted.
+  return h('header', { class: 'app-bar' },
     h('div', { class: 'app-bar-row' },
       h('div', { class: 'app-bar-nav' },
-        h('button', { class: 'btn btn-quiet btn-small', type: 'button', onclick: () => go(`/${view}?d=${todayISO()}`) }, t('action.today')),
+        h('button', { class: 'btn btn-quiet btn-small', type: 'button', onclick: today }, t('action.today')),
         h('button', { class: 'icon-btn', type: 'button', 'aria-label': stepLabel(-1), onclick: () => step(-1) }, icon('chevronLeft')),
         h('button', { class: 'icon-btn', type: 'button', 'aria-label': stepLabel(1), onclick: () => step(1) }, icon('chevronRight')),
         h('h1', { class: 'app-title' }, title)),
       viewSwitch,
       h('div', { class: 'app-bar-actions' },
         h('button', {
-          class: 'icon-btn', type: 'button', 'aria-label': t('nav.search'), title: t('nav.search'),
-          onclick: () => go('/search'),
-        }, icon('search')),
-        h('button', {
           class: 'icon-btn icon-btn-primary', type: 'button', 'aria-label': t('event.new'), title: t('event.new'),
           onclick: () => go(`/event/new?date=${date}`),
         }, icon('plus')))));
+}
 
-  if (!DESKTOP.matches) bar.appendChild(calendarChips());
-  return bar;
+// addFab is the phone's "new event": a round button straddling the line between the
+// calendar and the tab bar, where a thumb already is. It replaces the one that used to
+// sit in the top bar, which on a phone is the far corner from the hand holding it.
+//
+// It belongs to the calendar screens rather than to the shell, so that it comes and goes
+// with them and carries the date they are showing — the shell has no idea which day a
+// new event should default to.
+function addFab(date) {
+  return h('button', {
+    class: 'fab',
+    type: 'button',
+    'aria-label': t('event.new'),
+    title: t('event.new'),
+    onclick: () => go(`/event/new?date=${date}`),
+  }, icon('plus'));
 }
 
 /**
@@ -337,12 +362,17 @@ async function calendarScreen(view, ctx) {
   state.cursor = date;
 
   const header = calendarHeader(view, date);
+  // The round add button is the phone's only way in to a new event now that the top bar
+  // has none, so it rides with the chrome rather than with either view: both calendar
+  // screens want it, and the screens that are not a calendar — search, settings — want
+  // nothing of the sort floating over them.
+  if (!DESKTOP.matches) header.appendChild(addFab(date));
 
   return show(async () => {
     if (view === 'agenda') return renderAgenda({ date: todayISO() });
-    const r = view === 'week' ? weekRange(date, weekStart()) : monthRange(date, weekStart());
+    const r = monthRange(date, weekStart());
     await loadRange(r.from, r.to);
-    return view === 'week' ? renderWeek({ date }) : renderMonth({ date });
+    return renderMonth({ date });
   }, { chrome: header, tabs: true });
 }
 
@@ -448,12 +478,20 @@ function guardAuth(ctx) {
 function registerRoutes() {
   route('/', () => go(`/${state.view}`, { replace: true }));
 
-  for (const view of ['month', 'week', 'agenda']) {
+  for (const view of ['month', 'agenda']) {
     route(`/${view}`, (ctx) => { if (guardAuth(ctx)) calendarScreen(view, ctx); });
   }
 
   route('/day/:date', async (ctx) => {
     if (!guardAuth(ctx)) return;
+    // The sheet this route is about to open replaces any that is already up: going from
+    // one day to another — a link in a notification, the back button — otherwise left
+    // two stacked, and closing the front one revealed the day you had just left.
+    //
+    // Here rather than in show(), which also runs when a screen merely repaints: on a
+    // focus refresh, or a window crossing the desktop breakpoint. Closing overlays there
+    // would take away a confirmation the reader was part-way through answering.
+    closeOverlays();
     // Same supersession check as panelScreen, for the same reason: the day sheet is an
     // overlay opened after an awaited render, and a navigation during that await would
     // otherwise pop it over a screen the reader has already moved on to.
@@ -494,7 +532,7 @@ function registerRoutes() {
 // Freshness
 // ---------------------------------------------------------------------------
 
-const REFRESHABLE = ['/month', '/week', '/agenda', '/day'];
+const REFRESHABLE = ['/month', '/agenda', '/day'];
 
 /**
  * Refetch the visible range on focus. Only the calendar screens are re-rendered:
