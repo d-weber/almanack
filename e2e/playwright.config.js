@@ -36,8 +36,22 @@ export default {
   // they are not independent: run them one at a time rather than letting two workers
   // interleave writes and sessions.
   workers: 1,
-  retries: 0,
-  reporter: [['list']],
+  // One retry, and it buys exactly one thing: chrome-headless-shell segfaults mid-run,
+  // and the test that reports it is the *next* one to ask for a context — an unrelated
+  // test failed by a browser that died during its predecessor (#80). Failing the run on
+  // that says nothing true about the code.
+  //
+  // Everything a retry would otherwise hide is taken back by ./crash-only-retry.js, which
+  // fails the run again if any test passed on a retry for a reason that was not the crash.
+  // That keeps the property this suite is built on — an intermittent failure turns CI red
+  // and names itself — while dropping the one failure that never meant anything.
+  //
+  // This used to be 0 here while CI passed --retries=1 on the command line, so the suite
+  // behaved one way on a laptop and another way in CI, and the setting each reader found
+  // depended on which file they opened. The flag is gone from the workflow; this is now
+  // the only place it is decided.
+  retries: 1,
+  reporter: [['list'], ['./crash-only-retry.js']],
   use: {
     // Deliberately outside the ALMANACK_ namespace: the server treats an unknown
     // ALMANACK_* variable as a startup error, so a test-only setting that squatted

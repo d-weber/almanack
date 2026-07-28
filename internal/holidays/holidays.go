@@ -1,4 +1,13 @@
-// Package holidays computes French public holidays.
+// Package holidays computes public holidays.
+//
+// France is the only country implemented, in two sets — the national one and the
+// Alsace-Moselle variant, which keeps two more days. Options.Countries chooses, and
+// takes a list, so that adding a country is a pure function and a test rather than a
+// change of shape, and so that a household observing more than one set can say so.
+//
+// A household somewhere else asks for no set at all and gets no computed holidays —
+// the honest answer, and better than being shown somebody else's — while
+// holiday_overrides still lets them name their own days.
 //
 // There is no bundled dataset and no yearly refresh: eight of the eleven dates are
 // fixed, and the rest derive from Easter, which is computed. A data file would be a
@@ -60,10 +69,76 @@ func (e Entry) Display(translate func(key string) string) string {
 
 // Options selects regional variants.
 type Options struct {
-	// AlsaceMoselle adds Good Friday and St Stephen's Day, which remain public
-	// holidays in Bas-Rhin, Haut-Rhin and Moselle under the local law kept in force
-	// when the departments returned to France in 1918.
-	AlsaceMoselle bool
+	// Countries are the sets to compute, unioned. Empty computes nothing: a caller
+	// that forgets to say which shows a household no holidays rather than showing it
+	// another country's.
+	//
+	// A list rather than one, because "which public holidays does this household
+	// observe" genuinely has more than one answer — a family on a border, or one that
+	// wants a regional set alongside the national one. Duplicates cost nothing: the
+	// union is taken by date and name, so listing a set twice, or listing two that
+	// overlap, produces each day once.
+	Countries []Country
+}
+
+// Country is a set of public holidays: a country, by its ISO 3166-1 alpha-2 code, or a
+// region within one whose observed days differ, spelled with the country first.
+type Country string
+
+const (
+	// France is the set observed everywhere in France.
+	France Country = "FR"
+	// FranceAlsaceMoselle is France plus Good Friday and St Stephen's Day, which
+	// remain public holidays in Bas-Rhin, Haut-Rhin and Moselle under the local law
+	// kept in force when the departments returned to France in 1918.
+	//
+	// It contains France rather than sitting beside it, so that a household there
+	// names one set and gets thirteen days. Naming both is the same thirteen — the
+	// union deduplicates — which is what makes either spelling correct rather than one
+	// of them a mistake.
+	FranceAlsaceMoselle Country = "FR-ALSACE-MOSELLE"
+)
+
+// Implemented lists the sets this package computes, for the error a misconfigured
+// server prints and for the documentation to stay honest against.
+func Implemented() []Country { return []Country{France, FranceAlsaceMoselle} }
+
+// Known reports whether c is a set this package can compute.
+func Known(c Country) bool { return slices.Contains(Implemented(), c) }
+
+// computed is the union of the requested sets for one year, before overrides.
+//
+// Deduplicated on date *and* name rather than on date alone, because a date can
+// legitimately carry two holidays — Ascension falls on 1 May when Easter is 23 March —
+// and collapsing those would hide one from a caller looking the date up by name.
+func computed(year int, opts Options) []Entry {
+	var out []Entry
+	seen := map[string]bool{}
+	for _, c := range opts.Countries {
+		var set []Entry
+		switch c {
+		case France:
+			set = french(year, false)
+		case FranceAlsaceMoselle:
+			set = french(year, true)
+		default:
+			// A set nothing implements. Configuration refuses one at startup, naming
+			// what exists (internal/config), so reaching here means a caller built
+			// Options by hand; computing nothing is the only answer that cannot be
+			// wrong.
+			continue
+		}
+		for _, e := range set {
+			key := e.Date.String() + "\x00" + e.Key + "\x00" + e.Name
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, e)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Entry) int { return a.Date.Compare(b.Date) })
+	return out
 }
 
 // Easter returns Gregorian Easter Sunday for year, by the Meeus/Butcher "anonymous
@@ -86,13 +161,18 @@ func Easter(year int) domain.Date {
 	return domain.Date{Year: year, Month: time.Month(n / 31), Day: n%31 + 1}
 }
 
-// French returns every French public holiday in year, sorted by date.
+// French returns every public holiday observed across France in year, sorted by date.
 //
 // Two holidays can share a date: Ascension is Easter + 39 days, which falls on 1 May
 // when Easter is 23 March (2008) and on 8 May when Easter is 30 March (1997). Both
 // entries are returned — the day really is two holidays at once, and dropping one
 // would hide it from a caller that looks the date up by name.
-func French(year int, opts Options) []Entry {
+func French(year int) []Entry { return french(year, false) }
+
+// FrenchAlsaceMoselle is French plus the two days Bas-Rhin, Haut-Rhin and Moselle keep.
+func FrenchAlsaceMoselle(year int) []Entry { return french(year, true) }
+
+func french(year int, alsaceMoselle bool) []Entry {
 	easter := Easter(year)
 	out := []Entry{
 		{Date: domain.NewDate(year, time.January, 1), Key: KeyNewYear},
@@ -107,7 +187,7 @@ func French(year int, opts Options) []Entry {
 		{Date: easter.AddDays(39), Key: KeyAscension},
 		{Date: easter.AddDays(50), Key: KeyWhitMonday},
 	}
-	if opts.AlsaceMoselle {
+	if alsaceMoselle {
 		out = append(out,
 			Entry{Date: easter.AddDays(-2), Key: KeyGoodFriday},
 			Entry{Date: domain.NewDate(year, time.December, 26), Key: KeyStStephen},
@@ -132,7 +212,7 @@ func Between(from, to domain.Date, opts Options, overrides map[domain.Date]*stri
 	var out []Entry
 	named := make(map[domain.Date]bool)
 	for year := from.Year; year <= to.Year; year++ {
-		for _, e := range French(year, opts) {
+		for _, e := range computed(year, opts) {
 			if e.Date.Before(from) || e.Date.After(to) {
 				continue
 			}

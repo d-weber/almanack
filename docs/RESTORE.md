@@ -18,6 +18,13 @@ was intact when it was written.
 
 There are no `-wal`/`-shm` files to keep. The snapshot is self-contained.
 
+The same command writes the snapshots in `backups/pre-migration/`, one per release that
+migrated the database, and those are the ones a **rollback** restores from. The old binary
+cannot open a database a newer one has migrated — it refuses any schema past what it knows
+— so going back to a previous release means restoring its pre-migration snapshot as below
+and then putting the old binary back. Everything entered since the upgrade goes with it.
+They are never pruned, so the one you want is still there; pick it by date.
+
 ## Restoring
 
 ```sh

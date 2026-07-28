@@ -22,7 +22,7 @@ import (
 // invite. This command is the way in, and it is deliberately a local CLI operation
 // rather than an HTTP endpoint, so the bootstrap window is never reachable from the
 // internet at all.
-func runBootstrap(ctx context.Context, cfg config.Config, args []string) error {
+func runBootstrap(ctx context.Context, cfg config.Config, clk clock.Clock, args []string) error {
 	var email, name, calendarName, color, lang string
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	fs.StringVar(&email, "email", "", "email address of the first account (required)")
@@ -41,7 +41,7 @@ func runBootstrap(ctx context.Context, cfg config.Config, args []string) error {
 		return fmt.Errorf("--lang must be fr or en")
 	}
 
-	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clock.Real{})
+	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func runBootstrap(ctx context.Context, cfg config.Config, args []string) error {
 	if _, err := st.CreateInvite(ctx, domain.Invite{
 		CalendarID: cal.ID,
 		CreatedBy:  user.ID,
-		ExpiresAt:  time.Now().Add(domain.InviteTTL).UTC(),
+		ExpiresAt:  clk.Now().Add(domain.InviteTTL).UTC(),
 	}, tokenHash); err != nil {
 		return fmt.Errorf("create the first invite: %w", err)
 	}

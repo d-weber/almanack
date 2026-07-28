@@ -33,8 +33,9 @@ To run it properly, for people who are not you, go straight to
   never sets reminders for anyone else.
 - **A daily digest** at a time each person chooses.
 - **Colour by label or by person**, so a glance tells you whose appointment it is.
-- **Installable PWA** with offline reading, plus public holidays and full French and
-  English translation.
+- **Installable PWA** with offline reading, plus public holidays — France only for now,
+  including the Alsace-Moselle variant, computed rather than tabulated, and switchable
+  off with `ALMANACK_HOLIDAYS=none` — and full French and English translation.
 - **Invite-only signup** by shareable link. No open registration.
 
 <p align="center">

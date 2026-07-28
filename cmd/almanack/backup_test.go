@@ -162,7 +162,7 @@ func TestBackupRoundTripsContent(t *testing.T) {
 	ctx := context.Background()
 	_, cfg, want := liveDatabase(t)
 
-	res, err := takeBackup(ctx, cfg, "", false)
+	res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestBackupRoundTripsContent(t *testing.T) {
 func TestBackupNamesSnapshotsByTimestamp(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 		t.Fatalf("age the stale partial: %v", err)
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
 		t.Fatalf("write the in-flight partial: %v", err)
 	}
 
-	if _, err := takeBackup(context.Background(), cfg, "", false); err != nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false); err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
 	if _, err := os.Stat(inFlight); err != nil {
@@ -286,7 +286,7 @@ func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
 func TestBackupSnapshotIsNotReadableByOthers(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestBackupSucceedsTwiceInARow(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
 	for i := range 2 {
-		res, err := takeBackup(ctx, cfg, "", false)
+		res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 		if err != nil {
 			t.Fatalf("takeBackup run %d: %v", i+1, err)
 		}
@@ -369,7 +369,7 @@ func TestBackupFailsWhenTheDatabaseIsMissing(t *testing.T) {
 	}
 	dir := t.TempDir()
 
-	if _, err := takeBackup(context.Background(), cfg, dir, false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, dir, false); err == nil {
 		t.Fatal("takeBackup succeeded with no database to back up")
 	}
 	if got := remaining(t, dir); len(got) != 0 {
@@ -383,7 +383,7 @@ func TestBackupNeedsADirectory(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 	cfg.BackupDir = ""
 
-	if _, err := takeBackup(context.Background(), cfg, "", false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false); err == nil {
 		t.Fatal("takeBackup accepted an empty destination")
 	}
 }
@@ -400,7 +400,7 @@ func TestBackupRefusesToPublishASnapshotThatFailsVerification(t *testing.T) {
 	}
 	dir := filepath.Join(root, "snapshots")
 
-	if _, err := takeBackup(context.Background(), cfg, dir, false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, dir, false); err == nil {
 		t.Fatal("takeBackup published a snapshot of a database that is not this application's")
 	}
 	if got := remaining(t, dir); len(got) != 0 {
@@ -437,7 +437,7 @@ func TestBackupHandlesAwkwardPathCharacters(t *testing.T) {
 	root := t.TempDir()
 	_, cfg, want := liveDatabaseIn(t, filepath.Join(root, "data#2"), filepath.Join(root, "snap?shots"))
 
-	res, err := takeBackup(ctx, cfg, "", false)
+	res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestRunBackupRecordsSuccessForHealthz(t *testing.T) {
 	ctx := context.Background()
 	st, cfg, _ := liveDatabase(t)
 
-	if _, err := runBackup(ctx, cfg, "", false); err != nil {
+	if _, err := runBackup(ctx, cfg, clock.Real{}, "", false); err != nil {
 		t.Fatalf("runBackup: %v", err)
 	}
 
@@ -617,7 +617,7 @@ func TestRunBackupRecordsFailureForHealthz(t *testing.T) {
 	st, cfg, _ := liveDatabase(t)
 	cfg.BackupDir = ""
 
-	if _, err := runBackup(ctx, cfg, "", false); err == nil {
+	if _, err := runBackup(ctx, cfg, clock.Real{}, "", false); err == nil {
 		t.Fatal("runBackup succeeded with no destination")
 	}
 
@@ -648,7 +648,7 @@ func TestFailedBackupDoesNotRecreateAMissingDatabase(t *testing.T) {
 		FamilyTZ: testTZ(t),
 	}
 
-	if _, err := runBackup(context.Background(), cfg, filepath.Join(root, "snapshots"), false); err == nil {
+	if _, err := runBackup(context.Background(), cfg, clock.Real{}, filepath.Join(root, "snapshots"), false); err == nil {
 		t.Fatal("runBackup succeeded with no database to back up")
 	}
 	if got := remaining(t, dataDir); len(got) != 0 {
@@ -699,7 +699,7 @@ func TestBackupWithPruneKeepsTheSnapshotItJustWrote(t *testing.T) {
 		t.Fatalf("write the older snapshot: %v", err)
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", true)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", true)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestBackupPrunesOldGenerationsWithoutTouchingItsOwn(t *testing.T) {
 		}
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", true)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", true)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestBackupWritesWhereItIsTold(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 	explicit := filepath.Join(t.TempDir(), "before-the-upgrade")
 
-	res, err := takeBackup(context.Background(), cfg, explicit, false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, explicit, false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -925,5 +925,122 @@ func TestPruneLeavesFilesThatAreNotSnapshotsAlone(t *testing.T) {
 	sort.Strings(want)
 	if got := remaining(t, dir); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("kept %v, want %v", got, want)
+	}
+}
+
+// The pre-migration snapshot is written for real, into a directory of its own, and the
+// file it leaves is a usable database.
+//
+// docs/deployment.md and docs/install.md promised this snapshot for a long time before
+// anything took one, and the same paragraphs said a rollback was "putting the old binary
+// back". It is not — a binary refuses to open a schema newer than it knows — so the copy
+// named here was the only way out of a bad release, and there was none (#22).
+func TestThePreMigrationSnapshotIsWrittenAndUsable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{
+		DataPath:  filepath.Join(dir, "almanack.db"),
+		BackupDir: filepath.Join(dir, "backups"),
+		FamilyTZ:  testTZ(t),
+		TZName:    "Europe/Paris",
+	}
+	clk := clock.NewFake(backupBase)
+
+	// A database that already exists, as it would when a release is being upgraded.
+	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st.Close()
+
+	// The versions the hook is handed do not have to be real for it to do its work; the
+	// store's own tests pin when it is called and with what.
+	if err := preMigrationSnapshot(cfg, clk)(context.Background(), 2, 7); err != nil {
+		t.Fatalf("take the pre-migration snapshot: %v", err)
+	}
+
+	preDir := filepath.Join(cfg.BackupDir, "pre-migration")
+	var snapshots []string
+	entries, err := os.ReadDir(preDir)
+	if err != nil {
+		t.Fatalf("no pre-migration directory: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".db") {
+			snapshots = append(snapshots, e.Name())
+		}
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("pre-migration snapshots = %v, want exactly one", snapshots)
+	}
+
+	// It has to be a database somebody could actually restore, not merely a file.
+	snap := filepath.Join(preDir, snapshots[0])
+	if err := verify(context.Background(), snap); err != nil {
+		t.Errorf("the pre-migration snapshot does not verify: %v", err)
+	}
+	// And private: it is the whole calendar, every address and every password hash.
+	info, err := os.Stat(snap)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("snapshot mode = %o, want 600", mode)
+	}
+
+	// It is kept out of the ordinary backup directory, where the retention policy would
+	// eventually delete it. This is the one copy whose value is set by an event rather
+	// than by its age: a bad release may not be noticed for days.
+	hourly, err := os.ReadDir(cfg.BackupDir)
+	if err != nil {
+		t.Fatalf("read backup dir: %v", err)
+	}
+	for _, e := range hourly {
+		if strings.HasSuffix(e.Name(), ".db") {
+			t.Errorf("the pre-migration snapshot landed in the pruned directory as %s", e.Name())
+		}
+	}
+}
+
+// Creating a database is not an upgrade. There is no earlier state to roll back to, the
+// file is empty until the first migration runs, and a snapshot of it would fail
+// verification for the good reason that it holds no schema at all.
+func TestAFreshDatabaseTakesNoPreMigrationSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{
+		DataPath:  filepath.Join(dir, "almanack.db"),
+		BackupDir: filepath.Join(dir, "backups"),
+		FamilyTZ:  testTZ(t),
+		TZName:    "Europe/Paris",
+	}
+	clk := clock.NewFake(backupBase)
+
+	st, err := store.OpenWith(cfg.DataPath, cfg.FamilyTZ, clk, store.Options{
+		BeforeMigrate: preMigrationSnapshot(cfg, clk),
+	})
+	if err != nil {
+		t.Fatalf("creating a database refused to start: %v", err)
+	}
+	st.Close()
+
+	if entries, err := os.ReadDir(filepath.Join(cfg.BackupDir, "pre-migration")); err == nil && len(entries) > 0 {
+		t.Errorf("a fresh database wrote %d pre-migration snapshot(s)", len(entries))
+	}
+}
+
+// With nowhere to put the snapshot the server does not start. Migrating without the
+// fallback the documentation tells an operator to restore from is the one outcome that
+// must not happen quietly.
+func TestMigratingWithoutABackupDirRefusesToStart(t *testing.T) {
+	cfg := config.Config{
+		DataPath: filepath.Join(t.TempDir(), "almanack.db"),
+		FamilyTZ: testTZ(t),
+		TZName:   "Europe/Paris",
+	}
+	err := preMigrationSnapshot(cfg, clock.NewFake(backupBase))(context.Background(), 2, 7)
+	if err == nil {
+		t.Fatal("the migration proceeded with no backup directory configured")
+	}
+	if !strings.Contains(err.Error(), "ALMANACK_BACKUP_DIR") {
+		t.Errorf("the error does not name the setting to fix: %v", err)
 	}
 }

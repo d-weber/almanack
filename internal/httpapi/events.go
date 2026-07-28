@@ -277,7 +277,11 @@ func (s *Server) holidaysBetween(ctx context.Context, from, to domain.Date, lang
 	if err != nil {
 		return nil, err
 	}
-	entries := holidays.Between(from, to, holidays.Options{AlsaceMoselle: s.cfg.AlsaceMoselle}, overrides)
+	// The sets are validated at startup, so an error here cannot reach a running server;
+	// an empty list is the safe reading either way — no computed holidays, while the
+	// family's own overrides below still show.
+	countries, _ := s.cfg.HolidayCountries()
+	entries := holidays.Between(from, to, holidays.Options{Countries: countries}, overrides)
 	out := make([]holidayView, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, holidayView{
@@ -656,10 +660,24 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One read of the exceptions for every series in the page, before the loop rather
+	// than inside it: per row this would be a query each, up to searchLimit of them, and
+	// that cost is exactly why the check was left out when this was first written.
+	overrides, err := s.store.OverridesOf(ctx, recurrenceIDsOf(found))
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	cancelled := cancelledDates(overrides)
+
 	today := domain.DateIn(s.clock.Now(), s.cfg.FamilyTZ)
 	results := make([]searchResult, 0, len(found))
 	for _, e := range found {
-		next, occurrence, err := s.resultDates(ctx, e, today)
+		var struck map[domain.Date]bool
+		if e.RecurrenceID != nil {
+			struck = cancelled[*e.RecurrenceID]
+		}
+		next, occurrence, err := s.resultDates(ctx, e, today, struck)
 		if err != nil {
 			fail(w, r, err)
 			return
@@ -689,7 +707,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 //
 // It costs one recurrence row per series result, as it always has; recur.Last is reached
 // only by a finished series and adds no query, because the rule is already in hand.
-func (s *Server) resultDates(ctx context.Context, e domain.Event, today domain.Date) (next, occurrence *domain.Date, err error) {
+//
+// cancelled is the set of dates the family has struck out of this series, which the rule
+// alone cannot know: recur expands a pattern and no more, so both dates it produces could
+// name an occurrence that has been cancelled, and the row would then link to a date that
+// answers 404 — the event reported as deleted when only one of its dates was (#73). The
+// caller reads them for a whole page of results in one query rather than one per row,
+// which is the cost that kept this check out of search when it was first written.
+func (s *Server) resultDates(ctx context.Context, e domain.Event, today domain.Date,
+	cancelled map[domain.Date]bool) (next, occurrence *domain.Date, err error) {
+
 	if e.RecurrenceID == nil {
 		var d domain.Date
 		if e.AllDay {
@@ -708,13 +735,87 @@ func (s *Server) resultDates(ctx context.Context, e domain.Event, today domain.D
 	}
 	// Next is exclusive, so ask from yesterday: an event happening today is still the
 	// next one as far as anybody searching is concerned.
-	if d, ok := recur.Next(rec, today.AddDays(-1)); ok {
+	if d, ok := nextLiveOccurrence(rec, today.AddDays(-1), cancelled); ok {
 		return &d, &d, nil
 	}
-	if d, ok := recur.Last(rec); ok {
+	if d, ok := lastLiveOccurrence(rec, cancelled); ok {
 		return nil, &d, nil
 	}
 	return nil, nil, nil
+}
+
+// nextLiveOccurrence is recur.Next, skipping the dates the family has cancelled.
+//
+// The loop is bounded by the number of cancellations, because each turn consumes one:
+// a date is only skipped if it is in the set, so it cannot run longer than the set is
+// large however far apart the occurrences are.
+func nextLiveOccurrence(rec domain.Recurrence, after domain.Date, cancelled map[domain.Date]bool) (domain.Date, bool) {
+	from := after
+	for range len(cancelled) + 1 {
+		d, ok := recur.Next(rec, from)
+		if !ok {
+			return domain.Date{}, false
+		}
+		if !cancelled[d] {
+			return d, true
+		}
+		from = d
+	}
+	return domain.Date{}, false
+}
+
+// lastLiveOccurrence is recur.Last, skipping the dates the family has cancelled.
+//
+// Walking a series backwards is not something recur offers, so the fallback expands it —
+// but only when the final occurrence is itself cancelled, which is the rare half of an
+// already rare case. The common answers cost nothing: no cancellations at all, or a last
+// occurrence that is not one of them, both return without expanding anything.
+func lastLiveOccurrence(rec domain.Recurrence, cancelled map[domain.Date]bool) (domain.Date, bool) {
+	last, ok := recur.Last(rec)
+	if !ok {
+		return domain.Date{}, false
+	}
+	if !cancelled[last] {
+		return last, true
+	}
+	dates := recur.Expand(rec, rec.DTStart, last)
+	for i := len(dates) - 1; i >= 0; i-- {
+		if !cancelled[dates[i]] {
+			return dates[i], true
+		}
+	}
+	return domain.Date{}, false
+}
+
+// cancelledDates turns the overrides of several series into the set of dates each has
+// struck out. A nil override id is a cancellation; a non-nil one is an edited copy, which
+// is still an occurrence and still opens.
+func cancelledDates(overrides map[int64]map[domain.Date]*int64) map[int64]map[domain.Date]bool {
+	out := make(map[int64]map[domain.Date]bool, len(overrides))
+	for recID, m := range overrides {
+		set := map[domain.Date]bool{}
+		for date, ov := range m {
+			if ov == nil {
+				set[date] = true
+			}
+		}
+		out[recID] = set
+	}
+	return out
+}
+
+// recurrenceIDsOf is the distinct series among a set of events, for one batched read of
+// their overrides.
+func recurrenceIDsOf(events []domain.Event) []int64 {
+	seen := map[int64]bool{}
+	var ids []int64
+	for _, e := range events {
+		if e.RecurrenceID != nil && !seen[*e.RecurrenceID] {
+			seen[*e.RecurrenceID] = true
+			ids = append(ids, *e.RecurrenceID)
+		}
+	}
+	return ids
 }
 
 func optionalInt64(raw, name string) (*int64, error) {

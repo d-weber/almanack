@@ -56,7 +56,12 @@ e2e/                    dev-only browser smoke tests
 
 - **Never call `time.Now()` directly.** Take a `clock.Clock`. Tests use `clock.NewFake`,
   and dev mode can travel through time (`POST /dev/clock`), which is how reminders and digests
-  get tested locally without waiting a day.
+  get tested locally without waiting a day. This includes the one-shot subcommands: they
+  read the real clock in `main`, but they take it as an argument, which is what lets the
+  seeder be run at a chosen date instead of only at today's.
+- Measuring **how long** something took is a stopwatch rather than a clock read, and stays
+  on `time.Now()` — a controllable clock would report zero. `cmd/almanack/backup.go` is the
+  one place this comes up.
 - **Timed events** are stored as UTC (`TEXT` ISO-8601 with `Z`). **All-day events** are stored as
   `domain.Date` (`TEXT` `YYYY-MM-DD`) — never as midnight instants. An all-day event has no
   timezone; treating it as one is the off-by-one-day bug.
@@ -72,7 +77,11 @@ e2e/                    dev-only browser smoke tests
 
 ## 5. HTTP and security
 
-- JSON REST under `/api/v1/`. Changes within `v1` are additive only.
+- JSON REST under `/api/v1/`. It is the seam the embedded PWA speaks, not a public
+  contract: the two ship in one binary and are never out of step, so an endpoint may
+  change in the same commit as the screen that reads it. Additive by preference, not by
+  promise — `docs/api.md` says why, and `docs/deployment.md` covers the surface that
+  really is frozen at 1.0.
 - **Mutations are never GET.** Logout is POST. A single state-changing GET reopens CSRF.
 - Every non-GET/HEAD/OPTIONS request must carry `X-Requested-With: almanack`; middleware rejects
   those that don't (this plus `SameSite=Lax` is the CSRF defense — there is no token).
@@ -116,8 +125,11 @@ e2e/                    dev-only browser smoke tests
 
 - Numbered, embedded, immutable: `internal/store/migrations/000N_name.sql`. **Never edit an applied
   migration** — add the next one.
-- **Expand/contract**: a migration must leave the previous binary able to run for one release
-  (add columns/tables first; drop them a release later). This is what makes rollback a symlink flip.
+- **Expand/contract**: a migration must leave the previous binary's *statements* valid for one
+  release (add columns/tables first; drop them a release later). It does not make that binary
+  able to start — it refuses any schema past what it knows — so a rollback is restoring the
+  pre-migration snapshot, not flipping a symlink. Do not write the old claim into a migration
+  comment; several already carry it, and it is what #22 was filed about.
 - The binary refuses to start if the database schema is newer than it knows.
 - **A migration is not done until it has been run against a real old database.** One that each
   released binary wrote is checked in as SQL text under `internal/store/testdata/`, and

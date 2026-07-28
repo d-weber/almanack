@@ -26,7 +26,8 @@ internal/notify      the planner, the durable outbox, delivery, boot catch-up
 internal/webpush     RFC 8030/8291/8292, written from the RFCs
 internal/httpapi     HTTP server, middleware, handlers, PWA serving
 internal/i18n        fr/en catalogs (shared with the browser) and French date formatting
-internal/holidays    French public holidays, computed rather than tabulated
+internal/holidays    public holidays, computed rather than tabulated (France, and
+                     the Alsace-Moselle variant; ALMANACK_HOLIDAYS chooses)
 internal/imgproc     avatar and cover-image processing without an image library
 internal/auth        argon2id passwords, token minting
 internal/clock       the only source of "now"
@@ -298,6 +299,17 @@ changes, whether a quiet day is worth sending at all — are read from the calen
 delivery, along with the wording, per recipient and in their language. Two days is long
 enough for a day to be rearranged twice.
 
+**A summary counts what the activity screen shows, and both ignore `participating_only`.**
+That preference governs the per-change path only: it decides whether one edit is pushed to
+one member, and `planOneActivity` honours it. The daily summary is a count, and the
+notification it produces opens `/#/activity` — so the number has to agree with the list it
+opens, and that list is the calendars the member belongs to, unfiltered. Filtering the
+count alone would have been the worse bug of the two: a push saying three changes, opening
+a screen showing five, with nothing on either to explain the difference. Muted calendars
+are excluded from both, because muting is about the calendar rather than about one change.
+Someone who wants only their own events sees that filter on the calendar itself, not in
+the change feed.
+
 **Delivery is at-least-once.** `sent_at` is set only after a push service or the MTA
 accepts the message. A crash between sending and marking may duplicate a notification —
 that is the correct trade, because a duplicate reminder is annoying and a missed one is the
@@ -355,14 +367,20 @@ transaction-scoped copy of the store, rather than a bespoke store method per seq
 Nesting one inside another joins the transaction already open, because a four-connection
 pool holding an exclusive write lock has no second connection to give.
 
-Migrations are numbered, embedded and immutable, applied in a transaction at startup. They follow expand/contract — each release
-stays readable by the previous binary for one version — which is what makes a rollback
-"put the old binary back" rather than "restore a backup". Concretely: 0003 adds a nullable
-column to `notification_queue`, and every statement the 0.2.0 binary issues names the
-columns it wants, so that binary runs against the upgraded file with nothing to undo. What
-it will not do is start there by itself: the binary refuses to open a schema newer than it
-knows, so a mistaken downgrade fails loudly instead of corrupting data, and a deliberate
-one is a decision somebody takes rather than a surprise. Every migration is proved against
+Migrations are numbered, embedded and immutable, applied in a transaction at startup, and
+a release with any pending writes a pre-migration snapshot before it applies them.
+
+They follow expand/contract, and it is worth being exact about what that buys, because
+this paragraph used to claim more. Concretely: 0003 adds a nullable column to
+`notification_queue`, and every statement the 0.2.0 binary issues names the columns it
+wants, so that binary's *queries* remain valid against the upgraded file. What it will not
+do is start there. The binary refuses to open a schema newer than it knows — which is what
+makes a mistaken downgrade fail loudly rather than run half-understood — and that refusal
+applies to the deliberate downgrade too. So a rollback is "restore the pre-migration
+snapshot and put the old binary back", not "put the old binary back", and the snapshot is
+taken so that the first half is possible at all (#22). Expand/contract still earns its
+place: it is what makes an interrupted migration safe to retry, and what keeps a rollback
+a restore rather than a rebuild. Every migration is proved against
 a database a shipped release really wrote, checked in under `internal/store/testdata/`.
 
 0004 adds the table that records which members have set an edited occurrence's reminders
@@ -424,6 +442,17 @@ embedded assets, and serves `/api/` network-first with a cache fallback so the l
 calendar is readable offline. Its push handler always displays a notification, including a
 generic fallback when a payload cannot be parsed — iOS revokes a subscription after roughly
 three pushes that display nothing, so a silent push is a bug and never an optimisation.
+
+`/api/v1/me` is cached along with the rest, and that is the decision offline reading turns
+on rather than an oversight. The app asks for it before it renders anything, so making it
+uncacheable does not merely harden the boot — it removes offline boot altogether: with no
+network the request throws, the session is cleared, and the app routes to a login screen
+whose own request fails too. A phone in a dead zone, checking what time the thing is, is
+precisely the reader the cache exists for. What is accepted in exchange is that a session
+revoked on the server still boots authenticated offline and shows the calendar it last
+saw, until the device is back on the network and the real answer arrives. Reaching that
+state needs physical possession of an unlocked device; the case somebody can actually
+arrange — signing out — is covered by the purge below.
 
 Those cached `/api/` responses belong to a session rather than to the device. Ending one —
 the sign-out button, a 401 from the server, a boot that could not load a session — goes

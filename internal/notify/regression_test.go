@@ -2020,3 +2020,71 @@ func TestATestNotificationSurvivesTheNextPlanningPass(t *testing.T) {
 		t.Errorf("push deliveries = %d, want 1", got)
 	}
 }
+
+// A reminder deleted after its slot has passed, while the event it warns about is still
+// ahead, used to go out anyway. reconcile asked the outbox only about the window the
+// pass had just planned — due_at >= now — so a row whose slot was behind it could not be
+// seen, let alone dropped; and Dispatch, in the same tick, delivers a late reminder on
+// purpose while the event is still ahead. The family cancelled a warning and were warned.
+func TestAReminderDeletedAfterItsSlotIsNotStillSent(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+
+	// The event is at 09:00; the reminder is half an hour before it, so its slot is 08:30.
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+	if got := len(e.queueOfKind(domain.KindReminder)); got != 1 {
+		t.Fatalf("reminder rows after planning = %d, want 1", got)
+	}
+
+	// The slot passes with no tick — the scheduler was between passes, which is the whole
+	// window this is about — and the family removes the reminder before the next one.
+	e.clk.Set(time.Date(2027, 6, 1, 6, 45, 0, 0, time.UTC)) // 08:45 Paris, past the slot
+	if err := e.st.ReplaceReminders(e.ctx, &ev.ID, nil, u.ID, nil); err != nil {
+		t.Fatalf("delete the reminder: %v", err)
+	}
+
+	// The next tick plans and then delivers, in that order, exactly as Tick does.
+	e.plan()
+	e.dispatch()
+
+	if got := len(e.push.received()); got != 0 {
+		t.Errorf("%d push(es) went out for a reminder the family had deleted", got)
+	}
+	for _, row := range e.queueOfKind(domain.KindReminder) {
+		if !row.SentAt.IsZero() {
+			t.Errorf("a deleted reminder was delivered: %+v", row)
+		}
+	}
+}
+
+// The other half: a reminder that is merely late, and still wanted, must survive the
+// wider reconciliation and go out. Deleting past-due rows indiscriminately would be a
+// worse bug than the one above — a missed reminder rather than an extra one.
+func TestALateReminderThatIsStillWantedStillGoesOut(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	e.noDigests()
+	u := e.user("alice")
+	cal := e.calendar("Famille", u.ID)
+	e.subscribe(u.ID, "iphone")
+
+	ev := e.timedEvent(cal, u.ID, "Dentiste", 2027, 6, 1, 9, 0, time.Hour, nil)
+	e.reminderMinutes(ev, u.ID, 30)
+	e.plan()
+
+	// The slot passes and nothing is deleted. The event is at 09:00 Paris and it is now
+	// 08:50 there, so the warning is late but the appointment is still ahead — which is
+	// the one condition under which delivery sends it anyway.
+	e.clk.Set(time.Date(2027, 6, 1, 6, 50, 0, 0, time.UTC))
+	e.plan()
+	e.dispatch()
+
+	if got := len(e.push.received()); got != 1 {
+		t.Errorf("push deliveries = %d, want 1: a late warning beats no warning while the"+
+			" event is still ahead", got)
+	}
+}

@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"almanack/internal/clock"
+	"almanack/internal/config"
 	"almanack/internal/domain"
+	"almanack/internal/store"
 )
 
 // The demo is a screen before it is a fixture: `make seed && make dev` has to open on a
@@ -165,4 +170,101 @@ func TestTheDemoParentsEveningStaysBesideTodayAndOnItsMonth(t *testing.T) {
 			t.Fatalf("seeded on %s: the parents' evening is %s, outside %s %d", day, evening, day.Month, day.Year)
 		}
 	}
+}
+
+// The seeder can now be run at a chosen date, which is the point of giving these
+// subcommands a clock.
+//
+// TestTheDemoSeriesLandsOnTheMonthTheAppOpensOn above exhausts swimmingSeries over a
+// decade, but only the pure function: nothing tied it to what runSeed actually writes.
+// Verifying that across a range of dates used to need a throwaway binary patched in a
+// copy of the tree, because time.Now() was read directly and POST /dev/clock moves the
+// server's clock rather than a separate subcommand's (#68). This closes the link, at
+// dates chosen to be awkward — a leap day, a year boundary, and a month whose first
+// Tuesday is the 7th.
+func TestSeedingAtAChosenDatePlacesTheDemoSeries(t *testing.T) {
+	for _, day := range []string{"2028-02-29", "2026-12-31", "2026-04-01", "2027-01-01"} {
+		t.Run(day, func(t *testing.T) {
+			at := domain.MustParseDate(day)
+			dir := t.TempDir()
+			cfg := config.Config{
+				DataPath: filepath.Join(dir, "almanack.db"),
+				FamilyTZ: testTZ(t),
+				TZName:   "Europe/Paris",
+			}
+			// Noon, so that the family-tz date is the one asked for whatever the offset.
+			clk := clock.NewFake(at.At(12, 0, testTZ(t)).UTC())
+
+			if err := runSeed(context.Background(), cfg, clk, false); err != nil {
+				t.Fatalf("seed at %s: %v", day, err)
+			}
+
+			st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
+			if err != nil {
+				t.Fatalf("open the seeded database: %v", err)
+			}
+			defer st.Close()
+
+			wantStart, _, _ := swimmingSeries(at)
+			ev, rec := findSeries(t, st, "Swimming")
+			if rec == nil {
+				t.Fatal("the demo's weekly series was seeded without a recurrence")
+			}
+			if got := domain.DateIn(ev.StartsAt, cfg.FamilyTZ); !got.Equal(wantStart) {
+				t.Errorf("seeded at %s, the series starts %s; swimmingSeries says %s —"+
+					" the seeder and the arithmetic it is built on disagree", day, got, wantStart)
+			}
+			if !rec.DTStart.Equal(wantStart) {
+				t.Errorf("seeded at %s, the recurrence anchors at %s, want %s", day, rec.DTStart, wantStart)
+			}
+			if wantStart.Weekday() != time.Tuesday {
+				t.Errorf("the demo series starts on a %s; it is meant to be Tuesdays", wantStart.Weekday())
+			}
+		})
+	}
+}
+
+// findSeries returns the seeded event with this title and its recurrence, searching a
+// window wide enough to cover wherever the demo month landed.
+func findSeries(t *testing.T, st *store.Store, title string) (domain.Event, *domain.Recurrence) {
+	t.Helper()
+	found, err := st.SearchEvents(context.Background(), allCalendarIDs(t, st), title, nil, nil)
+	if err != nil {
+		t.Fatalf("search for %q: %v", title, err)
+	}
+	for _, e := range found {
+		if e.Title != title || e.RecurrenceID == nil {
+			continue
+		}
+		rec, err := st.RecurrenceByID(context.Background(), *e.RecurrenceID)
+		if err != nil {
+			t.Fatalf("recurrence of %q: %v", title, err)
+		}
+		return e, &rec
+	}
+	t.Fatalf("no series titled %q in the seeded database", title)
+	return domain.Event{}, nil
+}
+
+func allCalendarIDs(t *testing.T, st *store.Store) []int64 {
+	t.Helper()
+	users, err := st.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	seen := map[int64]bool{}
+	var ids []int64
+	for _, u := range users {
+		cals, err := st.ListCalendarsForUser(context.Background(), u.ID)
+		if err != nil {
+			t.Fatalf("calendars of user %d: %v", u.ID, err)
+		}
+		for _, c := range cals {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				ids = append(ids, c.ID)
+			}
+		}
+	}
+	return ids
 }

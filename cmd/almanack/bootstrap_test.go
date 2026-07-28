@@ -101,7 +101,7 @@ func TestBootstrapCreatesTheFirstAccount(t *testing.T) {
 
 	var runErr error
 	out := capture(t, func() {
-		runErr = runBootstrap(ctx, cfg, []string{
+		runErr = runBootstrap(ctx, cfg, clock.Real{}, []string{
 			"--email", " alex@example.org ", "--name", " Alex ", "--calendar", " Maison ", "--lang", "en",
 		})
 	})
@@ -199,7 +199,7 @@ func TestBootstrapPrintsALinkWithoutADoubledSlash(t *testing.T) {
 
 	var runErr error
 	out := capture(t, func() {
-		runErr = runBootstrap(context.Background(), cfg, []string{"--email", "alex@example.org", "--name", "Alex"})
+		runErr = runBootstrap(context.Background(), cfg, clock.Real{}, []string{"--email", "alex@example.org", "--name", "Alex"})
 	})
 	if runErr != nil {
 		t.Fatalf("runBootstrap: %v\n%s", runErr, out)
@@ -236,7 +236,7 @@ func TestBootstrapRefusesOnceAnAccountExists(t *testing.T) {
 
 	var runErr error
 	out := capture(t, func() {
-		runErr = runBootstrap(ctx, cfg, []string{"--email", "stranger@example.org", "--name", "Stranger"})
+		runErr = runBootstrap(ctx, cfg, clock.Real{}, []string{"--email", "stranger@example.org", "--name", "Stranger"})
 	})
 	if runErr == nil {
 		t.Fatalf("bootstrap created a second first account on a live database:\n%s", out)
@@ -308,7 +308,7 @@ func TestBootstrapValidatesItsArguments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := bootstrapConfig(t)
 			var err error
-			out := capture(t, func() { err = runBootstrap(context.Background(), cfg, tc.args) })
+			out := capture(t, func() { err = runBootstrap(context.Background(), cfg, clock.Real{}, tc.args) })
 			if err == nil {
 				t.Fatalf("runBootstrap(%q) succeeded:\n%s", tc.args, out)
 			}

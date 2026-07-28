@@ -377,34 +377,67 @@ type activityView struct {
 
 // activityViews resolves the link date for a page of entries, reading each event once
 // however many of its changes the page holds.
+//
+// In two passes rather than one, so that the exceptions of every series on the page are
+// read together. Resolved row by row it would be a query per row for the events and
+// another per row for their overrides; the events were already folded by id, and the
+// overrides now go the same way.
 func (s *Server) activityViews(ctx context.Context, entries []domain.Activity) ([]activityView, error) {
+	// A nil value means "looked up, and it is gone" — distinct from "not looked up yet",
+	// so an event deleted since is read once rather than once per change it left behind.
+	loaded := map[int64]*domain.Event{}
+	for _, a := range entries {
+		if a.EventID == nil || a.Action == domain.ActionEventDeleted {
+			continue // nothing to open: a deleted event is kept in the feed by its title
+		}
+		if _, done := loaded[*a.EventID]; done {
+			continue
+		}
+		ev, err := s.store.EventByID(ctx, *a.EventID)
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
+			loaded[*a.EventID] = nil
+		case err != nil:
+			return nil, err
+		default:
+			loaded[*a.EventID] = &ev
+		}
+	}
+
+	present := make([]domain.Event, 0, len(loaded))
+	for _, ev := range loaded {
+		if ev != nil {
+			present = append(present, *ev)
+		}
+	}
+	overrides, err := s.store.OverridesOf(ctx, recurrenceIDsOf(present))
+	if err != nil {
+		return nil, err
+	}
+	cancelled := cancelledDates(overrides)
+
 	today := domain.DateIn(s.clock.Now(), s.cfg.FamilyTZ)
 	dates := map[int64]*domain.Date{}
+	for id, ev := range loaded {
+		if ev == nil {
+			continue
+		}
+		var struck map[domain.Date]bool
+		if ev.RecurrenceID != nil {
+			struck = cancelled[*ev.RecurrenceID]
+		}
+		_, occurrence, err := s.resultDates(ctx, *ev, today, struck)
+		if err != nil {
+			return nil, err
+		}
+		dates[id] = occurrence
+	}
+
 	out := make([]activityView, 0, len(entries))
 	for _, a := range entries {
 		view := activityView{Activity: a}
-		switch {
-		case a.EventID == nil, a.Action == domain.ActionEventDeleted:
-			// Nothing to open: a deleted event is kept in the feed by its title alone.
-		default:
-			date, ok := dates[*a.EventID]
-			if !ok {
-				ev, err := s.store.EventByID(ctx, *a.EventID)
-				switch {
-				case errors.Is(err, domain.ErrNotFound):
-					// Deleted since, without a deletion of its own in this page.
-				case err != nil:
-					return nil, err
-				default:
-					if _, occurrence, err := s.resultDates(ctx, ev, today); err != nil {
-						return nil, err
-					} else {
-						date = occurrence
-					}
-				}
-				dates[*a.EventID] = date
-			}
-			view.OccurrenceDate = date
+		if a.EventID != nil && a.Action != domain.ActionEventDeleted {
+			view.OccurrenceDate = dates[*a.EventID]
 		}
 		out = append(out, view)
 	}

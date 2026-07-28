@@ -59,7 +59,7 @@ func TestFrenchDerived(t *testing.T) {
 		{2024, "2024-04-01", "2024-05-09", "2024-05-20", "2024-03-29"},
 	}
 	for _, tc := range tests {
-		got := dates(French(tc.year, Options{AlsaceMoselle: true}))
+		got := dates(FrenchAlsaceMoselle(tc.year))
 		for _, c := range []struct{ key, want string }{
 			{KeyEasterMonday, tc.easterMonday},
 			{KeyAscension, tc.ascension},
@@ -74,7 +74,7 @@ func TestFrenchDerived(t *testing.T) {
 }
 
 func TestFrenchFixedAndOrder(t *testing.T) {
-	got := French(2026, Options{})
+	got := French(2026)
 	if len(got) != 11 {
 		t.Fatalf("got %d holidays, want 11: %v", len(got), got)
 	}
@@ -107,14 +107,14 @@ func TestFrenchFixedAndOrder(t *testing.T) {
 }
 
 func TestAlsaceMoselle(t *testing.T) {
-	off := dates(French(2026, Options{}))
+	off := dates(French(2026))
 	if _, ok := off[KeyGoodFriday]; ok {
 		t.Error("Good Friday present without the Alsace-Moselle option")
 	}
 	if _, ok := off[KeyStStephen]; ok {
 		t.Error("St Stephen's Day present without the Alsace-Moselle option")
 	}
-	on := French(2026, Options{AlsaceMoselle: true})
+	on := FrenchAlsaceMoselle(2026)
 	if len(on) != 13 {
 		t.Fatalf("got %d holidays with Alsace-Moselle, want 13", len(on))
 	}
@@ -131,12 +131,12 @@ func TestAlsaceMoselle(t *testing.T) {
 // entries must survive, because the day is genuinely two holidays.
 func TestSharedDate(t *testing.T) {
 	for _, tc := range []struct{ year, count int }{{2008, 11}, {1997, 11}} {
-		got := French(tc.year, Options{})
+		got := French(tc.year)
 		if len(got) != tc.count {
 			t.Fatalf("%d: got %d entries, want %d", tc.year, len(got), tc.count)
 		}
 	}
-	byKey := dates(French(2008, Options{}))
+	byKey := dates(French(2008))
 	if byKey[KeyAscension] != "2008-05-01" || byKey[KeyLabourDay] != "2008-05-01" {
 		t.Errorf("2008: ascension=%s labourDay=%s, want both 2008-05-01",
 			byKey[KeyAscension], byKey[KeyLabourDay])
@@ -146,27 +146,27 @@ func TestSharedDate(t *testing.T) {
 func ptr(s string) *string { return &s }
 
 func TestBetween(t *testing.T) {
-	all := Between(domain.MustParseDate("2026-01-01"), domain.MustParseDate("2026-12-31"), Options{}, nil)
+	all := Between(domain.MustParseDate("2026-01-01"), domain.MustParseDate("2026-12-31"), Options{Countries: []Country{France}}, nil)
 	if len(all) != 11 {
 		t.Fatalf("full year: got %d, want 11", len(all))
 	}
 
 	// Window boundaries are inclusive at both ends.
-	w := Between(domain.MustParseDate("2026-07-14"), domain.MustParseDate("2026-08-15"), Options{}, nil)
+	w := Between(domain.MustParseDate("2026-07-14"), domain.MustParseDate("2026-08-15"), Options{Countries: []Country{France}}, nil)
 	if len(w) != 2 || w[0].Key != KeyBastilleDay || w[1].Key != KeyAssumption {
 		t.Errorf("inclusive window = %v, want Bastille Day and Assumption", w)
 	}
 
-	if got := Between(domain.MustParseDate("2026-02-01"), domain.MustParseDate("2026-02-28"), Options{}, nil); len(got) != 0 {
+	if got := Between(domain.MustParseDate("2026-02-01"), domain.MustParseDate("2026-02-28"), Options{Countries: []Country{France}}, nil); len(got) != 0 {
 		t.Errorf("February = %v, want none", got)
 	}
-	if got := Between(domain.MustParseDate("2026-05-01"), domain.MustParseDate("2026-04-01"), Options{}, nil); got != nil {
+	if got := Between(domain.MustParseDate("2026-05-01"), domain.MustParseDate("2026-04-01"), Options{Countries: []Country{France}}, nil); got != nil {
 		t.Errorf("reversed window = %v, want nil", got)
 	}
 }
 
 func TestBetweenAcrossYearBoundary(t *testing.T) {
-	got := Between(domain.MustParseDate("2025-12-24"), domain.MustParseDate("2026-01-02"), Options{}, nil)
+	got := Between(domain.MustParseDate("2025-12-24"), domain.MustParseDate("2026-01-02"), Options{Countries: []Country{France}}, nil)
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2: %v", len(got), got)
 	}
@@ -178,7 +178,7 @@ func TestBetweenAcrossYearBoundary(t *testing.T) {
 	}
 
 	// Alsace-Moselle adds Boxing Day on the 2025 side of the boundary.
-	got = Between(domain.MustParseDate("2025-12-24"), domain.MustParseDate("2026-01-02"), Options{AlsaceMoselle: true}, nil)
+	got = Between(domain.MustParseDate("2025-12-24"), domain.MustParseDate("2026-01-02"), Options{Countries: []Country{FranceAlsaceMoselle}}, nil)
 	if len(got) != 3 || got[1].Key != KeyStStephen || got[1].Date.String() != "2025-12-26" {
 		t.Fatalf("Alsace-Moselle across the boundary = %v", got)
 	}
@@ -189,7 +189,7 @@ func TestBetweenOverrides(t *testing.T) {
 
 	t.Run("suppress", func(t *testing.T) {
 		var suppressed *string
-		got := Between(from, to, Options{}, map[domain.Date]*string{
+		got := Between(from, to, Options{Countries: []Country{France}}, map[domain.Date]*string{
 			domain.MustParseDate("2026-05-08"): suppressed,
 		})
 		if len(got) != 10 {
@@ -203,7 +203,7 @@ func TestBetweenOverrides(t *testing.T) {
 	})
 
 	t.Run("rename", func(t *testing.T) {
-		got := Between(from, to, Options{}, map[domain.Date]*string{
+		got := Between(from, to, Options{Countries: []Country{France}}, map[domain.Date]*string{
 			domain.MustParseDate("2026-07-14"): ptr("Fête de la République"),
 		})
 		if len(got) != 11 {
@@ -231,7 +231,7 @@ func TestBetweenOverrides(t *testing.T) {
 	})
 
 	t.Run("add", func(t *testing.T) {
-		got := Between(from, to, Options{}, map[domain.Date]*string{
+		got := Between(from, to, Options{Countries: []Country{France}}, map[domain.Date]*string{
 			domain.MustParseDate("2026-06-18"): ptr("Appel du 18 Juin"),
 		})
 		if len(got) != 12 {
@@ -257,7 +257,7 @@ func TestBetweenOverrides(t *testing.T) {
 	})
 
 	t.Run("outside the window is ignored", func(t *testing.T) {
-		got := Between(from, to, Options{}, map[domain.Date]*string{
+		got := Between(from, to, Options{Countries: []Country{France}}, map[domain.Date]*string{
 			domain.MustParseDate("2027-06-18"): ptr("next year"),
 			domain.MustParseDate("2025-06-18"): ptr("last year"),
 		})
@@ -285,11 +285,121 @@ func TestBetweenOverrides(t *testing.T) {
 // language the app ships.
 func TestKeysExistInCatalogs(t *testing.T) {
 	cat := i18n.MustLoad()
-	for _, e := range French(2026, Options{AlsaceMoselle: true}) {
+	for _, e := range FrenchAlsaceMoselle(2026) {
 		for _, lang := range []domain.Language{domain.LangFR, domain.LangEN} {
 			if got := cat.T(lang, e.Key, nil); got == e.Key {
 				t.Errorf("%s has no %s translation", e.Key, lang)
 			}
 		}
+	}
+}
+
+// The zero Options computes nothing. That is the safe default on purpose: a caller who
+// forgets to say which country shows a household no public holidays rather than showing
+// it France's, which is wrong roughly every fortnight and in a way nobody traces back.
+func TestTheZeroCountryComputesNothing(t *testing.T) {
+	from, to := domain.MustParseDate("2026-01-01"), domain.MustParseDate("2026-12-31")
+	if got := Between(from, to, Options{}, nil); len(got) != 0 {
+		t.Errorf("the zero Options produced %d holidays, want none", len(got))
+	}
+	if got := Between(from, to, Options{Countries: []Country{}}, nil); len(got) != 0 {
+		t.Errorf("an empty list produced %d holidays, want none", len(got))
+	}
+	if got := Between(from, to, Options{Countries: []Country{France}}, nil); len(got) != 11 {
+		t.Errorf("France produced %d holidays in 2026, want 11", len(got))
+	}
+}
+
+// The sets union rather than replace, and a day named by two of them is one day. That
+// is what makes both spellings of an Alsace household's configuration correct: the
+// regional set alone, or it alongside the national one.
+func TestSetsUnionWithoutDuplicating(t *testing.T) {
+	from, to := domain.MustParseDate("2026-01-01"), domain.MustParseDate("2026-12-31")
+	count := func(cs ...Country) int { return len(Between(from, to, Options{Countries: cs}, nil)) }
+
+	if national, regional := count(France), count(FranceAlsaceMoselle); national != 11 || regional != 13 {
+		t.Fatalf("France = %d days and Alsace-Moselle = %d, want 11 and 13", national, regional)
+	}
+	if got := count(France, FranceAlsaceMoselle); got != 13 {
+		t.Errorf("both sets together = %d days, want 13: the eleven they share must not"+
+			" be counted twice", got)
+	}
+	if got := count(FranceAlsaceMoselle, France); got != 13 {
+		t.Errorf("the same two sets in the other order = %d days, want 13", got)
+	}
+	if got := count(France, France); got != 11 {
+		t.Errorf("the same set listed twice = %d days, want 11", got)
+	}
+}
+
+// Deduplication is by date *and* name, so the day that is genuinely two holidays at
+// once survives being unioned. Ascension falls on 1 May in 2008.
+func TestUnionKeepsADayThatIsTwoHolidays(t *testing.T) {
+	day := domain.MustParseDate("2008-05-01")
+	got := Between(day, day, Options{Countries: []Country{France, FranceAlsaceMoselle}}, nil)
+	if len(got) != 2 {
+		t.Errorf("1 May 2008 produced %d entries, want 2 — Labour Day and Ascension: %+v", len(got), got)
+	}
+}
+
+// A household outside every implemented country still gets the days it names itself.
+// Asking for no set must mean "compute nothing", not "ignore the family's own list" —
+// otherwise it would take away the only thing left to such a household.
+func TestNoneStillShowsTheFamilysOwnDays(t *testing.T) {
+	name := "Nationalfeiertag"
+	day := domain.MustParseDate("2026-10-03")
+	got := Between(domain.MustParseDate("2026-10-01"), domain.MustParseDate("2026-10-31"),
+		Options{}, map[domain.Date]*string{day: &name})
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want the one the family named: %+v", len(got), got)
+	}
+	if !got[0].Date.Equal(day) || got[0].Name != name {
+		t.Errorf("entry = %+v, want %s named %q", got[0], day, name)
+	}
+}
+
+// Known and Implemented are what configuration validates against and what the error it
+// prints lists, so they have to agree with what Between actually computes.
+func TestKnownAgreesWithWhatIsComputed(t *testing.T) {
+	if Known("") {
+		t.Error("the empty set is reported as known; asking for no holidays is an empty list")
+	}
+	if Known("DE") {
+		t.Error("DE is reported as known but nothing computes it")
+	}
+	for _, c := range Implemented() {
+		if !Known(c) {
+			t.Errorf("%s is listed as implemented but Known says otherwise", c)
+		}
+		got := Between(domain.MustParseDate("2026-01-01"), domain.MustParseDate("2026-12-31"),
+			Options{Countries: []Country{c}}, nil)
+		if len(got) == 0 {
+			t.Errorf("%s is listed as implemented but computes no holidays at all", c)
+		}
+	}
+}
+
+// Display is where the rule about which name wins lives, so that callers do not each
+// re-decide it. All three of its answers are worth pinning: a day the family renamed
+// keeps their name, a computed day is translated, and a caller with no catalogue to hand
+// gets the key rather than an empty string — a missing translation should look like a
+// missing translation, not like a holiday with no name.
+func TestEntryDisplay(t *testing.T) {
+	translate := func(key string) string { return "traduit:" + key }
+
+	named := Entry{Date: domain.MustParseDate("2026-05-01"), Key: KeyLabourDay, Name: "Fête du Travail"}
+	if got := named.Display(translate); got != "Fête du Travail" {
+		t.Errorf("a renamed day displayed as %q, want the family's own name", got)
+	}
+	if got := named.Display(nil); got != "Fête du Travail" {
+		t.Errorf("a renamed day with no catalogue displayed as %q, want the family's name", got)
+	}
+
+	computed := Entry{Date: domain.MustParseDate("2026-05-01"), Key: KeyLabourDay}
+	if got := computed.Display(translate); got != "traduit:"+KeyLabourDay {
+		t.Errorf("a computed day displayed as %q, want it translated", got)
+	}
+	if got := computed.Display(nil); got != KeyLabourDay {
+		t.Errorf("a computed day with no catalogue displayed as %q, want the key %q", got, KeyLabourDay)
 	}
 }

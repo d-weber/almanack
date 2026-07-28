@@ -404,6 +404,26 @@ func (s *Store) Overrides(ctx context.Context, recurrenceID int64) (map[domain.D
 	return m, nil
 }
 
+// OverridesOf is Overrides for several series at once, keyed by recurrence id, with an
+// entry for every id asked about even when it has no exceptions.
+//
+// It exists so that a caller holding a page of results can answer "is this date
+// cancelled?" for all of them in one query rather than one per row. Search asks it of up
+// to searchLimit series and the activity feed of a page of changes; per-row it would be
+// a query each, which is the cost that kept the check out of search in the first place.
+func (s *Store) OverridesOf(ctx context.Context, recurrenceIDs []int64) (map[int64]map[domain.Date]*int64, error) {
+	out, err := overridesFor(ctx, s.q, recurrenceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("overrides of %d recurrences: %w", len(recurrenceIDs), err)
+	}
+	for _, id := range recurrenceIDs {
+		if out[id] == nil {
+			out[id] = map[domain.Date]*int64{}
+		}
+	}
+	return out, nil
+}
+
 func overridesFor(ctx context.Context, q querier, recurrenceIDs []int64) (map[int64]map[domain.Date]*int64, error) {
 	out := map[int64]map[domain.Date]*int64{}
 	if len(recurrenceIDs) == 0 {
