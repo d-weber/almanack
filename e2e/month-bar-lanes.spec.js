@@ -97,3 +97,61 @@ test('an all-day event moves down only the days it covers', async ({ page }) => 
     }
   }
 });
+
+// The longest bar takes the top lane, whatever kind it is.
+//
+// A week-long trip drawn under a one-day holiday reads as though the holiday were the
+// longer of the two, and the trip's own row then changes height from day to day as
+// shorter bars come and go beneath it. On the demo calendar this showed exactly as
+// reported: the Seaside holiday sitting under Bastille Day.
+//
+// A public holiday is the case worth testing rather than two ordinary events, because
+// holidays used to be laid out first *unconditionally* — that was the rule this changes.
+// Two ordinary events would not exercise it at all: they were already ordered by where
+// they start, so a trip beginning on the Monday took the top lane either way.
+//
+// Holidays now win a tie rather than the top outright: above an ordinary event of the
+// same length, below one that spans more of the week.
+//
+// July 2027 is used because the demo family's events sit near today and Bastille Day
+// falls on Wednesday the 14th there, well clear of them.
+test('a trip spanning a public holiday is drawn above it', async ({ page }) => {
+  const created = [];
+  const TRIP = 'Lane order long trip';
+  const BASTILLE = 'Bastille Day';
+
+  try {
+    const res = await page.request.post('/api/v1/events', {
+      headers: HEADERS,
+      data: {
+        calendar_id: 1, title: TRIP, all_day: true,
+        start_date: '2027-07-12', end_date: '2027-07-16', label_id: 1,
+      },
+    });
+    expect(res.status(), await res.text()).toBe(201);
+    created.push((await res.json()).event.id);
+
+    await page.goto('/#/month?d=2027-07-15');
+    await expect(page.getByTitle(TRIP).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTitle(BASTILLE).first()).toBeVisible();
+
+    const tops = await page.evaluate(({ trip, holiday }) => {
+      const top = (title) => {
+        const bar = document.querySelector(`.bar[title="${title}"]`);
+        return bar ? Math.round(bar.getBoundingClientRect().top) : null;
+      };
+      return { trip: top(trip), holiday: top(holiday) };
+    }, { trip: TRIP, holiday: BASTILLE });
+
+    expect(tops.trip, `no bar for ${TRIP}`).not.toBeNull();
+    expect(tops.holiday, `no bar for ${BASTILLE}`).not.toBeNull();
+    expect(
+      tops.trip,
+      'the five-day trip is drawn below the one-day public holiday it spans',
+    ).toBeLessThan(tops.holiday);
+  } finally {
+    for (const id of created) {
+      await page.request.delete(`/api/v1/events/${id}?scope=all`, { headers: HEADERS });
+    }
+  }
+});

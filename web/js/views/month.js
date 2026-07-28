@@ -33,8 +33,6 @@ export function monthRange(dateISO, ws = 1) {
 function barsForWeek(days) {
   const first = days[0];
   const last = days[days.length - 1];
-  // Holidays are laid out first so they take the top lane: a holiday describes the
-  // day itself, not something a member decided to put in it.
   const items = [];
   days.forEach((day, col) => {
     const name = holidayOn(day);
@@ -48,7 +46,7 @@ function barsForWeek(days) {
       if (!seen.has(key)) seen.set(key, occ);
     }
   }
-  const events = Array.from(seen.values()).map((occ) => {
+  items.push(...Array.from(seen.values()).map((occ) => {
     const s = occStartDate(occ);
     const e = occEndDate(occ);
     return {
@@ -58,8 +56,24 @@ function barsForWeek(days) {
       isStart: s >= first,
       isEnd: e <= last,
     };
-  }).sort((a, b) => (a.startCol - b.startCol) || ((b.endCol - b.startCol) - (a.endCol - a.startCol)));
-  items.push(...events);
+  }));
+
+  // Longest first, so the bar that covers the most of the week sits at the top of every
+  // day it covers. A week-long trip drawn under a one-day holiday reads as though the
+  // holiday were the longer of the two, and the trip's own row then changes height from
+  // day to day as shorter bars come and go beneath it. The longest is also the one whose
+  // continuity across the week is the thing worth seeing at a glance.
+  //
+  // Holidays win a tie rather than the top outright, which is the older rule narrowed
+  // rather than dropped: a public holiday describes the day itself rather than something
+  // a member put in it, so it belongs above an ordinary event of the same length — and
+  // below a trip that spans the week, which is what it is not.
+  //
+  // Then left to right, so that two bars of equal length and kind keep the order the
+  // week reads in rather than the order the map happened to yield.
+  items.sort((a, b) => ((b.endCol - b.startCol) - (a.endCol - a.startCol))
+    || ((a.holiday ? 0 : 1) - (b.holiday ? 0 : 1))
+    || (a.startCol - b.startCol));
 
   const lanes = [];
   for (const it of items) {
