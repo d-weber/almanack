@@ -86,11 +86,27 @@ jobs:
       # npm appears only in this job. The e2e directory is the one place the dependency
       # policy allows it (internal/deps/deps_test.go), and nothing it installs is
       # committed or reaches the binary.
+      # No --with-deps, deliberately. On this runner it installed exactly nine packages
+      # and every one was a font: Japanese, Thai, Chinese, Cyrillic and unifont, 21 MB
+      # from the Ubuntu archive on every run. Not one shared library — Chromium's are
+      # already in the runner image, which is what "0 upgraded, 9 newly installed" in
+      # the old logs was saying. This suite renders French and English and asserts on
+      # text and ARIA roles, never on pixels, so those fonts drew nothing it looks at.
+      #
+      # They were also the whole of this job's tail. Measured over twelve runs the step
+      # took 23–31 s eleven times and 638 s once, and the 638 was the same 21 MB coming
+      # off azure.archive.ubuntu.com at about 35 kB/s. Nothing was wrong with the
+      # workflow that day; the mirror was slow, and the only defence against a slow
+      # mirror is not to need it.
+      #
+      # If a future runner image ever does drop one of Chromium's libraries, this fails
+      # loudly and legibly — Playwright validates the host before launching and names
+      # the missing packages — and the fix is to put --with-deps back on this line.
       - name: Install Playwright
         working-directory: e2e
         run: |
           npm install --no-save @playwright/test
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
 
       # The server is started inside this step rather than a previous one, so that it
       # is still running when the tests execute.
