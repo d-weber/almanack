@@ -185,7 +185,52 @@ export function renderMonth({ date }) {
     grid.appendChild(row);
   }
 
-  return h('div', { class: 'month' }, head, grid);
+  const wrap = h('div', { class: 'month' }, head, grid);
+  swipeMonths(wrap, anchor);
+  return wrap;
+}
+
+// How far a touch must travel across the screen before it counts as a swipe rather than
+// a tap that wandered, and how much more horizontal than vertical it has to be.
+const SWIPE_MIN_PX = 60;
+const SWIPE_RATIO = 1.5;
+
+// swipeMonths is how a phone changes month, the arrows having left the top bar.
+//
+// Only touch: a mouse never produces these events, so a desktop is untouched and a
+// tablet — where the gesture is just as natural — gets it without asking. Listeners are
+// on the returned node, so they go when it does; there is nothing here for the view's
+// cleanup hook to release.
+//
+// Both thresholds earn their place. Without the distance one, the small drift in an
+// ordinary tap on a day cell would page the month out from under the finger; without the
+// ratio, scrolling the grid vertically on a short screen would do the same. Passive
+// listeners throughout: this never prevents a scroll, it only reads where one went.
+function swipeMonths(node, anchor) {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+
+  node.addEventListener('touchstart', (e) => {
+    // A second finger means a pinch or a scroll gesture, neither of which is this.
+    tracking = e.touches.length === 1;
+    if (!tracking) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+  }, { passive: true });
+
+  node.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+    if (Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dx) < Math.abs(dy) * SWIPE_RATIO) return;
+    // Dragging the calendar leftwards brings the next month in from the right, which is
+    // the direction every phone calendar has agreed on.
+    go(`/month?d=${dx < 0 ? nextMonthAnchor(anchor) : prevMonthAnchor(anchor)}`);
+  }, { passive: true });
 }
 
 /** Day sheet: everything on one day, plus a shortcut to add to it. */

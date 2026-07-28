@@ -7,12 +7,13 @@ import { icon } from '../icons.js';
 import { api } from '../api.js';
 import {
   state, refreshMe, setColorBy, rememberLang, clearSession, invalidateRange, avatarURL,
+  setTheme, THEMES,
 } from '../state.js';
 import { setTimeFormat, formatDateShort, instantDate } from '../dates.js';
 import { normalizeHex, PALETTE } from '../colors.js';
 import {
   section, field, input, select, button, toggleRow, segmented, colorPicker, avatar,
-  listRow, banner, toast, confirmDialog, errorMessage, emptyState,
+  listRow, banner, toast, confirmDialog, errorMessage, emptyState, DESKTOP,
 } from '../ui.js';
 import {
   pushSupported, notificationPermission, currentSubscription, enablePush, disablePush,
@@ -154,10 +155,21 @@ export function renderSettings() {
       },
     }))));
 
+  // -- theme ----------------------------------------------------------------
+  // Phones only. On a wide screen the same choice is a button in the sidebar footer,
+  // which a phone has no room for — so until now the only way to get a dark calendar on
+  // a phone was to darken the whole handset. The stylesheet has always understood the
+  // override; what was missing was somewhere to say it.
+  if (!DESKTOP.matches) {
+    body.appendChild(section(t('theme.label'),
+      segmented(
+        THEMES.map((mode) => ({ value: mode, label: t(`theme.${mode}`) })),
+        state.theme,
+        (mode) => { setTheme(mode); reload(); },
+      )));
+  }
+
   // -- colour mode ----------------------------------------------------------
-  // Light/dark follows the OS (prefers-color-scheme). A manual override exists in
-  // the stylesheet via [data-theme] but has no catalog strings to label it, so it
-  // is deliberately not exposed here.
   body.appendChild(section(t('prefs.colorBy'),
     segmented([
       { value: 'label', label: t('prefs.colorBy.label') },

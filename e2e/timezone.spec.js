@@ -83,15 +83,18 @@ test('an all-day event does not slip to the previous day', async ({ page }) => {
   // instant it would start a day early west of Paris; stored as a date it cannot.
   const holiday = await seasideHoliday(page);
 
-  // The week screen, which puts each of seven days under a heading of its own, anchored
-  // on the week the holiday begins in.
+  // The day sheet, which is the one screen that names a single day and lists what is on
+  // it. Seven of them, across the week the holiday begins in.
   //
   // This used to read the agenda, and the agenda cannot answer the question: it renders
   // from today forward, so for the eleven-odd days a month that follow the span the
   // holiday is not on that screen at all, and the assertion passed only by finding the
-  // month grid's copy of the title before the agenda replaced it (#78). The month grid
-  // cannot answer it either — it draws a span as one bar across a week row, so a day
-  // early is a grid column rather than a day anything here could name.
+  // month grid's copy of the title before the agenda replaced it (#78). Nor can the month
+  // grid — it draws a span as one bar across a week row, so a day early is a grid column
+  // rather than a day anything here could name.
+  //
+  // It read the week screen until that view was removed, for exactly this property. The
+  // day sheet has it too and is reachable by URL, which is all this needs.
   //
   // The week start is a per-user display preference, so it is read rather than assumed:
   // the settings screen offers it, and unknown-tz.spec.js changes it and puts it back.
@@ -103,19 +106,17 @@ test('an all-day event does not slip to the previous day', async ({ page }) => {
       + 'asks only where the holiday is and never whether it moved',
   ).toBe(true);
 
-  await page.goto(`/#/week?d=${first}`);
-  const days = page.locator('.week-view > .week-day');
-  await expect(days).toHaveCount(7);
-
-  // Every day of that week, named: the holiday is on the days the server says it is on
-  // and on none of the others. Each assertion is scoped to its own day's section, since
-  // an unscoped one is satisfied by any of the seven and would go on passing through
-  // exactly the slip this test is named for.
   for (let i = 0; i < 7; i++) {
     const day = addDays(first, i);
     const onIt = day >= holiday.start_date && day <= holiday.end_date;
+    await page.goto(`/#/day/${day}`);
+    const sheet = page.locator('.day-sheet');
+    await expect(sheet).toBeVisible({ timeout: 15_000 });
+    // Scoped to the sheet, since the month grid behind it draws the same title across
+    // the whole span and an unscoped assertion would be satisfied by that — which is
+    // the shape of the slip this test is named for.
     await expect(
-      days.nth(i).getByText(HOLIDAY, { exact: true }),
+      sheet.getByText(HOLIDAY, { exact: true }),
       `"${HOLIDAY}" on ${day}`,
     ).toHaveCount(onIt ? 1 : 0);
   }

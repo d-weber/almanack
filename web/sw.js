@@ -64,7 +64,6 @@ const SHELL = [
   '/js/views/month.js',
   '/js/views/search.js',
   '/js/views/settings.js',
-  '/js/views/week.js',
 ];
 
 // ---------------------------------------------------------------------------

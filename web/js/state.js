@@ -40,7 +40,9 @@ export const state = {
   appVersion: '',
   authed: false,
   offline: false,
-  view: ['month', 'week', 'agenda'].includes(lsGet(LS.view, 'month')) ? lsGet(LS.view, 'month') : 'month',
+  // A browser that last had the weekly view stored falls back to the month rather than
+  // to a blank screen: the list is the whitelist, so removing a view migrates it.
+  view: ['month', 'agenda'].includes(lsGet(LS.view, 'month')) ? lsGet(LS.view, 'month') : 'month',
   cursor: null,            // the date the calendar screens are centred on
   colorBy: lsGet(LS.colorBy, 'label') === 'person' ? 'person' : 'label',
   theme: lsGet(LS.theme, 'auto'),
@@ -318,7 +320,7 @@ export function applyCollapsed() {
 }
 
 export function setView(view) {
-  state.view = ['month', 'week', 'agenda'].includes(view) ? view : 'month';
+  state.view = ['month', 'agenda'].includes(view) ? view : 'month';
   lsSet(LS.view, state.view);
 }
 
