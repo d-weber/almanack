@@ -147,6 +147,66 @@ func TestServeSignalsReadyAndStopsCleanly(t *testing.T) {
 	}
 }
 
+// runServe must not return while the scheduler is still running.
+//
+// Run finishes the tick it is in and pings the watchdog once more on its way out, so a
+// runServe that returned without waiting left a goroutine writing to the notify socket
+// after it had logged "stopped". sdNotify reads NOTIFY_SOCKET at the moment it writes,
+// which in this binary is whatever the *next* test has just set it to — and that is how
+// this was found: TestWatchdogPingsOnEveryTick counts three pings and intermittently saw
+// four, the extra one belonging to the server this test had already shut down. It failed
+// under `go test -cover` and passed plain, in the same CI run, because the slower build
+// widened the window.
+//
+// The assertion is that the scheduler's own ping has arrived by the time runServe
+// returns, which is the observable form of "the goroutine is finished": Run always pings
+// once after its first tick.
+//
+// Being honest about what this does and does not catch. With the wait it holds always.
+// Without it, it holds whenever the first tick finishes before the HTTP shutdown does,
+// which on an empty database is most of the time — so this does not reproduce the race
+// on demand, and running it against the unfixed code passes. What it does is fail in the
+// conditions the race actually bites in: a slow first tick, which is what `-cover` and a
+// loaded CI runner produce and what a real database does every time. The guarantee is
+// the wait in runServe; this states the property it exists for, and would catch its
+// removal in exactly the environment that noticed the problem in the first place.
+func TestServeWaitsForTheSchedulerBeforeReturning(t *testing.T) {
+	sd := newSDRecorder(t)
+	// Without this the watchdog callback is nil and the scheduler never pings, which
+	// would make the assertion below vacuous rather than wrong.
+	t.Setenv("WATCHDOG_USEC", "120000000")
+	cfg := serveConfig(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- runServe(ctx, cfg) }()
+
+	sd.waitFor("READY=1", 30*time.Second)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runServe: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("runServe did not return after its context was cancelled")
+	}
+
+	pings := 0
+	for _, state := range sd.received() {
+		if state == "WATCHDOG=1" {
+			pings++
+		}
+	}
+	if pings == 0 {
+		t.Error("runServe returned before the scheduler had pinged the watchdog: the goroutine" +
+			" is still running, and its ping will land on whatever NOTIFY_SOCKET points at next")
+	}
+}
+
 // The watchdog ping used to be throttled to once per half of WatchdogSec — but it is
 // only ever evaluated when a scheduler tick completes, so the real spacing was that half
 // plus a whole tick, against a systemd deadline of the whole WatchdogSec. An operator who

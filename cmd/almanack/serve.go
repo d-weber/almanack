@@ -129,7 +129,9 @@ func runServe(ctx context.Context, cfg config.Config) error {
 		}
 	}()
 
+	schedulerDone := make(chan struct{})
 	go func() {
+		defer close(schedulerDone)
 		// Run performs the boot catch-up before its first tick.
 		if err := notifier.Run(ctx, watchdog(cfg.SchedulerTick)); err != nil {
 			errs <- fmt.Errorf("scheduler: %w", err)
@@ -151,9 +153,33 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
+
+	// And then wait for the scheduler, which is not the same thing as cancelling it. Run
+	// finishes the tick it is in and pings the watchdog once more on its way out, so
+	// returning here without waiting left a goroutine writing to the notify socket after
+	// this function had logged "stopped" — a ping delivered to whatever NOTIFY_SOCKET
+	// pointed at by then. In the test binary that is the next test's recorder, which is
+	// how this was found: a watchdog test counting three pings intermittently saw four,
+	// the extra one belonging to the server the previous test had shut down.
+	//
+	// Bounded, because a scheduler wedged on a database that will not answer must not be
+	// able to hold shutdown open indefinitely; systemd's TimeoutStopSec would eventually
+	// kill the process, and saying so here is more use than being killed silently.
+	select {
+	case <-schedulerDone:
+	case <-time.After(schedulerStopTimeout):
+		slog.Warn("the scheduler did not stop in time; exiting without it",
+			"waited", schedulerStopTimeout)
+	}
+
 	slog.Info("stopped")
 	return nil
 }
+
+// schedulerStopTimeout bounds the wait for the scheduler goroutine at shutdown. A tick
+// is normally milliseconds; this is sized for one that is mid-way through a slow
+// database operation, and well inside the TimeoutStopSec docs/deployment.md ships.
+const schedulerStopTimeout = 10 * time.Second
 
 // preMigrationSnapshot writes a copy of the database as it stands before a release's
 // migrations run, into a pre-migration/ directory beside the ordinary backups.
