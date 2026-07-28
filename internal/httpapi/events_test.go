@@ -1777,3 +1777,105 @@ func TestActivityRowsLinkToARealOccurrence(t *testing.T) {
 		}
 	}
 }
+
+// A cancelled occurrence must not be the date a row links to. recur expands a pattern
+// and no more, so both dates a search result carries — the next occurrence and the one
+// the row opens — could name a date the family had struck out, and the link then answered
+// 404: the event reported as deleted when only one of its dates was. The activity feed
+// inherited the same gap when it started carrying an occurrence_date of its own.
+func TestSearchAndActivitySkipACancelledOccurrence(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+	series := e.weeklySeries(cal, labels[4].ID) // Tuesdays from 2026-08-04, until 2026-12-31
+
+	// The family cancels the very next occurrence, which is the one both rows would name.
+	e.do(http.MethodDelete, fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-08-04", series.ID), nil).
+		expect(http.StatusNoContent)
+
+	var found struct {
+		Results []searchResult `json:"results"`
+	}
+	e.get("/api/v1/search?q=piscine").expect(http.StatusOK).decode(&found)
+	if len(found.Results) != 1 {
+		t.Fatalf("search returned %d results, want 1", len(found.Results))
+	}
+	got := found.Results[0]
+	if got.OccurrenceDate == nil {
+		t.Fatal("occurrence_date is null: the row has nowhere to link and the family sees an error")
+	}
+	if got.OccurrenceDate.String() == "2026-08-04" {
+		t.Error("search links to the occurrence the family cancelled, which answers 404")
+	}
+	if got.NextOccurrence == nil || got.NextOccurrence.String() == "2026-08-04" {
+		t.Errorf("next_occurrence = %v, want the first date the series still happens on", got.NextOccurrence)
+	}
+	if s := got.OccurrenceDate.String(); s != "2026-08-11" {
+		t.Errorf("occurrence_date = %s, want 2026-08-11, the next Tuesday that survives", s)
+	}
+	// The date it offers must actually open.
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", series.ID, got.OccurrenceDate)).expect(http.StatusOK)
+
+	// The activity feed answers the same way, through the same helper.
+	var feed struct {
+		Activity []activityView `json:"activity"`
+	}
+	e.get("/api/v1/activity").expect(http.StatusOK).decode(&feed)
+	var linked *domain.Date
+	for _, a := range feed.Activity {
+		if a.EventID != nil && *a.EventID == series.ID && a.Action == domain.ActionEventCreated {
+			linked = a.OccurrenceDate
+			break
+		}
+	}
+	if linked == nil {
+		t.Fatal("the activity row for the series has no date to link to")
+	}
+	if linked.String() == "2026-08-04" {
+		t.Error("the activity feed links to the occurrence the family cancelled")
+	}
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", series.ID, linked)).expect(http.StatusOK)
+}
+
+// The other end of the same rule: a series that has finished and whose *last* occurrence
+// was cancelled still has to offer a date somebody can open, which means walking back
+// past the cancellation rather than stopping at it.
+func TestAFinishedSeriesSkipsACancelledLastOccurrence(t *testing.T) {
+	e := newEnv(t)
+	_, cal := e.family()
+	labels := e.labels(cal.ID)
+
+	// A series that ran for three Tuesdays and stopped.
+	series := e.createEvent(map[string]any{
+		"calendar_id": cal.ID, "title": "Poterie", "all_day": false,
+		"starts_at": "2026-01-06T09:00:00Z", "ends_at": "2026-01-06T10:00:00Z",
+		"label_id": labels[2].ID,
+		"recurrence": map[string]any{
+			"freq": "weekly", "interval": 1, "by_weekday": []int{int(time.Tuesday)},
+			"until": "2026-01-20",
+		},
+	})
+	// Cancel the last one it ever had.
+	e.do(http.MethodDelete, fmt.Sprintf("/api/v1/events/%d?scope=this&date=2026-01-20", series.ID), nil).
+		expect(http.StatusNoContent)
+
+	var found struct {
+		Results []searchResult `json:"results"`
+	}
+	e.get("/api/v1/search?q=poterie").expect(http.StatusOK).decode(&found)
+	if len(found.Results) != 1 {
+		t.Fatalf("search returned %d results, want 1", len(found.Results))
+	}
+	got := found.Results[0]
+	if got.NextOccurrence != nil {
+		t.Errorf("next_occurrence = %v for a series that has finished, want null", got.NextOccurrence)
+	}
+	if got.OccurrenceDate == nil {
+		t.Fatal("occurrence_date is null: a finished series still has to link somewhere")
+	}
+	if s := got.OccurrenceDate.String(); s != "2026-01-13" {
+		t.Errorf("occurrence_date = %s, want 2026-01-13 — the last Tuesday it actually ran,"+
+			" the 20th having been cancelled", s)
+	}
+	e.get(fmt.Sprintf("/api/v1/events/%d?date=%s", series.ID, got.OccurrenceDate)).expect(http.StatusOK)
+}
