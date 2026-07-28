@@ -65,7 +65,7 @@ URL, drops `Secure` from the session cookie so localhost works, writes email to 
 ```
 
 Open <http://localhost:8080> and sign in as **mum@example.org** with the password
-**password**. There is a month, week and agenda view, a recurring swimming lesson with one
+**password**. There is a month and an agenda view, a recurring swimming lesson with one
 occurrence moved and another cancelled, a multi-day holiday and a birthday — enough to see
 whether the thing suits you. Gran (`gran@example.org`) reads the same calendar in French.
 

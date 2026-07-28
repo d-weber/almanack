@@ -25,7 +25,7 @@ To run it properly, for people who are not you, go straight to
 
 ## What you get
 
-- **Shared calendars** with month, week and agenda views, and per-calendar filters.
+- **Shared calendars** with a month and an agenda view, and per-calendar filters.
 - **Recurring events** that behave: daily/weekly/monthly/yearly with intervals, "2nd
   Tuesday", "last day of the month", and proper *this / this and following / the whole
   series* editing.
