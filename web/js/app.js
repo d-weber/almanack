@@ -41,6 +41,12 @@ const PUBLIC_PREFIXES = ['/login', '/forgot', '/reset/', '/join/', '/ios-install
 const REFRESH_THROTTLE_MS = 10000;
 const CONFIRM_THROTTLE_MS = 60 * 60 * 1000;
 
+// The environment variable the family timezone is configured with. It is an identifier
+// rather than prose, so it is spelled here and not in the catalogue (CONVENTIONS §6 is
+// about French and English sentences); see refuseUnknownTimezone for why it matters
+// that it does not travel inside one.
+const TZ_SETTING = 'ALMANACK_TZ';
+
 // The breakpoint where the sidebar exists. Two things move at it: the calendar
 // filters (sidebar above it, a row under the app bar below it) and the theme and
 // collapse controls. Crossing it has to repaint, or the filters end up nowhere.
@@ -585,6 +591,12 @@ function afterLogin() {
  * configured timezone. It replaces the shell rather than filling the main area:
  * there is no calendar behind it and no tab bar back into one.
  *
+ * Replacing means the class too. `#app` is the shell because of what it is called —
+ * `.app` is a two-column grid above 900px, with named areas for the sidebar, the bar
+ * and the view — so a card mounted into it while it still said `app` was auto-placed
+ * into the 232px sidebar column and drawn in ribbons in the top-left corner of every
+ * desktop browser. The element is handed over entirely, name and contents both.
+ *
  * Falling back to a zone that does work was the other way and is worse than nothing
  * here. Every hour this app shows is converted through the family timezone
  * (CONVENTIONS §4), so a substitute does not remove some of the information — it
@@ -596,24 +608,29 @@ function afterLogin() {
  * calendar is withheld, and the message says which setting to change: this is an
  * operator's misconfiguration and the operator is in the same house.
  *
- * The message comes from the catalogue like every other string (CONVENTIONS §6).
- * Whenever this screen can appear, the catalogue is there to render it: the zone
- * arrives from /config, /locales/<lang>.json comes off the same server, and the
- * service worker precaches both — a boot that could not reach either falls back to
- * Europe/Paris, which every browser has known for decades. The name of the zone is
- * the load-bearing part and it is not a translation.
+ * The prose comes from the catalogue like every other string (CONVENTIONS §6). The two
+ * identifiers do not, and they are their own element rather than substitutions into a
+ * sentence: t() falls back to the key when the catalogue is missing, and a key has no
+ * {tz} in it to substitute into, so interpolating them silently dropped both in exactly
+ * the cases this screen is likeliest to meet — a /config that answered while the locale
+ * fetch did not, or an offline start whose precache of the locale had failed (sw.js
+ * tolerates that by design). What was left read "error.timezone.title | error.timezone
+ * .body", with no zone anywhere on the one screen that exists to name one.
  */
 function refuseUnknownTimezone(tz) {
-  mount(root, h('div', { class: 'fatal' },
-    h('div', { class: 'fatal-card', role: 'alert' },
-      icon('warning', { class: 'fatal-icon' }),
-      h('h1', { class: 'fatal-title' }, t('error.timezone.title')),
-      h('p', { class: 'fatal-body' }, t('error.timezone.body', { tz })),
-      h('p', { class: 'fatal-fix' }, t('error.timezone.fix')),
-      // Reloading is the whole recovery: /config is read again on every boot, so the
-      // family gets their calendar back the moment the server is corrected, without
-      // anybody having to explain what a hard refresh is.
-      button(t('action.retry'), { variant: 'quiet', onclick: () => location.reload() }))));
+  root.className = 'fatal';
+  mount(root, h('div', { class: 'fatal-card', role: 'alert' },
+    icon('warning', { class: 'fatal-icon' }),
+    h('h1', { class: 'fatal-title' }, t('error.timezone.title')),
+    // Written as the configuration line an operator has to go and find, because that
+    // is what it is: almanack.conf holds ALMANACK_TZ=Europe/Paris.
+    h('code', { class: 'fatal-setting' }, `${TZ_SETTING}=${tz}`),
+    h('p', { class: 'fatal-body' }, t('error.timezone.body')),
+    h('p', { class: 'fatal-fix' }, t('error.timezone.fix')),
+    // Reloading is the whole recovery: /config is read again on every boot, so the
+    // family gets their calendar back the moment the server is corrected, without
+    // anybody having to explain what a hard refresh is.
+    button(t('action.retry'), { variant: 'quiet', onclick: () => location.reload() })));
 }
 
 /**

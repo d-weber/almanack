@@ -102,6 +102,18 @@ test('a timezone this browser cannot resolve explains itself instead of renderin
   await expect(page.getByRole('button', { name: /Today/i })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Settings/i })).toHaveCount(0);
 
+  // The refusal replaces the shell rather than filling the main area, and that is
+  // asserted against the shell's own elements because the two lines above cannot see
+  // it: the router never starts here, so there are no tabs to find either way, and
+  // mounting the message into #view instead passed every assertion above while leaving
+  // the sidebar and the tab bar standing around a message saying there is no calendar.
+  await expect(page.locator('#view')).toHaveCount(0);
+  await expect(page.locator('.tabbar')).toHaveCount(0);
+  await expect(page.locator('#app > .fatal-card')).toHaveCount(1);
+  // Including the class. `.app` is what makes that element the shell — a two-column
+  // grid above 900px — so leaving it on is leaving the shell on.
+  await expect(page.locator('#app')).not.toHaveClass(/(^|\s)app(\s|$)/);
+
   expect(crashes).toEqual([]);
 });
 
@@ -165,6 +177,26 @@ test('a session already in the cookie jar reaches the same screen, not a calenda
   await expect(page.getByRole('button', { name: /Today/i })).toHaveCount(0);
 });
 
+test('the zone is named even when the catalogue is the thing that did not load', async ({ page }) => {
+  const zone = await configuredZone(page);
+  await forgetZone(page, zone);
+  // /config answers and the locale does not, which is one of the two ways this arrives:
+  // the other is an offline start where the worker's precache of the locale had failed,
+  // which sw.js tolerates on purpose. t() then falls back to the key, and a key has no
+  // {tz} in it — so a zone interpolated into a catalogue sentence was silently dropped
+  // from the one screen that exists to name a zone.
+  await page.route('**/locales/*.json', (route) => route.abort('failed'));
+
+  await page.goto('/');
+
+  const message = page.getByRole('alert');
+  await expect(message).toContainText(zone);
+  await expect(message).toContainText('ALMANACK_TZ');
+  // And the catalogue really is missing, or the two lines above would be asserting
+  // nothing. Untranslated keys on screen are what that looks like.
+  await expect(message).toContainText('error.timezone.title');
+});
+
 test('a zone that changes under a tab that has been open for days says so, not "server error"', async ({ page }) => {
   // The admitted gap in #58, and the only one where the app is already running: the
   // server is restarted with a different ALMANACK_TZ, app_version does not move because
@@ -209,4 +241,27 @@ test('a zone that changes under a tab that has been open for days says so, not "
     // lays out. Put it back through the API: the page is a refusal screen by now.
     await page.request.patch('/api/v1/me', { headers: HEADERS, data: { week_start: before } });
   }
+});
+
+test('the refusal is a screen, not a card wedged into the sidebar column', async ({ page }) => {
+  const zone = await configuredZone(page);
+  await forgetZone(page, zone);
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  await page.goto('/');
+
+  const card = page.locator('.fatal-card');
+  await expect(card).toBeVisible();
+  const box = await card.boundingBox();
+  const view = page.viewportSize();
+
+  // Above 900px the shell is `display: grid` with a 232px first column and named areas
+  // for the sidebar, the bar and the view. A card mounted into it while it still called
+  // itself `.app` had no grid-area of its own, auto-placed into the sidebar column, and
+  // came out 204px wide at (14, 24) with its lines 154px across — in both themes, on
+  // every desktop browser, while the CSS comment claimed it carried its own centring.
+  // Text and roles cannot see any of that, which is why this measures.
+  expect(box.width).toBeGreaterThan(400);
+  expect(Math.abs((box.x + box.width / 2) - view.width / 2)).toBeLessThanOrEqual(1);
+  expect(box.y).toBeGreaterThan(100);
 });
