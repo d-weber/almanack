@@ -1879,6 +1879,120 @@ func TestDeletingACalendarPrunesItsQueuedAnnouncements(t *testing.T) {
 	}
 }
 
+// TestDeletingACalendarLeavesTheAnnouncementsOfChangesItsIDPrefixes: the reason the prune
+// above matches a reference whole instead of by prefix. "activity:1" is a prefix of
+// "activity:12", so a prune written as LIKE 'activity:' || a.id || '%' takes every
+// announcement whose change id merely begins with the doomed one's — eleven of them for a
+// household whose log has reached two figures, from calendars nobody has deleted, silently,
+// with the recipients simply never told.
+//
+// The test above cannot see it: every change in it is single-digit, so the boundary the
+// comment is about never occurs and a prefix behaves exactly like a whole match. This one
+// puts the doomed calendar's change on id 1 and the surviving calendar's on 10 to 14, which
+// is the smallest arrangement where the two answers differ — and differ by five.
+//
+// Both spellings are on the surviving side for the same reason they are on the doomed side
+// above: a household upgrading from 0.2.0 has unnamed changes queued under the id alone, and
+// "activity:12" is the reference a prefix on "activity:1" reaches most directly.
+func TestDeletingACalendarLeavesTheAnnouncementsOfChangesItsIDPrefixes(t *testing.T) {
+	s, _, _ := newStore(t)
+	u := mustUser(t, s, "claire@example.test", "Claire")
+	doomed := mustCalendar(t, s, u.ID, "Maison")
+	kept := mustCalendar(t, s, u.ID, "Travail")
+
+	log := func(cal domain.Calendar, title string) domain.Activity {
+		t.Helper()
+		if err := s.LogActivity(ctx(), domain.Activity{
+			CalendarID: cal.ID, UserID: u.ID, Action: domain.ActionEventCreated, Title: title,
+		}); err != nil {
+			t.Fatalf("LogActivity %q: %v", title, err)
+		}
+		rows, err := s.ListActivity(ctx(), []int64{cal.ID}, 1, 0)
+		if err != nil || len(rows) == 0 {
+			t.Fatalf("read back the change %q: %v", title, err)
+		}
+		return rows[0]
+	}
+	unname := func(a domain.Activity) domain.Activity {
+		t.Helper()
+		if _, err := s.DB().ExecContext(ctx(),
+			`UPDATE activity_log SET change_uid = '' WHERE id = ?`, a.ID); err != nil {
+			t.Fatalf("take the name off change %d: %v", a.ID, err)
+		}
+		a.ChangeUID = ""
+		return a
+	}
+	ref := func(a domain.Activity) string {
+		if a.ChangeUID == "" {
+			return fmt.Sprintf("activity:%d", a.ID)
+		}
+		return fmt.Sprintf("activity:%d:%s", a.ID, a.ChangeUID)
+	}
+	queue := func(a domain.Activity) string {
+		t.Helper()
+		if err := s.EnqueueNotification(ctx(), domain.QueuedNotification{
+			UserID: u.ID, Kind: domain.KindActivity, SourceRef: ref(a),
+			Payload: `{"title":"` + a.Title + `"}`, DueAt: baseTime,
+		}); err != nil {
+			t.Fatalf("enqueue for %q: %v", a.Title, err)
+		}
+		return ref(a)
+	}
+
+	// Change 1, in the calendar about to go. Unnamed, so its reference is exactly the
+	// string the eleven below are prefixed by.
+	going := queue(unname(log(doomed, "Ferry")))
+	if going != "activity:1" {
+		t.Fatalf("the doomed calendar's change is queued under %q, want \"activity:1\": this test "+
+			"proves nothing about the digit boundary unless it is on it", going)
+	}
+
+	// Fill the log up to the first two-figure ids, in the calendar that stays.
+	var survivors []string
+	for i := 2; i <= 14; i++ {
+		a := log(kept, fmt.Sprintf("Réunion %d", i))
+		if a.ID != int64(i) {
+			t.Fatalf("the %dth change took id %d: this test needs the log's ids to run 1 to 14 to "+
+				"reach the digit boundary", i, a.ID)
+		}
+		if a.ID < 10 {
+			continue // single-digit ids are the case the test above already covers
+		}
+		if a.ID == 12 {
+			a = unname(a) // the spelling an upgraded household still has
+		}
+		survivors = append(survivors, queue(a))
+	}
+	if len(survivors) != 5 {
+		t.Fatalf("queued %d announcements in the surviving calendar (%v), want 5", len(survivors), survivors)
+	}
+	if !slices.Contains(survivors, "activity:12") {
+		t.Fatalf("the surviving announcements are %v; want \"activity:12\" among them, which is the "+
+			"reference a prefix on \"activity:1\" reaches first", survivors)
+	}
+
+	if err := s.DeleteCalendar(ctx(), doomed.ID); err != nil {
+		t.Fatalf("DeleteCalendar: %v", err)
+	}
+
+	pending, err := s.ListUnsentBefore(ctx(), baseTime.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListUnsentBefore: %v", err)
+	}
+	var left []string
+	for _, p := range pending {
+		left = append(left, p.SourceRef)
+	}
+	slices.Sort(left)
+	want := slices.Clone(survivors)
+	slices.Sort(want)
+	if !slices.Equal(left, want) {
+		t.Errorf("deleting the calendar holding change 1 left %v queued and the surviving calendar "+
+			"had %v: an announcement taken here belongs to a calendar nobody deleted, and the "+
+			"member it was for is simply never told", left, want)
+	}
+}
+
 // queuedIDBySourceRef finds a queued row the way no store method does, because
 // EnqueueNotification deliberately reports nothing about what it inserted.
 func queuedIDBySourceRef(t *testing.T, s *Store, ref string) int64 {
