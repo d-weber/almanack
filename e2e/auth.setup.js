@@ -53,13 +53,23 @@ setup('sign in through the login form, on a database nobody has run this on befo
   // And, in the one place that runs once per run, ask whether this database has been used
   // before.
   //
-  // Every spec that creates an event deletes it again in a finally, so in the ordinary
-  // course nothing survives a run. A run that is interrupted, though — Ctrl-C, a crash, a
-  // laptop that closes — leaves one behind, and the tests that fail next time are not the
-  // ones that created it: the offline test, the cache-cap test and the timezone test go red
-  // over what is on screen and how many API ranges were cached, none of them says anything
-  // about an extra event, and the app looks broken when the database is merely dirty. One
-  // line naming the cause is worth more than three failures that point away from it.
+  // It asks about fixtures, not about rows, and the difference is deliberate. A run does
+  // leave marks: measured over three consecutive green runs it writes twenty-six lines to
+  // the activity log and two sessions, and removes neither. Both are correct. The activity
+  // log is the family's own record of who changed what — the application offers no way to
+  // delete a line of it, and a suite that reached past the API to tidy one up would be
+  // exercising a path the app does not have and cannot regress. Sessions expire on their
+  // own. Neither can change what the next run sees: nothing here asserts the length of the
+  // feed or reads another run's session, and `make seed` resets both anyway.
+  //
+  // A leftover *event* is a different thing entirely, and that is what this looks for.
+  // Every spec that creates one deletes it again in a finally, so only an interrupted run
+  // — Ctrl-C, a crash, a laptop that closes — can leave one behind. When one does, the
+  // tests that fail next time are not the ones that created it: the offline test, the
+  // cache-cap test and the timezone test go red over what is on screen and how many API
+  // ranges were cached, none of them says anything about an extra event, and the app looks
+  // broken when the database is merely dirty. One line naming the cause is worth more than
+  // three failures that point away from it.
   for (const title of FIXTURE_TITLES) {
     const found = await (await page.request.get(`/api/v1/search?q=${encodeURIComponent(title)}`)).json();
     expect(
