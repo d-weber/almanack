@@ -618,26 +618,46 @@ type activityCursor struct {
 	id         int64
 	calendarID int64
 	at         time.Time
+	uid        string
 }
 
 // cursorAt is the cursor that stands at a change.
 func cursorAt(a domain.Activity) activityCursor {
-	return activityCursor{id: a.ID, calendarID: a.CalendarID, at: a.At}
+	return activityCursor{id: a.ID, calendarID: a.CalendarID, at: a.At, uid: a.ChangeUID}
 }
 
 // vouched reports whether the cursor carries the witness that lets it be checked. A
 // database written by a release that did not record one does not.
+//
+// The name is not required here, and that is deliberate. A change logged before 0006
+// genuinely has none, so requiring it would leave an upgraded household re-walking the
+// log on every tick for as long as its newest settled change is an old one. What the
+// name is for is the comparison in names() below, where its absence on one side and
+// its presence on the other is itself the answer.
 func (c activityCursor) vouched() bool { return c.calendarID != 0 && !c.at.IsZero() }
 
-// names reports whether a is the change this cursor was set from. The instant alone
-// would not do it: dev mode runs on a stopped clock and every entry shares one, so a
-// reused id would look like the row it replaced.
+// names reports whether a is the change this cursor was set from.
+//
+// All four fields, because the first three are all reusable together. The instant alone
+// would not do it: dev mode runs on a stopped clock and every entry shares one. Nor do
+// the instant and the calendar, which was the gap this closed — calendars.id is INTEGER
+// PRIMARY KEY without AUTOINCREMENT exactly as activity_log.id is, so deleting a
+// calendar, making another and logging a change in it hands back the id, the calendar
+// number and, on a stopped clock, the second. The witness then vouched for a cursor
+// standing above rows nobody had been told about, and since activity is not reconcilable
+// and nothing re-walks past a cursor it trusts, those announcements were gone for good.
+//
+// domain.Activity.ChangeUID is minted per row and is the part reuse cannot reach. A
+// cursor with no name against a row that has one disagrees, which is the right answer for
+// a witness written before the name was recorded: the cursor is repaired once and the
+// name goes in. Both empty is a change logged before 0006 still sitting where it was,
+// since nothing logged since can be nameless.
 func (c activityCursor) names(a domain.Activity) bool {
-	return a.ID == c.id && a.CalendarID == c.calendarID && a.At.Equal(c.at)
+	return a.ID == c.id && a.CalendarID == c.calendarID && a.At.Equal(c.at) && a.ChangeUID == c.uid
 }
 
 func (c activityCursor) same(o activityCursor) bool {
-	return c.id == o.id && c.calendarID == o.calendarID && c.at.Equal(o.at)
+	return c.id == o.id && c.calendarID == o.calendarID && c.at.Equal(o.at) && c.uid == o.uid
 }
 
 // readActivityCursor reads the cursor and its witness. The second result is false when
@@ -680,6 +700,14 @@ func (n *Notifier) readActivityCursor(ctx context.Context) (activityCursor, bool
 			c.at = at.UTC()
 		}
 	}
+	// A name is free-form text the store minted, so there is nothing to parse and
+	// nothing it can be wrong in the way a number or an instant can. Missing is a
+	// meaningful value here and reads as "no name", which names() compares like any
+	// other: a database written before this key existed disagrees with the row it
+	// stands at, and is repaired once.
+	if c.uid, err = n.st.GetMeta(ctx, MetaActivityCursorUID); err != nil {
+		return activityCursor{}, false, err
+	}
 	return c, true, nil
 }
 
@@ -696,7 +724,10 @@ func (n *Notifier) setActivityCursor(ctx context.Context, c activityCursor) erro
 	if err := n.st.SetMeta(ctx, MetaActivityCursorCalendar, strconv.FormatInt(c.calendarID, 10)); err != nil {
 		return err
 	}
-	return n.st.SetMeta(ctx, MetaActivityCursorAt, instantOrEmpty(c.at))
+	if err := n.st.SetMeta(ctx, MetaActivityCursorAt, instantOrEmpty(c.at)); err != nil {
+		return err
+	}
+	return n.st.SetMeta(ctx, MetaActivityCursorUID, c.uid)
 }
 
 // instantOrEmpty keeps year 1 out of a stored value and a log line, where it reads as
@@ -730,10 +761,10 @@ func instantOrEmpty(t time.Time) string {
 // newest entry and one change made before the next tick, is not one of them.
 //
 // So the cursor is checked against the change it was set from, which is the only thing
-// a reused id cannot imitate: the id, the calendar and the instant are kept together,
-// and the row is read back and looked at. Gone, or no longer that row, and the cursor
-// has stopped meaning what it meant. That covers every depth of reuse at once, because
-// it asks nothing about how far the ids have climbed.
+// a reused id cannot imitate: the id, the calendar, the instant and the change's own name
+// are kept together, and the row is read back and looked at. Gone, or no longer that row,
+// and the cursor has stopped meaning what it meant. That covers every depth of reuse at
+// once, because it asks nothing about how far the ids have climbed.
 //
 // Deciding on the instant alone — reading the log by `at`, or vouching for the cursor by
 // `at` — was the other candidate and is not enough. `at` is stored to the second, a
@@ -741,7 +772,12 @@ func instantOrEmpty(t time.Time) string {
 // the first place), and dev mode runs on a stopped clock where *every* entry shares an
 // instant. A reused id would pass an instant-only check there, which is to say it would
 // pass it exactly where the fault is easiest to hit. The calendar is in the witness for
-// that reason.
+// that reason — and the name is in it because the calendar is reused too. calendars.id is
+// INTEGER PRIMARY KEY without AUTOINCREMENT like everything else here, so deleting the
+// newest calendar, making another and logging a change in it reproduces all three of id,
+// calendar and second, and a witness of three said the stranded cursor was sound. That
+// is the miss this whole function exists to prevent, arriving through the check meant to
+// prevent it. See activityCursor.names.
 //
 // What it is reset to is a separate decision. Resetting to the log's highest id loses
 // the changes logged between the deletion and this pass: those carry reused ids below
@@ -771,8 +807,9 @@ func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor activi
 		case err != nil:
 			return activityCursor{}, err
 		case !cursor.names(row):
-			reason = fmt.Sprintf("id %d now belongs to a change in calendar %d logged at %s, not calendar %d at %s",
-				row.ID, row.CalendarID, instantOrEmpty(row.At), cursor.calendarID, instantOrEmpty(cursor.at))
+			reason = fmt.Sprintf("id %d now belongs to change %q in calendar %d logged at %s, not %q in calendar %d at %s",
+				row.ID, row.ChangeUID, row.CalendarID, instantOrEmpty(row.At),
+				cursor.uid, cursor.calendarID, instantOrEmpty(cursor.at))
 		default:
 			return cursor, nil
 		}
@@ -788,6 +825,7 @@ func (n *Notifier) repairCursor(ctx context.Context, cals []int64, cursor activi
 	}
 	slog.Warn("the activity cursor no longer names the change it was set from and has been reset",
 		"cursor", cursor.id, "cursor_calendar", cursor.calendarID, "cursor_at", instantOrEmpty(cursor.at),
+		"cursor_change", cursor.uid,
 		"reset_to", reset.id, "reset_to_at", instantOrEmpty(reset.at), "reason", reason)
 	if err := n.setActivityCursor(ctx, reset); err != nil {
 		return activityCursor{}, err

@@ -575,6 +575,107 @@ func TestActivityCursorSurvivesAReusedIDOnAStoppedClock(t *testing.T) {
 	}
 }
 
+// The gap the witness above still had. #59 put the calendar beside the instant because
+// the instant alone cannot vouch for an id on a stopped clock — and calendars.id is
+// INTEGER PRIMARY KEY without AUTOINCREMENT exactly as activity_log.id is, so the calendar
+// number comes back too. Delete the calendar holding the newest changes, make another
+// (which takes its id), log a change in it, and all three of the witness are reproduced at
+// once: repairCursor reads the row back, agrees that the id still names the change the
+// cursor was set from, declares the cursor sound and reads only past it. Every change
+// logged in the replacement up to and including the one that lands on the cursor is
+// announced to nobody, and there is no second chance: activity is not in reconcilable,
+// nothing re-walks a cursor it trusts, and the rows below it are never read again.
+//
+// The stopped clock is dev mode, which is where this is a certainty rather than a race,
+// and it is the same severity argument #59 made about its own fault. What settles it is
+// the change's own name, which is minted per row and which reuse cannot reach.
+//
+// Both depths are here because one of them alone would not tell a fix from an off-by-one:
+// with one change above the survivors exactly one announcement is lost, and with three,
+// three are.
+func TestActivityCursorSurvivesACalendarIDTakenBackToo(t *testing.T) {
+	for _, held := range []int{1, 3} {
+		t.Run(fmt.Sprintf("held=%d", held), func(t *testing.T) {
+			e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+			ctx := context.Background()
+			e.noDigests()
+
+			actor := e.user("alice")
+			watcher := e.user("bruno")
+			family := e.calendar("Famille", actor.ID)
+			doomed := e.calendar("Vacances", actor.ID)
+			e.join(family.ID, watcher.ID)
+			e.join(doomed.ID, watcher.ID)
+
+			e.plan() // the first pass only takes the high-water mark
+
+			// One change in the calendar that stays, so the log has a survivor below
+			// everything else, then the doomed calendar's, which take the top of it.
+			e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+			for i := 1; i <= held; i++ {
+				e.timedEvent(doomed, actor.ID, fmt.Sprintf("Ferry %d", i), 2027, time.June, 3, 9, 0, time.Hour, nil)
+			}
+			e.plan()
+			stranded := e.activityCursor()
+
+			if err := e.st.DeleteCalendar(ctx, doomed.ID); err != nil {
+				t.Fatalf("delete the calendar holding the newest changes: %v", err)
+			}
+			// The replacement, which takes the id the deleted calendar had. That is the
+			// whole of what this test adds: without it the witness catches the reuse on
+			// the calendar number.
+			replacement := e.calendar("Voyages", actor.ID)
+			e.join(replacement.ID, watcher.ID)
+			if replacement.ID != doomed.ID {
+				t.Fatalf("the replacement calendar took id %d and the one it replaced had %d: this "+
+					"SQLite is not reusing the ids of deleted rows, so this test no longer "+
+					"reproduces the fault", replacement.ID, doomed.ID)
+			}
+
+			// The changes nobody must lose. The clock has not moved, so each of them
+			// shares the instant of the row whose id it takes.
+			made := held + 1
+			var reused []int64
+			for i := 1; i <= made; i++ {
+				e.timedEvent(replacement, actor.ID, fmt.Sprintf("Piscine %d", i), 2027, time.June, 4, 17, 0, time.Hour, nil)
+				newest, err := e.st.ListActivity(ctx, []int64{replacement.ID}, 1, 0)
+				if err != nil || len(newest) == 0 {
+					t.Fatalf("read the newest activity row: %v", err)
+				}
+				reused = append(reused, newest[0].ID)
+			}
+			if reused[0] > stranded {
+				t.Fatalf("the first new log row took id %d, above the stored cursor %d: this SQLite is "+
+					"not reusing the ids of deleted rows, so this test no longer reproduces the fault",
+					reused[0], stranded)
+			}
+			if !slices.Contains(reused, stranded) {
+				t.Fatalf("the new log rows took ids %v and the cursor stands at %d: the cursor has to "+
+					"be landed on for the witness to be asked about it at all", reused, stranded)
+			}
+
+			e.plan()
+
+			byTitle := map[string]int{}
+			for _, row := range e.queueOfKind(domain.KindActivity) {
+				byTitle[e.payloadOf(row).Title]++
+			}
+			for i := 1; i <= made; i++ {
+				title := fmt.Sprintf("Piscine %d", i)
+				if byTitle[title] != 1 {
+					t.Errorf("%q produced %d notifications, want 1: its log row took the reused id %d, "+
+						"at or below the cursor stranded at %d, and the calendar it was made in took "+
+						"the deleted calendar's id as well", title, byTitle[title], reused[i-1], stranded)
+				}
+			}
+			// And the repair must not tell the family anything twice.
+			if byTitle["Dentiste"] != 1 {
+				t.Errorf("the change announced before the deletion is queued %d times, want 1", byTitle["Dentiste"])
+			}
+		})
+	}
+}
+
 // The half of a reused id the test above deliberately steps around, by keeping the
 // doomed calendar to the actor alone: what happens when the outbox *does* hold a
 // notification under the id that is about to be handed out again.
@@ -784,6 +885,120 @@ func TestAnActivityCursorWithoutAnInstantIsRepairedOnce(t *testing.T) {
 	}
 	if n := len(e.queueOfKind(domain.KindActivity)); n != 2 {
 		t.Errorf("a second pass left %d activity notifications, want 2", n)
+	}
+}
+
+// The same question for the key the change's name is recorded under, which is the newest
+// of the three and therefore the one an existing calendar will be missing. The witness is
+// not gated on it — a change logged before 0006 has no name at all, and requiring one
+// would leave such a household re-walking the log on every tick for as long as its newest
+// settled change is an old one, warning as it went. Instead the absence is compared like
+// any other value: a cursor with no name standing at a row that has one disagrees, which
+// is exactly right, and one repair puts the name on record.
+//
+// So this is the upgrade path, and what it must not be is a repair on every pass.
+func TestAnActivityCursorWithoutTheChangesNameIsRepairedOnce(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	e.noDigests()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	e.join(family.ID, watcher.ID)
+
+	e.plan() // the first pass only takes the high-water mark
+	e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+	e.plan()
+
+	// What the release before this one left behind: the id, the calendar and the
+	// instant, and nothing under the key the name goes in.
+	if err := e.st.SetMeta(ctx, MetaActivityCursorUID, ""); err != nil {
+		t.Fatalf("clear %s: %v", MetaActivityCursorUID, err)
+	}
+	if c, _, err := e.n.readActivityCursor(ctx); err != nil || !c.vouched() || c.uid != "" {
+		t.Fatalf("the cursor to be upgraded is %+v, %v; want one that is vouched for and unnamed", c, err)
+	}
+
+	e.clk.Advance(time.Minute)
+	e.timedEvent(family, actor.ID, "Piscine", 2027, time.June, 4, 17, 0, time.Hour, nil)
+	e.plan()
+
+	byTitle := map[string]int{}
+	for _, row := range e.queueOfKind(domain.KindActivity) {
+		byTitle[e.payloadOf(row).Title]++
+	}
+	if byTitle["Piscine"] != 1 {
+		t.Errorf("the change made after the upgrade produced %d notifications, want 1", byTitle["Piscine"])
+	}
+	if byTitle["Dentiste"] != 1 {
+		t.Errorf("the change announced before the upgrade is queued %d times, want 1", byTitle["Dentiste"])
+	}
+
+	c, started, err := e.n.readActivityCursor(ctx)
+	if err != nil || !started || c.uid == "" {
+		t.Fatalf("activity cursor after the repair = %+v, %v, %v; want one carrying the change's name",
+			c, started, err)
+	}
+	cursor := e.activityCursor()
+	e.plan()
+	if got := e.activityCursor(); got != cursor {
+		t.Errorf("a second pass moved the cursor from %d to %d: it repaired a cursor it could vouch for",
+			cursor, got)
+	}
+	if n := len(e.queueOfKind(domain.KindActivity)); n != 2 {
+		t.Errorf("a second pass left %d activity notifications, want 2", n)
+	}
+}
+
+// The other side of the same key, and the reason the witness does not simply insist on a
+// name. A household upgrading from 0.2.0 has changes in its log from before 0006, which
+// have no name and never will (the migration leaves them alone on purpose). A cursor
+// standing at one of those is unnamed because the change is, not because the witness is
+// stale, and it must go on being trusted — or every tick repairs, re-walks and warns, for
+// as long as nothing new has settled.
+func TestAnActivityCursorStandingAtAChangeFromBeforeTheUpgradeIsLeftAlone(t *testing.T) {
+	e := newEnv(t, time.Date(2027, 6, 1, 6, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	e.noDigests()
+
+	actor := e.user("alice")
+	watcher := e.user("bruno")
+	family := e.calendar("Famille", actor.ID)
+	e.join(family.ID, watcher.ID)
+
+	e.plan() // the first pass only takes the high-water mark
+	e.timedEvent(family, actor.ID, "Dentiste", 2027, time.June, 2, 16, 30, time.Hour, nil)
+
+	// The log as the previous release wrote it: entries with no name of their own.
+	if _, err := e.st.DB().ExecContext(ctx, `UPDATE activity_log SET change_uid = ''`); err != nil {
+		t.Fatalf("take the names off the log: %v", err)
+	}
+	e.plan()
+
+	c, _, err := e.n.readActivityCursor(ctx)
+	if err != nil || c.uid != "" || c.id == 0 {
+		t.Fatalf("the cursor is %+v, %v; want one standing at an unnamed change", c, err)
+	}
+	if !c.vouched() {
+		t.Fatalf("the cursor standing at an unnamed change is not vouched for: a change logged before "+
+			"0006 has no name and never will, so gating the witness on one would make every pass "+
+			"repair — a re-walk of the log and a warning saying the cursor is broken, on every tick, "+
+			"until something new settles (cursor %+v)", c)
+	}
+
+	cursor := e.activityCursor()
+	before := len(e.queueOfKind(domain.KindActivity))
+	for pass := range 3 {
+		e.plan()
+		if got := e.activityCursor(); got != cursor {
+			t.Fatalf("pass %d moved the cursor from %d to %d: an unnamed change is not a stale witness, "+
+				"and repairing on every tick is a re-walk and a warning on every tick", pass+1, cursor, got)
+		}
+	}
+	if n := len(e.queueOfKind(domain.KindActivity)); n != before {
+		t.Errorf("three further passes took the outbox from %d activity rows to %d, want it unchanged",
+			before, n)
 	}
 }
 

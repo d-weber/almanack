@@ -75,12 +75,21 @@ const (
 	// what makes a crash between the two harmless.
 	MetaActivityCursor = "notify.activity_cursor"
 
-	// MetaActivityCursorAt and MetaActivityCursorCalendar are the instant and the
-	// calendar of the row MetaActivityCursor names: the witness that says the id
-	// still means what it meant when it was written. activity_log.id is reused, so
-	// the number on its own cannot say whether the log has been rebuilt underneath
-	// it — see repairCursor. A database written before these keys existed has
-	// neither, which reads as "cannot be vouched for" and costs one repair pass.
+	// MetaActivityCursorAt, MetaActivityCursorCalendar and MetaActivityCursorUID are
+	// the instant, the calendar and the name of the row MetaActivityCursor names: the
+	// witness that says the id still means what it meant when it was written.
+	// activity_log.id is reused, so the number on its own cannot say whether the log
+	// has been rebuilt underneath it — see repairCursor. A database written before
+	// these keys existed has none of them, which reads as "cannot be vouched for" and
+	// costs one repair pass.
+	//
+	// The name is the one part of the witness a reused id cannot imitate at all, and
+	// it is here because the other two can be: calendars.id is reused exactly as
+	// activity_log.id is, and dev mode's clock does not move on its own, so "delete a
+	// calendar, make a calendar, add an event" puts the id, the calendar and the second
+	// all back at once. A witness with no name against a row that has one is a
+	// disagreement, which is what a database written before this key was added looks
+	// like — one repair, and the next write records it.
 	//
 	// They are separate keys rather than a richer value under the first so that the
 	// first goes on holding a plain integer. Not so that a binary from the previous
@@ -92,6 +101,7 @@ const (
 	// keys.
 	MetaActivityCursorAt       = "notify.activity_cursor_at"
 	MetaActivityCursorCalendar = "notify.activity_cursor_calendar"
+	MetaActivityCursorUID      = "notify.activity_cursor_uid"
 )
 
 // Policy constants. Each one is a decision, not a tuning parameter; the comments
