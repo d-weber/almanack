@@ -1,9 +1,10 @@
 // Month view: the default screen.
 //
-// Each week is one row containing, in this order: a full-height tap layer of seven
-// day buttons, the day numbers with any French public holiday, spanning bars for
-// all-day and multi-day events, then the timed chips per day. Bars are laid out in
-// lanes so overlapping holidays and trips never hide each other.
+// Each week is one row containing a full-height tap layer of seven day buttons, the day
+// numbers with any public holiday, and then one grid holding both the spanning bars for
+// all-day and multi-day events and the timed chips per day. Bars are laid out in lanes
+// so overlapping holidays and trips never hide each other, and each day's chips begin
+// below the lanes that cover that day rather than below all of them — see chipRow.
 
 import { h } from '../dom.js';
 import { t, weekdayName } from '../i18n.js';
@@ -32,8 +33,6 @@ export function monthRange(dateISO, ws = 1) {
 function barsForWeek(days) {
   const first = days[0];
   const last = days[days.length - 1];
-  // Holidays are laid out first so they take the top lane: a holiday describes the
-  // day itself, not something a member decided to put in it.
   const items = [];
   days.forEach((day, col) => {
     const name = holidayOn(day);
@@ -47,7 +46,7 @@ function barsForWeek(days) {
       if (!seen.has(key)) seen.set(key, occ);
     }
   }
-  const events = Array.from(seen.values()).map((occ) => {
+  items.push(...Array.from(seen.values()).map((occ) => {
     const s = occStartDate(occ);
     const e = occEndDate(occ);
     return {
@@ -57,8 +56,24 @@ function barsForWeek(days) {
       isStart: s >= first,
       isEnd: e <= last,
     };
-  }).sort((a, b) => (a.startCol - b.startCol) || ((b.endCol - b.startCol) - (a.endCol - a.startCol)));
-  items.push(...events);
+  }));
+
+  // Longest first, so the bar that covers the most of the week sits at the top of every
+  // day it covers. A week-long trip drawn under a one-day holiday reads as though the
+  // holiday were the longer of the two, and the trip's own row then changes height from
+  // day to day as shorter bars come and go beneath it. The longest is also the one whose
+  // continuity across the week is the thing worth seeing at a glance.
+  //
+  // Holidays win a tie rather than the top outright, which is the older rule narrowed
+  // rather than dropped: a public holiday describes the day itself rather than something
+  // a member put in it, so it belongs above an ordinary event of the same length — and
+  // below a trip that spans the week, which is what it is not.
+  //
+  // Then left to right, so that two bars of equal length and kind keep the order the
+  // week reads in rather than the order the map happened to yield.
+  items.sort((a, b) => ((b.endCol - b.startCol) - (a.endCol - a.startCol))
+    || ((a.holiday ? 0 : 1) - (b.holiday ? 0 : 1))
+    || (a.startCol - b.startCol));
 
   const lanes = [];
   for (const it of items) {
@@ -69,6 +84,27 @@ function barsForWeek(days) {
     it.lane = lane;
   }
   return items;
+}
+
+// chipRow is the grid row a day's timed events start on: below the lanes that cover
+// *that day*, and at the top of the row for a day no bar reaches.
+//
+// Bars and chips share one grid for this reason. They used to be two stacked blocks, so
+// the bar band reserved its full height across all seven columns and a single all-day
+// event on Thursday pushed Monday's, Tuesday's and Wednesday's timed events down with
+// it — 24px per lane, on days that had nothing all-day about them, in a row already
+// budgeted to the pixel. Two lanes cost every day in the week 50px of the little space
+// a month cell has.
+//
+// The deepest lane rather than a count, because lanes are packed globally across the
+// week: a day can sit under lane 1 without anything on lane 0 (its neighbour's bar is
+// there), and its chips still have to clear the row its own bar is drawn on.
+function chipRow(bars, col) {
+  let deepest = -1;
+  for (const b of bars) {
+    if (b.startCol <= col && col <= b.endCol && b.lane > deepest) deepest = b.lane;
+  }
+  return deepest + 2; // 1-based rows, and the row after the deepest lane
 }
 
 function dayCell(day, monthNum, today) {
@@ -117,26 +153,34 @@ export function renderMonth({ date }) {
             title: holiday || null,
           }, h('span', { class: 'num' }, String(d)));
         })),
-        laneCount
-          ? h('div', { class: 'week-bars', style: { '--lanes': String(laneCount) } },
-            ...bars.map((b) => {
-              const node = b.holiday
-                ? holidayBar(b.holiday)
-                : eventBar(b.occ, { isStart: b.isStart, isEnd: b.isEnd });
-              node.style.setProperty('grid-column', `${b.startCol + 1} / span ${b.endCol - b.startCol + 1}`);
-              node.style.setProperty('grid-row', String(b.lane + 1));
-              return node;
-            }))
-          : null,
-        h('div', { class: 'week-chips' }, ...week.map((day) => {
+        h('div', {
+          class: 'week-body',
+          // repeat(0, …) is invalid, so a week with no bars is given the one row its
+          // chips live in rather than an empty lane track.
+          style: {
+            'grid-template-rows': laneCount ? `repeat(${laneCount}, var(--lane-h)) 1fr` : '1fr',
+          },
+        },
+        ...bars.map((b) => {
+          const node = b.holiday
+            ? holidayBar(b.holiday)
+            : eventBar(b.occ, { isStart: b.isStart, isEnd: b.isEnd });
+          node.style.setProperty('grid-column', `${b.startCol + 1} / span ${b.endCol - b.startCol + 1}`);
+          node.style.setProperty('grid-row', String(b.lane + 1));
+          return node;
+        }),
+        ...week.map((day, col) => {
           const timed = occurrencesOn(day).filter((occ) => !isBar(occ));
           const shown = timed.slice(0, MAX_CHIPS_PER_DAY);
           const rest = timed.length - shown.length;
-          return h('div', { class: 'day-chips' },
+          const node = h('div', { class: 'day-chips' },
             ...shown.map((occ) => eventChip(occ)),
             rest > 0
               ? h('button', { class: 'chip-more', type: 'button', onclick: () => openDaySheet(day) }, `+${rest}`)
               : null);
+          node.style.setProperty('grid-column', String(col + 1));
+          node.style.setProperty('grid-row', `${chipRow(bars, col)} / -1`);
+          return node;
         }))));
     grid.appendChild(row);
   }
