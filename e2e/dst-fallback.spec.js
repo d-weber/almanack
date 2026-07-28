@@ -20,11 +20,15 @@
 // because every candidate instant reads the same on a clock face.
 //
 // There is a third rule those two are subordinate to — a broken wall time may not resolve
-// onto another day — and nothing here can reach it: only a missing hour that touches a date
-// boundary can break it, and the seeded family is in Paris, which jumps at 02:00. `wallToInstant()`
-// therefore carries a branch these tests never take. It is pinned on the server's side in
-// `internal/domain`, over every minute of a year in the zones concerned, and the policy
-// table in docs/architecture.md carries the row.
+// onto another day — and the four tests above cannot reach it: only a missing hour that
+// touches a date boundary can break it, and the seeded family is in Paris, which jumps at
+// 02:00. So the fifth test does not go through the editor. It sets the family zone to one
+// whose clocks jump at midnight and asks `wallToInstant()` directly, because that is where
+// the rule lives and there is no other way in. Saying in a comment that a branch is
+// unreachable from here is not the same as testing it: the branch was added with the rest
+// of the #57 fix and deleting it left the entire Go suite and every browser spec green,
+// while 00:30 on a Santiago changeover day went back to being saved as 23:30 the day
+// before — which is the bug #57 fixed on the server, still shipping in the browser.
 //
 // These are browser tests because the date layer has no other test harness: the frontend
 // takes no dependencies (CONVENTIONS §1), so there is no JavaScript unit runner to put
@@ -49,6 +53,19 @@ const SPRING_0130 = '2026-03-29T00:30:00Z'; // 01:30 CET, the last half-hour bef
 const SPRING_0430 = '2026-03-29T02:30:00Z'; // 04:30 CEST, safely after it
 const SPRING_SEAM = '2026-03-29T01:00:00Z'; // 03:00 CEST: the first instant of the new offset
 const NORMALISED_0230 = '2026-03-29T01:30:00Z'; // what 02:30 becomes: 03:30 CEST
+
+// Chile puts its clocks forward at midnight, so the day the change falls on simply has no
+// 00:30 — the gap straddles the date boundary Paris's never touches. The zone is named here
+// rather than stubbed because the rule under test is arithmetic over real transitions, and
+// there is nothing to invent: America/Santiago has jumped at midnight for decades and every
+// engine carries it. (node's bundled ICU is on tzdata 2024b while this machine's system copy
+// is on 2026b; the two disagree about America/Asuncion and node has never heard of
+// America/Coyhaique, but Santiago is untouched by either.)
+const SANTIAGO = 'America/Santiago';
+const SANTIAGO_GAP_DATE = '2026-09-06';
+const SANTIAGO_0030 = '2026-09-06T04:30:00Z'; // 01:30 CLST — what 00:30 on the 6th means
+const SANTIAGO_BEFORE_GAP = '2026-09-06T03:59:00Z'; // 23:59 on the 5th, the last minute of it
+const SANTIAGO_AFTER_GAP = '2026-09-06T04:00:00Z'; // 01:00 on the 6th, the first of the next
 
 const HEADERS = { 'X-Requested-With': 'almanack' };
 
@@ -259,4 +276,51 @@ test('a time typed inside the hour the clocks skip is normalised forward', async
   } finally {
     await deleteEvent(page, id);
   }
+});
+
+test('a wall time in an hour the clocks skip at midnight stays on the day it was typed on', async ({ page }) => {
+  await page.goto('/');
+
+  // Asked of the date module directly, with the family zone moved for the length of the
+  // call and put back after. There is no other way in: the editor can only offer the
+  // configured zone, this server's is Paris, and Paris's gap is at 02:00 where the rule
+  // cannot be broken. The frontend takes no dependencies (CONVENTIONS §1) so there is no
+  // unit runner either — and a stub under node would be testing node's tz database
+  // rather than the browser's, which is the whole subject of this file.
+  const answer = await page.evaluate(async ([zone, date, hhmm, before, after]) => {
+    const wallIn = (instant) => {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).formatToParts(new Date(instant));
+      const p = {};
+      for (const x of parts) if (x.type !== 'literal') p[x.type] = x.value;
+      return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+    };
+    const dates = await import('/js/dates.js');
+    const configured = dates.timezone();
+    try {
+      dates.setTimezone(zone);
+      const instant = dates.wallToInstant(date, hhmm);
+      return { instant, wall: wallIn(instant), before: wallIn(before), after: wallIn(after) };
+    } finally {
+      dates.setTimezone(configured);
+    }
+  }, [SANTIAGO, SANTIAGO_GAP_DATE, '00:30', SANTIAGO_BEFORE_GAP, SANTIAGO_AFTER_GAP]);
+
+  // The gap really is at midnight in this browser's tzdata, and it really does swallow a
+  // date boundary. Same guard as the two above, and for the same reason: a browser whose
+  // Santiago had no such transition would turn everything below into an assertion about
+  // nothing at all.
+  expect([answer.before, answer.after], `${SANTIAGO} must jump from 23:59 on the 5th to 01:00 on the 6th`)
+    .toEqual(['2026-09-05 23:59', '2026-09-06 01:00']);
+
+  // 00:30 on the 6th does not exist, so it moves forward by the length of the gap: 01:30,
+  // still on the 6th. Correcting it lands on the 5th first, and the answer is the other
+  // reading — a time typed onto a day must not be saved onto the evening before it. This
+  // is `domain.Date.at`'s rule on the server, and the two halves must not disagree about
+  // one hour a year (docs/architecture.md).
+  expect(answer.instant).toBe(SANTIAGO_0030);
+  expect(answer.wall, 'half past one on the sixth, not half past eleven on the fifth')
+    .toBe('2026-09-06 01:30');
 });
