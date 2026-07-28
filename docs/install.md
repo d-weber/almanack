@@ -471,11 +471,16 @@ sudo install -m 0755 "almanack-$VERSION-linux-amd64" /usr/local/bin/almanack
 sudo systemctl restart almanack
 ```
 
-Migrations run at startup and take their own snapshot first. Migrations are
-expand/contract — each release stays readable by the previous binary for one version — so
-**rolling back is putting the old binary back**, with no restore and no data loss. A binary
-refuses to start against a schema newer than it knows, so a mistaken downgrade fails loudly
-instead of corrupting anything.
+Migrations run at startup, and a release that has any writes a snapshot of the database
+first, into `<ALMANACK_BACKUP_DIR>/pre-migration/`. It refuses to start if it cannot write
+one.
+
+**Rolling back means restoring that snapshot**, not just putting the old binary back. A
+binary refuses to start against a schema newer than it knows — so the older one will not
+open a database the newer one migrated, which is what makes a mistaken downgrade fail
+loudly instead of corrupting anything, and also what makes the snapshot the way back.
+Everything the family entered after the upgrade is lost with it, so roll back sooner
+rather than later or not at all.
 
 Open browsers pick up the new version by themselves: every response carries the app version
 and the client reloads when it changes.

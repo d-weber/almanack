@@ -125,8 +125,11 @@ e2e/                    dev-only browser smoke tests
 
 - Numbered, embedded, immutable: `internal/store/migrations/000N_name.sql`. **Never edit an applied
   migration** — add the next one.
-- **Expand/contract**: a migration must leave the previous binary able to run for one release
-  (add columns/tables first; drop them a release later). This is what makes rollback a symlink flip.
+- **Expand/contract**: a migration must leave the previous binary's *statements* valid for one
+  release (add columns/tables first; drop them a release later). It does not make that binary
+  able to start — it refuses any schema past what it knows — so a rollback is restoring the
+  pre-migration snapshot, not flipping a symlink. Do not write the old claim into a migration
+  comment; several already carry it, and it is what #22 was filed about.
 - The binary refuses to start if the database schema is newer than it knows.
 - **A migration is not done until it has been run against a real old database.** One that each
   released binary wrote is checked in as SQL text under `internal/store/testdata/`, and

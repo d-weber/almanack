@@ -367,14 +367,20 @@ transaction-scoped copy of the store, rather than a bespoke store method per seq
 Nesting one inside another joins the transaction already open, because a four-connection
 pool holding an exclusive write lock has no second connection to give.
 
-Migrations are numbered, embedded and immutable, applied in a transaction at startup. They follow expand/contract — each release
-stays readable by the previous binary for one version — which is what makes a rollback
-"put the old binary back" rather than "restore a backup". Concretely: 0003 adds a nullable
-column to `notification_queue`, and every statement the 0.2.0 binary issues names the
-columns it wants, so that binary runs against the upgraded file with nothing to undo. What
-it will not do is start there by itself: the binary refuses to open a schema newer than it
-knows, so a mistaken downgrade fails loudly instead of corrupting data, and a deliberate
-one is a decision somebody takes rather than a surprise. Every migration is proved against
+Migrations are numbered, embedded and immutable, applied in a transaction at startup, and
+a release with any pending writes a pre-migration snapshot before it applies them.
+
+They follow expand/contract, and it is worth being exact about what that buys, because
+this paragraph used to claim more. Concretely: 0003 adds a nullable column to
+`notification_queue`, and every statement the 0.2.0 binary issues names the columns it
+wants, so that binary's *queries* remain valid against the upgraded file. What it will not
+do is start there. The binary refuses to open a schema newer than it knows — which is what
+makes a mistaken downgrade fail loudly rather than run half-understood — and that refusal
+applies to the deliberate downgrade too. So a rollback is "restore the pre-migration
+snapshot and put the old binary back", not "put the old binary back", and the snapshot is
+taken so that the first half is possible at all (#22). Expand/contract still earns its
+place: it is what makes an interrupted migration safe to retry, and what keeps a rollback
+a restore rather than a rebuild. Every migration is proved against
 a database a shipped release really wrote, checked in under `internal/store/testdata/`.
 
 0004 adds the table that records which members have set an edited occurrence's reminders

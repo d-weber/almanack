@@ -118,6 +118,27 @@ type Store struct {
 // window of instants. clk is the sole source of "now" for everything the store
 // timestamps.
 func Open(path string, loc *time.Location, clk clock.Clock) (*Store, error) {
+	return OpenWith(path, loc, clk, Options{})
+}
+
+// Options are the things Open can be asked to do beyond opening.
+type Options struct {
+	// BeforeMigrate is called once, before any pending migration is applied, with the
+	// version the file is at and the one it is about to reach. It is not called when
+	// there is nothing to apply, which is every ordinary restart.
+	//
+	// It exists for the pre-migration snapshot: rolling a release back means restoring
+	// the database as it was before that release migrated it, and the only moment such
+	// a copy can be taken is this one. An error from it stops the migration and the
+	// open — deliberately, because a failed snapshot is exactly the moment not to
+	// proceed. The hook lives here rather than in the caller because the caller cannot
+	// see the version numbers without opening the file, and opening it is what applies
+	// the migrations.
+	BeforeMigrate func(ctx context.Context, from, to int) error
+}
+
+// OpenWith is Open with the options above.
+func OpenWith(path string, loc *time.Location, clk clock.Clock, opts Options) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("store: empty database path")
 	}
@@ -146,7 +167,7 @@ func Open(path string, loc *time.Location, clk clock.Clock) (*Store, error) {
 	}
 
 	s := &Store{db: db, q: db, loc: loc, clk: clk}
-	if err := s.migrate(ctx); err != nil {
+	if err := s.migrate(ctx, opts.BeforeMigrate); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
@@ -315,7 +336,7 @@ func loadMigrations() ([]migration, error) {
 // This is the one part of the store that names the pool rather than s.q. Migrations run
 // once, from Open, before any caller holds a Store — and each one owns the transaction
 // it is applied in, which is what keeps a failure at the last complete version.
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) migrate(ctx context.Context, beforeMigrate func(context.Context, int, int) error) error {
 	ms, err := loadMigrations()
 	if err != nil {
 		return err
@@ -344,10 +365,32 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
+	pending := make([]migration, 0, len(ms))
 	for _, m := range ms {
-		if applied[m.version] {
-			continue
+		if !applied[m.version] {
+			pending = append(pending, m)
 		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// Before the first statement of the first one, and only when there is something to
+	// apply: an ordinary restart migrates nothing and must not write a snapshot every
+	// time. A failure here stops the open, because a migration whose fallback could not
+	// be taken is the one that should not run.
+	if beforeMigrate != nil {
+		from := 0
+		if maxApplied.Valid {
+			from = int(maxApplied.Int64)
+		}
+		if err := beforeMigrate(ctx, from, pending[len(pending)-1].version); err != nil {
+			return fmt.Errorf("before migrating from schema %d to %d: %w",
+				from, pending[len(pending)-1].version, err)
+		}
+	}
+
+	for _, m := range pending {
 		if err := s.applyMigration(ctx, m); err != nil {
 			return err
 		}

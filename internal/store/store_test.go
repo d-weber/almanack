@@ -4919,3 +4919,86 @@ func TestInstantsRoundTripAtSecondPrecision(t *testing.T) {
 		t.Fatalf("instants must come back in UTC, got %v", sess.ExpiresAt.Location())
 	}
 }
+
+// The hook fires exactly once, before the first pending migration, and only when there
+// is something to apply.
+//
+// It exists for the pre-migration snapshot, which docs/deployment.md and
+// docs/install.md promised for a long time before anything took one — and that mattered
+// more than an unimplemented feature usually does, because the same paragraphs said a
+// rollback was "putting the old binary back". It is not: migrate refuses a schema newer
+// than the binary knows, so the snapshot the docs named was the only way out of a bad
+// release and it did not exist (#22).
+func TestBeforeMigrateRunsOnceOnPendingMigrationsOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "almanack.db")
+
+	type call struct{ from, to int }
+	var calls []call
+	record := func(_ context.Context, from, to int) error {
+		calls = append(calls, call{from, to})
+		return nil
+	}
+
+	embedded, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	head := embedded[len(embedded)-1].version
+
+	// A database that does not exist yet is at schema 0 and has everything to apply.
+	st, err := OpenWith(path, testLocation(t), clock.NewFake(baseTime), Options{BeforeMigrate: record})
+	if err != nil {
+		t.Fatalf("open a fresh database: %v", err)
+	}
+	st.Close()
+
+	if len(calls) != 1 {
+		t.Fatalf("the hook ran %d times creating a database, want once: %+v", len(calls), calls)
+	}
+	if calls[0].from != 0 || calls[0].to != head {
+		t.Errorf("hook saw %d -> %d, want 0 -> %d", calls[0].from, calls[0].to, head)
+	}
+
+	// Reopening applies nothing, which is every ordinary restart. A snapshot on each of
+	// those would fill the disk with copies of a database nothing had changed.
+	calls = nil
+	st, err = OpenWith(path, testLocation(t), clock.NewFake(baseTime), Options{BeforeMigrate: record})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	st.Close()
+	if len(calls) != 0 {
+		t.Errorf("the hook ran %d times on a restart with nothing to migrate: %+v", len(calls), calls)
+	}
+}
+
+// A snapshot that cannot be taken stops the migration. It is the one moment where
+// carrying on regardless is the wrong answer: the copy is the fallback for the change
+// about to be made, and a release that migrates without one cannot be rolled back.
+func TestAFailedPreMigrationSnapshotStopsTheMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "almanack.db")
+	refuse := errors.New("no room on the backup volume")
+
+	_, err := OpenWith(path, testLocation(t), clock.NewFake(baseTime), Options{
+		BeforeMigrate: func(context.Context, int, int) error { return refuse },
+	})
+	if err == nil {
+		t.Fatal("the database opened although its pre-migration snapshot failed")
+	}
+	if !errors.Is(err, refuse) {
+		t.Errorf("error = %v, want it to wrap the snapshot failure", err)
+	}
+
+	// And nothing was applied: the next attempt starts from where it started.
+	raw := openRawDB(t, path)
+	defer raw.Close()
+	var applied int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
+		// No table at all is the other correct answer — the refusal came first.
+		return
+	}
+	if applied != 0 {
+		t.Errorf("%d migrations were applied despite the snapshot failing", applied)
+	}
+}

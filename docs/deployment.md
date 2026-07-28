@@ -88,13 +88,24 @@ the machine: the config file, release binaries for amd64 **and** arm64, the Go t
 and vendored source, the deployment repository itself, the secret-store password, registrar and
 DNS credentials, the certificate directory, and a note of the router port forwards.
 
-**Upgrades and rollback.** Deploy a new binary and restart; migrations run at startup, taking
-their own pre-migration snapshot first. Migrations are expand/contract — each release stays
-compatible with the previous binary for one version — so **rollback is putting the old binary
-back**, with no restore and no data loss. The binary refuses to start against a schema newer
-than it knows, so a mistaken downgrade fails loudly instead of corrupting data. Restoring a
-pre-migration snapshot is the catastrophe path only, and it discards everything the family
-entered after the upgrade.
+**Upgrades.** Deploy a new binary and restart. If the release has migrations, the server
+writes a snapshot of the database as it stands into `<ALMANACK_BACKUP_DIR>/pre-migration/`
+before applying them, and refuses to start if it cannot — a migration whose fallback could
+not be taken is the one that should not run. Those snapshots are never pruned; migrations
+are rare, and this is the one copy whose worth is set by an event rather than by its age.
+
+**Rollback is a restore, not a symlink flip.** The old binary cannot open a database a
+newer one has migrated: it refuses any schema past what it knows, deliberately, so a
+mistaken downgrade fails loudly instead of running against a file it half understands.
+Going back therefore means putting the old binary back **and** restoring that release's
+pre-migration snapshot, which discards everything the family entered after the upgrade.
+Plan an upgrade around that: it is why the snapshot is taken, and why the window in which
+rolling back is cheap is measured in hours rather than days.
+
+Migrations are still expand/contract, and that is still worth having — it is what makes an
+interrupted migration safe, and what keeps the *previous release's* statements valid
+against the columns they name. What it does not buy is the previous binary starting, which
+this paragraph claimed for several releases and is what #22 was filed about.
 
 ## First deployment, in order
 

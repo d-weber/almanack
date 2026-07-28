@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"almanack/internal/clock"
@@ -35,8 +36,13 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	clk := newClock(cfg)
 
 	// Opening the store applies migrations and refuses to start against a schema
-	// newer than this binary understands.
-	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
+	// newer than this binary understands. Anything pending is snapshotted first, which
+	// is what makes rolling a release back possible at all: the previous binary cannot
+	// open a migrated file, so going back means restoring the database as it was before
+	// this release touched it, and this is the only moment that copy can be taken.
+	st, err := store.OpenWith(cfg.DataPath, cfg.FamilyTZ, clk, store.Options{
+		BeforeMigrate: preMigrationSnapshot(cfg, clk),
+	})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -147,6 +153,54 @@ func runServe(ctx context.Context, cfg config.Config) error {
 	}
 	slog.Info("stopped")
 	return nil
+}
+
+// preMigrationSnapshot writes a copy of the database as it stands before a release's
+// migrations run, into a pre-migration/ directory beside the ordinary backups.
+//
+// docs/deployment.md and docs/install.md promised this for a long time before anything
+// did it, which mattered more than an unimplemented feature usually does: the same
+// paragraphs said rolling back was "putting the old binary back", and it is not — the
+// binary refuses to open a schema newer than it knows, by design. So the fallback the
+// documentation named was the one thing that could get an operator out, and it did not
+// exist. Both are fixed together; the docs now say restore, and this is the file to
+// restore from.
+//
+// Kept apart from the hourly snapshots and never pruned. Retention is tuned to how often
+// the timer runs, and this is the one copy whose value is defined by an event rather
+// than by its age: a release that turns out to be wrong might not be noticed for days,
+// by which time an hourly snapshot of the pre-migration state is long gone. Migrations
+// are rare — seven in this project's life — so keeping every one of these costs a
+// directory nobody has to think about.
+//
+// A failure stops the server starting, because a migration whose fallback could not be
+// taken is precisely the one that should not run. With no backup directory configured
+// there is nowhere to put it and nothing to do but say so.
+func preMigrationSnapshot(cfg config.Config, clk clock.Clock) func(context.Context, int, int) error {
+	return func(ctx context.Context, from, to int) error {
+		if from == 0 {
+			// A database being created. There is no earlier state to roll back to, and
+			// nothing to copy: the file is empty until the first migration runs, and a
+			// snapshot of it fails verification for the good reason that it contains no
+			// schema at all.
+			return nil
+		}
+		if cfg.BackupDir == "" {
+			return fmt.Errorf("schema %d needs migrating to %d, but ALMANACK_BACKUP_DIR is "+
+				"unset, so the pre-migration snapshot a rollback would restore from cannot be "+
+				"written (set it, or migrate a copy first)", from, to)
+		}
+		dir := filepath.Join(cfg.BackupDir, "pre-migration")
+		slog.Info("migrating the database; taking the snapshot a rollback would restore from",
+			"from_schema", from, "to_schema", to, "dir", dir)
+		res, err := takeBackup(ctx, cfg, clk, dir, false)
+		if err != nil {
+			return err
+		}
+		slog.Info("pre-migration snapshot written", "path", res.Path, "bytes", res.Bytes,
+			"from_schema", from, "to_schema", to)
+		return nil
+	}
 }
 
 // newClock returns the real clock, or in development a fake one starting at the
