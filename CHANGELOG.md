@@ -942,6 +942,28 @@ Notable changes to this project. The format follows
   when that day ends a week, so it steps back to yesterday there rather than crossing. Both
   are pinned in `cmd/almanack` on every date in a decade.
   ([#72](https://github.com/d-weber/almanack/issues/72))
+- **A browser test asserted that the demo's holiday was on a screen it is not on for a
+  third of every month.** The test that checks a device in another timezone still sees the
+  family's dates read the *agenda* for the seeded seaside holiday, and the agenda renders
+  from today forward — while the fix above had just pinned that holiday to the second
+  Saturday of the seeded month. Measured on every day of July 2026: the month grid holds
+  the holiday on all thirty-one, and the agenda holds no part of it on fourteen of them,
+  which for a span running from the 8th-to-14th to the 14th-to-20th is between eleven and
+  seventeen days of any month. It passed anyway, by finding the month grid's copy of the
+  title before the agenda replaced the screen — a race, lost about one run in eight, and a
+  test that fails one run in eight for a reason that has nothing to do with its subject
+  teaches everyone to re-run CI rather than read it. What it was not doing was the thing it
+  is named for: "visible somewhere on the page" is satisfied by a holiday drawn a day early
+  exactly as well as by one drawn on the right day, and a build in which every all-day
+  event was bucketed one day earlier passed it six times out of six. It now reads the week
+  screen, which puts each day under a heading of its own; it asks the API which days the
+  holiday covers rather than keeping a copy of the seed's rule; and it asserts day by day,
+  scoped to each day's own section, that the holiday is on the days the server says and on
+  none of the others. On that day-early build it now fails, naming the day. One assertion
+  in the same file had the same shape and was tightened with it: a 16:30 that was asked for
+  on the whole page, and so was answered by the month chip behind the detail screen it was
+  written for. The demo data is unchanged.
+  ([#78](https://github.com/d-weber/almanack/issues/78))
 
 ## [0.2.0] — 2026-07-27
 
