@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -126,20 +127,49 @@ var reconcilable = []domain.NotificationKind{
 	domain.KindReminder, domain.KindDigest, domain.KindSummary,
 }
 
-// reconcile deletes undelivered rows in the planned window that this pass would no
-// longer create. Adding was never the hard part: five different edits invalidate
-// the outbox — changing a reminder, moving an event, muting a calendar, switching
-// the digest off, moving its time — and expecting each of them to remember to
-// prune is how a reminder someone deleted still goes off. Recomputing the window
-// and removing whatever is no longer in it covers all of them at once, including
-// the ones nobody has thought of yet.
+// reconcile deletes undelivered rows the pass would no longer create. Adding was never
+// the hard part: five different edits invalidate the outbox — changing a reminder,
+// moving an event, muting a calendar, switching the digest off, moving its time — and
+// expecting each of them to remember to prune is how a reminder someone deleted still
+// goes off. Recomputing the window and removing whatever is no longer in it covers all
+// of them at once, including the ones nobody has thought of yet.
+//
+// It reads further back than [from, to], because a row's slot passing does not end its
+// life: delivery keeps sending a reminder for as long as the event it warns about is
+// still ahead, on purpose, so that a late warning beats none. Asking only about the
+// window just planned left a row whose slot had gone by unreachable — the reminder
+// behind it could be deleted and this could not see it to drop it, and the same tick's
+// Dispatch then sent it. One unwanted push about something the family had just
+// cancelled (#71).
+//
+// One horizon back is the right depth: that is how far ahead an event can be and still
+// have a queued row, so it is the oldest slot a live row can carry. Reaching that far
+// cannot delete anything still wanted, because a row that is wanted is re-planned on
+// every pass while its event is ahead, whatever its slot, and is therefore in n.planned.
 func (n *Notifier) reconcile(ctx context.Context, from, to time.Time) error {
-	rows, err := n.st.ListUnsentByKind(ctx, from, to, reconcilable)
+	rows, err := n.st.ListUnsentByKind(ctx, from.Add(-n.horizon), to, reconcilable)
 	if err != nil {
 		return err
 	}
+	now := n.now()
 	removed := 0
 	for _, row := range rows {
+		// Behind the window the pass planned, only the rows delivery would still send
+		// are this pass's business. A row whose moment has gone is left exactly where it
+		// is, for Dispatch to retire with a reason: "we decided not to send this, and
+		// here is why" is the only evidence a missed notification was a decision rather
+		// than a bug, and deleting it here would destroy the record instead of writing
+		// it. That is the difference between reaching back as far as delivery reaches
+		// and simply reaching back.
+		if row.DueAt.Before(from) {
+			var p payload
+			if err := json.Unmarshal([]byte(row.Payload), &p); err != nil {
+				continue // unreadable: Dispatch retires it, with the reason, not this
+			}
+			if _, stale := n.staleness(row, p, now); stale {
+				continue
+			}
+		}
 		if !events.PlannerOwns(row.SourceRef) {
 			// A row no pass produces is a row no pass can vouch for. The "send me a
 			// test" button files one under the reminder kind on purpose, so that it
