@@ -1944,9 +1944,16 @@ a { color: var(--accent); }
 
   .app.is-collapsed .tab-label { display: none; }
 
+  /* 24px is the WCAG 2.2 SC 2.5.8 minimum target size, and on a wide screen the row has
+     the space to give it: 2 + 24 (day number) + 2 + 3x24 + 2x2 + 4 comes to 108 inside a
+     116px row. The phone grid cannot — its 96px row is budgeted to the pixel — and relies
+     instead on the criterion's Equivalent exception, through the full-cell .day-hit
+     button and the 52px rows of the day sheet it opens. See #21. */
   .week-row { min-height: 116px; }
-  .chip, .bar { font-size: 12px; min-height: 22px; }
-  .week-bars { grid-auto-rows: 22px; }
+  .chip, .bar { font-size: 12px; min-height: 24px; }
+  .week-bars { grid-auto-rows: 24px; }
+  /* The "+N" button is a target like any other, and had no desktop rule of its own. */
+  .chip-more { min-height: 24px; }
 
   .screen-body,
   .agenda-day,
