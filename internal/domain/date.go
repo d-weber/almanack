@@ -58,11 +58,49 @@ func (d Date) String() string {
 // IsZero reports whether d is the zero Date, which is used to mean "unset".
 func (d Date) IsZero() bool { return d == Date{} }
 
-// In returns the first instant of d in loc. That is midnight on every day but the few
-// a year when a zone that changes its clocks at midnight has no midnight to offer, and
-// the day begins at 01:00 instead.
+// In returns the first instant of d in loc.
+//
+// That is midnight nearly always, and a day can fail to begin at one in two ways rather
+// than the one #57 was reported for. Where a zone moves its clocks forward at midnight
+// the day has no midnight at all and begins at 01:00; at handles that, and In inherits
+// it. Where a zone moves them back onto or across midnight the day has two, an hour or
+// a half hour or three hours apart — the wall clock reads 00:00, runs on to the jump and
+// reads 00:00 again — and time.Date answers with the second of them. A half-open window
+// built from that opens an hour into the day it named and silently drops whatever was in
+// the interval, which is #57's symptom seen from the other end of the window: this is a
+// day boundary in Store.EventsInRange and both ends of the activity count behind a
+// summary, and the same hour that goes missing at the low end is counted twice at the
+// high one.
+//
+// So where midnight has two readings the earlier is the answer. At does not do this and
+// must not: which reading of an ambiguous wall time an appointment lands on follows the
+// zone rather than a policy anyone chose, and that is pinned as such by the recurrence
+// policy table in docs/architecture.md and from the browser's side. "The first instant
+// of d" is a different question, and unlike "when is the 00:30 lesson" it has one answer.
+//
+// Every date this changes is in the past — 120 of them across 23 zones between 1970 and
+// 2100, the most recent in 2023, none of them reachable through the POSIX rule that
+// governs the far end of that range. Europe/Paris is one of the 23, on 26 September
+// 1976, which is the answer to the objection that no household would ever be in a zone
+// that does this.
 func (d Date) In(loc *time.Location) time.Time {
-	return d.At(0, 0, loc)
+	t := d.at(0, 0, 0, loc)
+	// The other reading, where there is one: midnight under the offset in force before
+	// the zone period t belongs to began. On an ordinary day that period started months
+	// ago and the offset either matches or belongs to the other season, so the reading is
+	// the same instant or one on the day before — and both fail the test below, which is
+	// what keeps this to the days that genuinely have two midnights.
+	start, _ := t.ZoneBounds()
+	if start.IsZero() {
+		return t
+	}
+	_, before := start.Add(-time.Nanosecond).Zone()
+	alt := time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, time.UTC).
+		Add(-time.Duration(before) * time.Second)
+	if alt.Before(t) && DateIn(alt, loc).Equal(d) {
+		return alt
+	}
+	return t
 }
 
 // At returns the instant on d at the wall-clock time hour:min in loc.
@@ -79,9 +117,10 @@ func (d Date) AtTimeOf(t time.Time, loc *time.Location) time.Time {
 	return d.at(wall.Hour(), wall.Minute(), wall.Second(), loc)
 }
 
-// at is the one place in this application where a wall clock in the family timezone
-// becomes an instant, and it is a function of its own because one of the answers the
-// standard library can give to that question is unusable here.
+// at is where a wall clock in the family timezone becomes an instant — one place rather
+// than the three copies of time.Date it replaced — and it is a function of its own
+// because one of the answers the standard library can give to that question is unusable
+// here. In is the only caller that looks at the answer twice, and only for midnight.
 //
 // A wall time inside the hour a spring-forward skips names no moment at all, so
 // time.Date resolves it: it reads the fields as though they were UTC, applies the offset

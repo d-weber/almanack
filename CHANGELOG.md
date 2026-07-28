@@ -651,9 +651,17 @@ Notable changes to this project. The format follows
   conversion may do what the zone's offsets dictate, which is what keeps 16:30 at 16:30 and
   is unchanged everywhere else, but it may not hand back a different day than the one it was
   asked for; the alternative reading of an hour that never happened is always the one that
-  stays. **Nothing changes for a calendar kept in Paris, London or New York**: all three
-  change their clocks at two in the morning, so the hour they break is nowhere near a date
-  boundary and the new rule never fires there. It was checked against every minute of
+  stays. A day can also fail to start at midnight the other way round — where the clocks go
+  *back* onto midnight the day has two of them, an hour or a half hour apart, and the app
+  was taking the second, so a query for that day began an hour after the day did and
+  anything in the gap was invisible on its own date. It now takes the first, which is when
+  the day starts. That half is history rather than news: it last happened anywhere in 2023,
+  and never again between now and 2100 on the current timezone data. **Nothing changes for a
+  calendar kept in Paris, London or New York on any date this century**: all three change
+  their clocks at two in the morning, so the hour they break is nowhere near a date boundary
+  and neither rule fires there. (Paris did move its clocks at one in the morning until 1976,
+  and a calendar showing that September is an hour better for the second rule.) It was
+  checked against every minute of
   every clock change in the timezone database between 1970 and 2100 before being written
   down, and the editor in the browser applies the same rule as the server, because a
   calendar whose two halves disagree about an hour is worse than one that gets it wrong

@@ -106,7 +106,7 @@ they pick. The two ambiguity rows below are therefore pinned twice, by
 `TestWallTimeInAnHourTheClocksBreakResolvesToOnePinnedInstant` in `internal/events` and by
 `e2e/dst-fallback.spec.js`, each of which names the other.
 
-**One rule outranks that conversion, and only one: the answer is on the day it was asked
+**One rule outranks that conversion: the answer is on the day it was asked
 for.** A zone that jumps at midnight has no 00:30 on the day it jumps, and correcting a
 negative offset backwards put that occurrence at 23:30 the previous evening — a day the
 family had asked nothing of, and one the series' own date then disagreed with. Nothing
@@ -120,6 +120,22 @@ taken. It is on the requested date over every minute of every gap in the databas
 date line, which nothing can help. Both halves apply it, and in Europe/Paris and
 America/New_York alike it never fires: this changes what a household in Santiago, Havana or
 the Azores sees, and nothing else.
+
+**Where a day *begins* is a different question, and it has a rule of its own.**
+`domain.Date.In` is the low end of the occurrence window in `Store.EventsInRange`, both ends
+of the activity count behind a summary, and the base an all-day reminder counts back from —
+all of which want the first instant of a date rather than a particular wall clock on it. A
+day can have no midnight, which is the last daylight-saving row of the table below; it can
+equally have *two*, where a zone puts its clocks back onto or across midnight, and there
+`time.Date` answers with the second, so a half-open window opens an hour into the day it
+named and drops whatever was in the gap — #57's symptom at the other end of the window. `In`
+therefore takes the earlier reading whenever both are on the date. `Date.At` deliberately
+does not, and the two are not interchangeable: which reading of an ambiguous *appointment*
+time the calendar picks follows the zone, is a promise made twice in two implementations,
+and is the autumn row below. This one is history — 120 (zone, date) pairs between 1970 and
+2100, the last of them in 2023, `Europe/Paris` on 26 September 1976 among them — and the
+browser needs no counterpart to it, because it buckets on date strings and never builds a
+day boundary at all.
 
 ### The recurrence policy table
 
