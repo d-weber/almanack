@@ -24,7 +24,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"almanack/internal/holidays"
 )
+
+// retired names settings this binary no longer reads, and what replaced them. They are
+// reported specifically rather than as "not a setting this version understands", because
+// an operator who set one meant something by it: silently ignoring ALMANACK_ALSACE_MOSELLE
+// would take two public holidays off an Alsace family's calendar and tell nobody.
+var retired = map[string]string{
+	"ALMANACK_ALSACE_MOSELLE": "use ALMANACK_HOLIDAYS=FR-ALSACE-MOSELLE instead, which is " +
+		"the same two extra days chosen the same way as every other set",
+}
 
 // DefaultPath is consulted when no config path is given and the file exists.
 const DefaultPath = "/etc/almanack/almanack.conf"
@@ -34,7 +45,7 @@ const DefaultPath = "/etc/almanack/almanack.conf"
 var known = map[string]bool{
 	"ALMANACK_CONFIG": true, "ALMANACK_DEV": true, "ALMANACK_LISTEN": true,
 	"ALMANACK_BASE_URL": true, "ALMANACK_DATA": true, "ALMANACK_BACKUP_DIR": true,
-	"ALMANACK_TZ": true, "ALMANACK_ALSACE_MOSELLE": true, "ALMANACK_SOURCE_URL": true,
+	"ALMANACK_TZ": true, "ALMANACK_HOLIDAYS": true, "ALMANACK_SOURCE_URL": true,
 	"ALMANACK_TRUSTED_PROXIES": true, "ALMANACK_SMTP": true, "ALMANACK_MAIL_FROM": true,
 	"ALMANACK_OWNER_EMAIL": true, "ALMANACK_MAIL_DIR": true, "ALMANACK_HEARTBEAT_TIME": true,
 	"ALMANACK_VAPID_PUBLIC": true, "ALMANACK_VAPID_PRIVATE": true, "ALMANACK_VAPID_SUBJECT": true,
@@ -95,7 +106,12 @@ type Config struct {
 	// turns the check off, for a self-hosted push service.
 	PushHosts []string // ALMANACK_PUSH_HOSTS, CSV
 
-	AlsaceMoselle bool // ALMANACK_ALSACE_MOSELLE — the two extra public holidays
+	// Holidays are the public-holiday sets to show, by ISO 3166-1 alpha-2 code, or a
+	// region within one spelled country-first. France is implemented in two:
+	// FR and FR-ALSACE-MOSELLE. Empty, or "none", shows none — the right answer for a
+	// household elsewhere and better than being shown another country's. Either way
+	// the family can still name its own days through holiday_overrides.
+	Holidays []string // ALMANACK_HOLIDAYS, CSV — "FR" (default), "none", or several
 
 	// HolidayColor is the colour public holidays are drawn in. They are not events
 	// and belong to no calendar, so they have no label to take a colour from.
@@ -189,10 +205,11 @@ func Load(path string) (Config, error) {
 		}
 		return def
 	}
-	// A misspelt value used to fall back to the default in silence, so
-	// ALMANACK_ALSACE_MOSELLE=yes — the natural spelling — quietly switched the two
-	// extra public holidays back off. Collect the complaint instead; the reporting
-	// at the end of Load already knows how to present it.
+	// A misspelt value used to fall back to the default in silence. The case that
+	// showed it was ALMANACK_ALSACE_MOSELLE=yes — the natural spelling of true —
+	// quietly switching the two extra public holidays back off; that setting is retired
+	// now, but every bool can fail the same way. Collect the complaint instead; the
+	// reporting at the end of Load already knows how to present it.
 	var bad []string
 	getBool := func(key string, def bool) bool {
 		v := get(key, "")
@@ -248,7 +265,7 @@ func Load(path string) (Config, error) {
 		VAPIDPrivate:   get("ALMANACK_VAPID_PRIVATE", ""),
 		VAPIDSubject:   get("ALMANACK_VAPID_SUBJECT", ""),
 		PushHosts:      splitCSV(get("ALMANACK_PUSH_HOSTS", "")),
-		AlsaceMoselle:  getBool("ALMANACK_ALSACE_MOSELLE", false),
+		Holidays:       splitCSV(get("ALMANACK_HOLIDAYS", "FR")),
 		HolidayColor:   get("ALMANACK_HOLIDAY_COLOR", DefaultHolidayColor),
 		SourceURL:      get("ALMANACK_SOURCE_URL", DefaultSourceURL),
 		PlanHorizon:    getDur("ALMANACK_PLAN_HORIZON", 48*time.Hour),
@@ -327,6 +344,10 @@ func Load(path string) (Config, error) {
 	// for differences.
 	slices.Sort(unknown)
 	for _, key := range unknown {
+		if replacement, gone := retired[key]; gone {
+			bad = append(bad, fmt.Sprintf("%s, in %s, has been removed: %s", key, seenIn[key], replacement))
+			continue
+		}
 		bad = append(bad, fmt.Sprintf("%s, in %s, is not a setting this version understands (check the spelling against almanack.conf.example)", key, seenIn[key]))
 	}
 
@@ -374,6 +395,13 @@ func (c *Config) validate(problems []string) error {
 	if !isHexColor(c.HolidayColor) {
 		problems = append(problems, fmt.Sprintf("ALMANACK_HOLIDAY_COLOR=%q must be a hex colour such as #d32f2f", c.HolidayColor))
 	}
+	// Refused rather than defaulted. A server told to show German holidays that quietly
+	// showed French ones would be wrong every fortnight in a way nobody would trace back
+	// to a config file, and "none" is always available to somebody whose country is not
+	// implemented yet.
+	if _, err := c.HolidayCountries(); err != nil {
+		problems = append(problems, err.Error())
+	}
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
@@ -420,6 +448,80 @@ func (c *Config) validate(problems []string) error {
 		return errors.New("configuration problems:\n  - " + strings.Join(problems, "\n  - ") + hint)
 	}
 	return nil
+}
+
+// HolidayCountries resolves ALMANACK_HOLIDAYS to the sets internal/holidays should
+// compute, in the order given and with duplicates left in — the union that consumes them
+// removes those, and reordering an operator's list would only make the error messages
+// harder to match against what they wrote.
+//
+// "none" means compute nothing, which is what a household outside every implemented
+// country should see rather than another country's days off; holiday_overrides still lets
+// them name their own. It is only meaningful alone: "FR,none" is a contradiction, and
+// answering it by guessing which half was meant is worse than saying so.
+//
+// Anything else must be a set this build implements, and the error names the ones that
+// exist. A code that is perfectly valid ISO 3166 but unimplemented is exactly the mistake
+// worth catching at startup: a server told to show German holidays that quietly showed
+// French ones is wrong roughly every fortnight, in a way nobody traces back to a config
+// file.
+func (c Config) HolidayCountries() ([]holidays.Country, error) {
+	var out []holidays.Country
+	var unknown []string
+	none := false
+	for _, raw := range c.Holidays {
+		v := strings.ToUpper(strings.TrimSpace(raw))
+		switch {
+		case v == "":
+			continue
+		case v == "NONE":
+			none = true
+		case holidays.Known(holidays.Country(v)):
+			out = append(out, holidays.Country(v))
+		default:
+			unknown = append(unknown, raw)
+		}
+	}
+	switch {
+	case len(unknown) > 0:
+		return nil, fmt.Errorf(
+			"ALMANACK_HOLIDAYS names %s, which this build computes no holidays for; it knows %s, "+
+				"and \"none\" shows no public holidays at all (the family can still name its own "+
+				"through the calendar's holiday overrides)",
+			strings.Join(quoteAll(unknown), " and "), strings.Join(implementedNames(), ", "))
+	case none && len(out) > 0:
+		return nil, fmt.Errorf(
+			"ALMANACK_HOLIDAYS asks for %s and \"none\" at once; drop \"none\" to keep them, "+
+				"or drop them to show no public holidays",
+			strings.Join(quoteAll(countryNames(out)), " and "))
+	case none:
+		return nil, nil
+	}
+	return out, nil
+}
+
+func implementedNames() []string {
+	out := make([]string, 0, len(holidays.Implemented()))
+	for _, c := range holidays.Implemented() {
+		out = append(out, string(c))
+	}
+	return out
+}
+
+func countryNames(cs []holidays.Country) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, string(c))
+	}
+	return out
+}
+
+func quoteAll(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, strconv.Quote(s))
+	}
+	return out
 }
 
 // ParseFile reads a systemd EnvironmentFile-style KEY=VALUE file.
@@ -496,7 +598,7 @@ func (c Config) Redacted() []string {
 		"vapid_private=" + mask(c.VAPIDPrivate),
 		"vapid_subject=" + orNone(c.VAPIDSubject),
 		"push_hosts=" + orDefault(strings.Join(c.PushHosts, ",")),
-		"alsace_moselle=" + strconv.FormatBool(c.AlsaceMoselle),
+		"holidays=" + strings.Join(c.Holidays, ","),
 		"holiday_color=" + c.HolidayColor,
 		"source_url=" + orNone(c.SourceURL),
 		"plan_horizon=" + c.PlanHorizon.String(),

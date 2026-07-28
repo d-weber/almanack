@@ -58,9 +58,29 @@ ALMANACK_BACKUP_DIR=/var/lib/almanack/backups
 # happens in this zone, so that a weekly 16:30 event stays at 16:30 across DST.
 ALMANACK_TZ=Europe/Paris
 
-# Add the two extra public holidays observed in Alsace-Moselle (Good Friday and
-# St Stephen's Day).
-ALMANACK_ALSACE_MOSELLE=false
+# Which public holidays to show, as a comma-separated list.
+#
+# Each entry is an ISO 3166-1 alpha-2 country code, or a region within one written
+# country-first. This build computes two sets:
+#
+#   FR                  the public holidays observed across France (eleven days)
+#   FR-ALSACE-MOSELLE   those plus Good Friday and St Stephen's Day, which remain
+#                       public holidays in Bas-Rhin, Haut-Rhin and Moselle under the
+#                       local law kept in force when the departments returned in 1918
+#
+# The regional set contains the national one, so a family there writes the one code and
+# gets thirteen days. Listing several is allowed and is how a household observing more
+# than one set says so; a day named by two of them is still one day.
+#
+# There is no bundled dataset and no yearly refresh — the dates are computed, which is
+# what keeps them right in 2040 with nobody maintaining them — so each country added is
+# a piece of code rather than a file to keep up to date.
+#
+# Set it to "none" if you are somewhere else: no public holidays are drawn at all, which
+# is the honest answer and better than being shown another country's. Either way the
+# family can name its own days in the app, and those are shown whatever this is set to.
+# An unrecognised code is refused at startup rather than quietly ignored.
+ALMANACK_HOLIDAYS=FR
 
 # The colour public holidays are drawn in on the calendar. They belong to no
 # calendar and have no label, so this is their only source of colour.

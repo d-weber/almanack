@@ -84,6 +84,7 @@ func newEnv(t *testing.T, tweaks ...func(*config.Config)) *env {
 		MailDir:        filepath.Join(dir, "mail"),
 		TZName:         "Europe/Paris",
 		FamilyTZ:       loc,
+		Holidays:       []string{"FR"},
 		TrustedProxies: []string{"127.0.0.1", "::1"},
 		VAPIDPublic:    "BEl-test-public-key",
 		SchedulerTick:  30 * time.Second,

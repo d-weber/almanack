@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"almanack/internal/holidays"
 )
 
 // Configuration is the one part of this application that is edited by hand, at 3am,
@@ -136,7 +138,7 @@ func TestLoadDefaults(t *testing.T) {
 		// would be a second place for it to rot.
 		{"ALMANACK_PUSH_HOSTS", strings.Join(cfg.PushHosts, ","), ""},
 		{"ALMANACK_SMTP", cfg.SMTPAddr, "127.0.0.1:25"},
-		{"ALMANACK_ALSACE_MOSELLE", cfg.AlsaceMoselle, false},
+		{"ALMANACK_HOLIDAYS", strings.Join(cfg.Holidays, ","), "FR"},
 		{"ALMANACK_HOLIDAY_COLOR", cfg.HolidayColor, "#d32f2f"},
 		{"ALMANACK_SOURCE_URL", cfg.SourceURL, ""},
 		{"ALMANACK_PLAN_HORIZON", cfg.PlanHorizon, 48 * time.Hour},
@@ -345,8 +347,11 @@ func TestConfigPathVariableIsNotAnUnknownKey(t *testing.T) {
 }
 
 // A value that does not parse must name the setting and show what was rejected.
-// ALMANACK_ALSACE_MOSELLE=yes is the case that motivated this: the natural spelling
-// of "true" quietly switched the two extra public holidays back off.
+//
+// The case that motivated it was ALMANACK_ALSACE_MOSELLE=yes: the natural spelling of
+// "true" quietly switched the two extra public holidays back off. That setting has since
+// been retired in favour of ALMANACK_HOLIDAYS, which is a list rather than a bool and
+// cannot fail that way — but every other bool can, so the rule it bought stays.
 func TestUnparseableValuesNameTheSetting(t *testing.T) {
 	isolateEnv(t)
 
@@ -355,8 +360,7 @@ func TestUnparseableValuesNameTheSetting(t *testing.T) {
 		line     string
 		mentions []string
 	}{
-		{"bool", "ALMANACK_ALSACE_MOSELLE=yes", []string{"ALMANACK_ALSACE_MOSELLE", `"yes"`, "true"}},
-		{"bool/dev", "ALMANACK_DEV=on", []string{"ALMANACK_DEV", `"on"`}},
+		{"bool", "ALMANACK_DEV=yes", []string{"ALMANACK_DEV", `"yes"`, "true"}},
 		{"duration", "ALMANACK_TICK=30", []string{"ALMANACK_TICK", `"30"`, "duration"}},
 		{"duration/horizon", "ALMANACK_PLAN_HORIZON=2 days", []string{"ALMANACK_PLAN_HORIZON", "duration"}},
 		{"int", "ALMANACK_BACKUP_KEEP_HOURLY=lots", []string{"ALMANACK_BACKUP_KEEP_HOURLY", `"lots"`, "whole number"}},
@@ -378,23 +382,23 @@ func TestBoolSpellings(t *testing.T) {
 
 	for _, spelling := range []string{"true", "TRUE", "True", "1", "t"} {
 		t.Run(spelling, func(t *testing.T) {
-			cfg, err := loadConf(t, minimalProd("ALMANACK_ALSACE_MOSELLE="+spelling)...)
+			cfg, err := loadConf(t, minimalProd("ALMANACK_DEV="+spelling)...)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if !cfg.AlsaceMoselle {
-				t.Errorf("ALMANACK_ALSACE_MOSELLE=%s did not enable the setting", spelling)
+			if !cfg.Dev {
+				t.Errorf("ALMANACK_DEV=%s did not enable dev mode", spelling)
 			}
 		})
 	}
 	for _, spelling := range []string{"false", "FALSE", "0", "f"} {
 		t.Run(spelling, func(t *testing.T) {
-			cfg, err := loadConf(t, minimalProd("ALMANACK_ALSACE_MOSELLE="+spelling)...)
+			cfg, err := loadConf(t, minimalProd("ALMANACK_DEV="+spelling)...)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if cfg.AlsaceMoselle {
-				t.Errorf("ALMANACK_ALSACE_MOSELLE=%s did not disable the setting", spelling)
+			if cfg.Dev {
+				t.Errorf("ALMANACK_DEV=%s did not disable dev mode", spelling)
 			}
 		})
 	}
@@ -1120,7 +1124,7 @@ func TestExampleShowsTheRealDefaults(t *testing.T) {
 	}{
 		{"ALMANACK_LISTEN", func(c Config) any { return c.ListenAddr }},
 		{"ALMANACK_TZ", func(c Config) any { return c.TZName }},
-		{"ALMANACK_ALSACE_MOSELLE", func(c Config) any { return c.AlsaceMoselle }},
+		{"ALMANACK_HOLIDAYS", func(c Config) any { return strings.Join(c.Holidays, ",") }},
 		{"ALMANACK_HOLIDAY_COLOR", func(c Config) any { return c.HolidayColor }},
 		{"ALMANACK_SOURCE_URL", func(c Config) any { return c.SourceURL }},
 		{"ALMANACK_TRUSTED_PROXIES", func(c Config) any { return strings.Join(c.TrustedProxies, ",") }},
@@ -1346,5 +1350,133 @@ func TestRedactedMarksUnsetSettings(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("Redacted() does not contain %q:\n%s", want, joined)
 		}
+	}
+}
+
+// ALMANACK_HOLIDAYS is refused rather than defaulted when it names a set this build
+// cannot compute. A server told to show German holidays that quietly showed French ones
+// would be wrong roughly every fortnight, in a way nobody would trace back to a config
+// file — and "none" is always available to a household whose country is not implemented.
+func TestHolidaySetsAreValidatedAtStartup(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  []holidays.Country
+		ok    bool
+	}{
+		{"FR", []holidays.Country{holidays.France}, true},
+		{"fr", []holidays.Country{holidays.France}, true},   // case is not the operator's problem
+		{" FR ", []holidays.Country{holidays.France}, true}, // nor is whitespace from an editor
+		{"FR-ALSACE-MOSELLE", []holidays.Country{holidays.FranceAlsaceMoselle}, true},
+		{"FR,FR-ALSACE-MOSELLE", []holidays.Country{holidays.France, holidays.FranceAlsaceMoselle}, true},
+		{"none", nil, true},
+		{"NONE", nil, true},
+		{"", nil, true},
+		{"DE", nil, false},      // valid ISO 3166, unimplemented: the case worth catching
+		{"FR,DE", nil, false},   // one bad entry condemns the list rather than being dropped
+		{"FR,none", nil, false}, // a contradiction, answered by saying so
+		{"France", nil, false},
+	} {
+		got, err := Config{Holidays: splitCSV(tc.value)}.HolidayCountries()
+		if tc.ok && err != nil {
+			t.Errorf("ALMANACK_HOLIDAYS=%q was refused: %v", tc.value, err)
+			continue
+		}
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("ALMANACK_HOLIDAYS=%q was accepted", tc.value)
+			}
+			continue
+		}
+		if len(got) != len(tc.want) {
+			t.Errorf("ALMANACK_HOLIDAYS=%q resolved to %v, want %v", tc.value, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("ALMANACK_HOLIDAYS=%q resolved to %v, want %v", tc.value, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+// splitCSV drops empty entries, so a trailing comma never reaches here from a config
+// file — but HolidayCountries is a method on a struct anything can build, and an empty
+// string reported as an unknown country would be a baffling error to read.
+func TestAnEmptyEntryIsIgnoredRatherThanRefused(t *testing.T) {
+	got, err := Config{Holidays: []string{"FR", "", "  "}}.HolidayCountries()
+	if err != nil {
+		t.Fatalf("an empty entry was refused: %v", err)
+	}
+	if len(got) != 1 || got[0] != holidays.France {
+		t.Errorf("got %v, want just [FR]", got)
+	}
+}
+
+// The error has to name a way out, or an operator is stuck with a server that will not
+// start and no idea what to write instead.
+func TestTheHolidayErrorNamesWhatIsAvailable(t *testing.T) {
+	_, err := Config{Holidays: []string{"DE"}}.HolidayCountries()
+	if err == nil {
+		t.Fatal("DE was accepted")
+	}
+	for _, want := range []string{"FR", "FR-ALSACE-MOSELLE", "none"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q, so it does not say what to write: %v", want, err)
+		}
+	}
+}
+
+// The default is France, so an existing installation that never sets the key keeps
+// exactly the holidays it had.
+func TestHolidaysDefaultToFrance(t *testing.T) {
+	isolateEnv(t)
+
+	c, err := loadConf(t, minimalProd()...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := strings.Join(c.Holidays, ","); got != "FR" {
+		t.Errorf("Holidays = %q with nothing configured, want FR: an upgrade must not take"+
+			" an existing family's holidays away", got)
+	}
+	got, err := c.HolidayCountries()
+	if err != nil || len(got) != 1 || got[0] != holidays.France {
+		t.Errorf("HolidayCountries() = %v, %v; want [FR]", got, err)
+	}
+}
+
+// The retired bool is reported by name, with its replacement. Ignoring it silently would
+// take two public holidays off an Alsace family's calendar and tell nobody.
+func TestTheRetiredAlsaceSettingSaysWhatReplacedIt(t *testing.T) {
+	isolateEnv(t)
+
+	_, err := loadConf(t, minimalProd("ALMANACK_ALSACE_MOSELLE=true")...)
+	if err == nil {
+		t.Fatal("ALMANACK_ALSACE_MOSELLE was accepted; it does nothing now")
+	}
+	for _, want := range []string{"ALMANACK_ALSACE_MOSELLE", "removed", "FR-ALSACE-MOSELLE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// The refusal has to reach startup, not merely the accessor: a server configured for a
+// country it cannot compute must not start and quietly show another country's days off.
+func TestAnUnknownCountryStopsTheServerStarting(t *testing.T) {
+	isolateEnv(t)
+
+	_, err := loadConf(t, append(minimalProd(), "ALMANACK_HOLIDAYS=DE")...)
+	if err == nil {
+		t.Fatal("a config naming an unimplemented country started; it would show French holidays")
+	}
+	if !strings.Contains(err.Error(), "ALMANACK_HOLIDAYS") {
+		t.Errorf("the startup error does not name the setting at fault: %v", err)
+	}
+
+	// And the way out starts.
+	if _, err := loadConf(t, append(minimalProd(), "ALMANACK_HOLIDAYS=none")...); err != nil {
+		t.Errorf("ALMANACK_HOLIDAYS=none was refused, leaving a household elsewhere no option: %v", err)
 	}
 }

@@ -26,7 +26,8 @@ internal/notify      the planner, the durable outbox, delivery, boot catch-up
 internal/webpush     RFC 8030/8291/8292, written from the RFCs
 internal/httpapi     HTTP server, middleware, handlers, PWA serving
 internal/i18n        fr/en catalogs (shared with the browser) and French date formatting
-internal/holidays    French public holidays, computed rather than tabulated
+internal/holidays    public holidays, computed rather than tabulated (France, and
+                     the Alsace-Moselle variant; ALMANACK_HOLIDAYS chooses)
 internal/imgproc     avatar and cover-image processing without an image library
 internal/auth        argon2id passwords, token minting
 internal/clock       the only source of "now"

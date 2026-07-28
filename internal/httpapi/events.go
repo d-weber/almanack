@@ -277,7 +277,11 @@ func (s *Server) holidaysBetween(ctx context.Context, from, to domain.Date, lang
 	if err != nil {
 		return nil, err
 	}
-	entries := holidays.Between(from, to, holidays.Options{AlsaceMoselle: s.cfg.AlsaceMoselle}, overrides)
+	// The sets are validated at startup, so an error here cannot reach a running server;
+	// an empty list is the safe reading either way — no computed holidays, while the
+	// family's own overrides below still show.
+	countries, _ := s.cfg.HolidayCountries()
+	entries := holidays.Between(from, to, holidays.Options{Countries: countries}, overrides)
 	out := make([]holidayView, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, holidayView{
