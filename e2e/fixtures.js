@@ -23,6 +23,9 @@ export const FIXTURE_TITLES = [MEETING, HOSTILE_TITLE];
 /** Mutations carry the CSRF header or the middleware refuses them. */
 export const HEADERS = { 'X-Requested-With': 'almanack' };
 
+/** The seeded family's admin, as `make seed` creates her. */
+export const CREDENTIALS = { email: 'mum@example.org', password: 'password' };
+
 /** Where the login form posts, and the one bucket this suite spends. */
 export const LOGIN_PATH = '/api/v1/auth/login';
 
@@ -32,7 +35,7 @@ export const RATE_LIMIT_RESET_PATH = '/dev/ratelimits/reset';
 const RATE_LIMITED =
   `${LOGIN_PATH} answered 429: this address has spent the login rate limiter's burst of 8 ` +
   '(internal/httpapi/ratelimit.go), which refills at one token per 20 seconds.\n' +
-  `The suite spends two per run and empties the bucket at the start of each one, through ` +
+  `The suite spends three per run and empties the bucket at the start of each one, through ` +
   `${RATE_LIMIT_RESET_PATH} in auth.setup.js — so this means either that step did not run ` +
   'against this server, or the suite now signs in more times in one run than the burst allows.\n' +
   'Restarting the server also clears it: the buckets are in memory.';

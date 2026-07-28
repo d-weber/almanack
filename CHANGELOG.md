@@ -819,9 +819,21 @@ Notable changes to this project. The format follows
   to run threw `Invalid time zone specified` and the application stopped there: signed out you
   were given the login form, and typing the right password gave you the login form again, and
   again, with nothing anywhere saying why. The browser now says which setting is wrong instead
-  of showing a calendar — the configured zone by name, the fact that this browser has never
-  heard of it, and the two things that fix it: update the browser, or choose a zone it knows.
-  A button reloads, because correcting the server is all it takes. It refuses rather than
+  of showing a calendar — `ALMANACK_TZ` and its value, written as the line to go and change,
+  the fact that this browser has never heard of that zone, and the two things that fix it:
+  update the browser, or choose a zone it knows. A button reloads, because correcting the
+  server is all it takes. The zone reaches the browser from two places and both are checked:
+  it arrives with the configuration at startup, and again with the signed-in reply on every
+  sign-in and every refresh. Asking only about the first would have left the worst of this
+  untouched — one configuration request that did not answer, a server still starting or a
+  proxy between restarts, and the browser runs on its built-in default, past the check, and
+  meets the real zone at sign-in instead, where a failure is indistinguishable from a wrong
+  password. Asking at both also covers a tab left open across a restart that changed the
+  setting, which otherwise ended in "Server error. Please try again." over a full calendar
+  screen that could not draw a calendar. The zone and the setting are put on that screen
+  directly rather than written into a sentence to be translated, so they are still there on
+  the one occasion the message is likeliest to be needed and least likely to be readable: a
+  browser that reached the server but not its translations. It refuses rather than
   falling back, and that is the decision in this change: substituting UTC, or the device's own
   zone, would not show a smaller calendar but the same one with every hour moved, by an amount
   nothing on the screen can reveal, in the one kind of application where a plausible wrong hour

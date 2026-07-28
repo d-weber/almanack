@@ -9,6 +9,15 @@
 // the app goes through wallParts() in js/dates.js, so the first one to run threw, and
 // what a household saw was a spinner that never became a calendar.
 //
+// The zone reaches the browser from two places, and that is what most of this file is
+// about. /config carries it at boot, and /me carries it again at every sign-in and
+// every refresh. Checking only the first left the worst of the bug entirely intact: one
+// /config that did not answer — a server still starting, a proxy blip, a 5xx — and the
+// app ran on the built-in Europe/Paris, which every browser resolves, past the check,
+// and met the real zone in /me instead. The throw came out of loadSession() into a catch
+// that reads a failure there as "not signed in", so the login form came back with every
+// POST /auth/login answering 200 and nothing anywhere saying why.
+//
 // The zone is stubbed rather than configured because the server under test is the
 // shared seeded one, and because no real zone name can be relied on to stay missing
 // from a browser — the whole point of the bug is that browsers catch up, and a test
@@ -22,6 +31,7 @@
 // without proving anybody is ever shown it.
 
 import { test, expect } from '@playwright/test';
+import { CREDENTIALS, HEADERS, signIn } from './fixtures.js';
 
 // A service worker that has claimed the page would answer /api/v1/config and the locale
 // out of its own cache, which is one more thing standing between this test and what it
@@ -50,6 +60,22 @@ async function forgetZone(page, tz) {
     Fake.supportedLocalesOf = Real.supportedLocalesOf.bind(Real);
     Intl.DateTimeFormat = Fake;
   }, tz);
+}
+
+/**
+ * Fail the next GET /api/v1/config, and only the next one.
+ *
+ * This is the whole of the setup for the login loop. It is not an exotic condition: a
+ * server that has not finished starting, a reverse proxy between restarts, one 5xx.
+ * Later boots are let through so the Retry button still means what it says.
+ */
+async function dropTheFirstConfig(page) {
+  let dropped = false;
+  await page.route('**/api/v1/config', (route) => {
+    if (dropped) return route.continue();
+    dropped = true;
+    return route.abort('failed');
+  });
 }
 
 test('a timezone this browser cannot resolve explains itself instead of rendering nothing', async ({ page }) => {
@@ -100,4 +126,87 @@ test('the refusal comes before the login form, and offers the way back', async (
   await page.getByRole('button', { name: /Retry|Réessayer/i }).click();
   await expect(page.getByRole('alert')).toContainText(zone);
   expect(await page.evaluate(() => window.__stillTheSameDocument)).toBeUndefined();
+});
+
+test('the right password does not hand back the login form when /config never answered', async ({ page, context }) => {
+  await context.clearCookies();
+  const zone = await configuredZone(page);
+  await forgetZone(page, zone);
+  await dropTheFirstConfig(page);
+
+  // With no /config the app is still on its built-in Europe/Paris, which resolves, so
+  // the boot check finds nothing wrong and the login form is drawn — correctly, there
+  // is no session. Everything from here is real: the real form, the real password, the
+  // real /auth/login, the real /me.
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /Sign in/i })).toBeVisible();
+  await signIn(page, CREDENTIALS);
+
+  // /me answers 200 and brings the zone with it. This is where the loop was: the throw
+  // out of applyMe() was read as a failed session and the form came straight back, so
+  // the same password could be typed all evening. signIn() has already asserted the
+  // 200, which is what makes this a loop rather than a rejection.
+  await expect(page.getByRole('alert')).toContainText(zone);
+  await expect(page.getByRole('alert')).toContainText('ALMANACK_TZ');
+  await expect(page.getByRole('button', { name: /Sign in/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Today/i })).toHaveCount(0);
+});
+
+test('a session already in the cookie jar reaches the same screen, not a calendar', async ({ page }) => {
+  // The other way into /me: this project carries the shared signed-in state, so boot
+  // goes straight through to a 200 without anybody touching the login form.
+  const zone = await configuredZone(page);
+  await forgetZone(page, zone);
+  await dropTheFirstConfig(page);
+
+  await page.goto('/');
+
+  await expect(page.getByRole('alert')).toContainText(zone);
+  await expect(page.getByRole('button', { name: /Today/i })).toHaveCount(0);
+});
+
+test('a zone that changes under a tab that has been open for days says so, not "server error"', async ({ page }) => {
+  // The admitted gap in #58, and the only one where the app is already running: the
+  // server is restarted with a different ALMANACK_TZ, app_version does not move because
+  // the assets did not, so nothing prompts a reload. /me brings the new zone back with
+  // the next refresh — one click on "Week starts on" is enough — and what came up was
+  // the whole shell, sidebar and tab bar and "July 2026", over "Server error. Please
+  // try again." and a Retry that could never work. That is the browser's own trouble
+  // reported as the server's, in front of the calendar the refusal exists to withhold.
+  //
+  // The restart is done to the answer rather than to the server, because this suite
+  // shares one. Almanack/Nowhere is not stubbed and does not need to be: no browser has
+  // ever had it, which is the whole of the condition. Only GET is rewritten, so the
+  // PATCH that triggers the refresh is the real one.
+  const NOWHERE = 'Almanack/Nowhere';
+
+  await page.goto('/#/settings');
+  await expect(page.getByLabel(/Week starts on/i)).toBeVisible();
+  await expect(page.locator('.tabbar')).toHaveCount(1);
+
+  const before = (await (await page.request.get('/api/v1/me')).json()).user.week_start;
+  await page.route('**/api/v1/me', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.family_tz = NOWHERE;
+    return route.fulfill({ response, json: body });
+  });
+
+  try {
+    await page.getByLabel(/Week starts on/i).selectOption(String(before === 1 ? 0 : 1));
+
+    // The shell first, because the settings screen has an alert of its own: matching
+    // that one is how this could pass while everything it is about was still standing.
+    await expect(page.locator('.tabbar')).toHaveCount(0);
+    await expect(page.getByText('Server error')).toHaveCount(0);
+
+    const message = page.getByRole('alert');
+    await expect(message).toContainText(NOWHERE);
+    await expect(message).toContainText('ALMANACK_TZ');
+  } finally {
+    // The preference is this family's, and every other spec reads the month grid it
+    // lays out. Put it back through the API: the page is a refusal screen by now.
+    await page.request.patch('/api/v1/me', { headers: HEADERS, data: { week_start: before } });
+  }
 });

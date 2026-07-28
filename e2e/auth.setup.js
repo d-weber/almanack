@@ -7,9 +7,10 @@
 // was testing. Rate limiting a family calendar's login endpoint is correct; hammering
 // it ten times to assert something about the month grid is not.
 //
-// So this file is also the one place the real login form is exercised. Everything else
-// starts already authenticated, which is why only this file and logout.spec.js — which
-// needs a session it is allowed to destroy — call signIn().
+// So almost everything starts already authenticated, and only three files call signIn():
+// this one, logout.spec.js — which needs a session it is allowed to destroy — and
+// unknown-tz.spec.js, whose whole subject is what a correct password does next. Three of
+// a burst of eight, emptied below at the start of every run.
 //
 // Two sign-ins a run was still too many, though, because the bucket does not empty
 // between runs and refills at one token per twenty seconds: five `make e2e` runs inside
@@ -26,11 +27,9 @@
 // the one `make seed` makes. See below for why that is worth a step of its own.
 
 import { test as setup, expect } from '@playwright/test';
-import { FIXTURE_TITLES, HEADERS, RATE_LIMIT_RESET_PATH, signIn } from './fixtures.js';
+import { CREDENTIALS, FIXTURE_TITLES, HEADERS, RATE_LIMIT_RESET_PATH, signIn } from './fixtures.js';
 
 const STATE_PATH = '.auth/state.json';
-
-const CREDENTIALS = { email: 'mum@example.org', password: 'password' };
 
 setup('sign in through the login form, on a database nobody has run this on before', async ({ page }) => {
   const reset = await page.request.post(RATE_LIMIT_RESET_PATH, { headers: HEADERS });

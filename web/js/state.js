@@ -101,16 +101,32 @@ function applyHolidayColor(color) {
   document.documentElement.style.setProperty('--holiday', color);
 }
 
+/**
+ * Apply a /me. Everything that can fail is computed before anything is written.
+ *
+ * /me carries the family timezone, exactly as /config does, and the first date this
+ * function converts through it is the cursor. A browser that cannot resolve the zone
+ * throws there — and this used to set `authed` and half the session first, so what came
+ * out was an application that believed it was signed in with no date to draw on. The
+ * throw then travelled out of loadSession() into a catch that reads a failure there as
+ * "not signed in", and the right password gave you the login form again, and again
+ * (#58). Nothing half-applies now, so a session that cannot be applied is simply the
+ * one that was there before; app.js is where the browser's answer to the zone is acted
+ * on, at every point one can arrive.
+ */
 export function applyMe(me) {
+  const tz = me.family_tz || state.familyTz;
+  setTimezone(tz);
+  const cursor = state.cursor || todayISO();
+
   state.user = me.user;
   state.prefs = me.prefs;
   state.calendars = Array.isArray(me.calendars) ? me.calendars : [];
-  state.familyTz = me.family_tz || state.familyTz;
+  state.familyTz = tz;
   state.appVersion = me.app_version || state.appVersion;
   state.authed = true;
-  setTimezone(state.familyTz);
   setTimeFormat(me.user && me.user.time_format);
-  if (!state.cursor) state.cursor = todayISO();
+  state.cursor = cursor;
   // Drop stale hidden ids so a deleted calendar cannot hide a new one by id reuse.
   const known = new Set(state.calendars.map((c) => c.id));
   for (const id of Array.from(state.hidden)) if (!known.has(id)) state.hidden.delete(id);

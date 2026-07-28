@@ -58,6 +58,10 @@ let currentCleanup = null;
 let lastRefresh = 0;
 let lastConfirm = 0;
 let pendingHash = null;
+// Set once the timezone refusal has taken the screen. Nothing paints over it after
+// that: the shell it replaced is detached, and this stops the router from building
+// screens into elements no longer on the page.
+let refused = false;
 
 // ---------------------------------------------------------------------------
 // Shell
@@ -272,6 +276,15 @@ function release(cleanup) {
 
 /** Swap the main area, discarding results of a navigation that was superseded. */
 async function show(builder, { chrome = null, tabs = true } = {}) {
+  // A zone can also change under a tab that has been open for days: the server is
+  // restarted with a different ALMANACK_TZ, /me brings the new one back with the next
+  // refresh, and nothing has reloaded because app_version did not move. One click on
+  // "Week starts on" then repainted the whole shell — sidebar, tab bar, "July 2026" —
+  // over "Server error. Please try again." and a Retry that could never work, which is
+  // the browser's own trouble reported as the server's. Asked here it ends in the same
+  // screen as a bad zone at boot, which is what that state is.
+  if (refused || refuseIfUnknownTimezone()) return;
+
   const token = ++renderToken;
   release(currentCleanup);
   currentCleanup = null;
@@ -294,6 +307,9 @@ async function show(builder, { chrome = null, tabs = true } = {}) {
     mount(viewEl, node);
   } catch (err) {
     if (token !== renderToken) return;
+    // A builder that awaited /me is another way the zone can arrive mid-render, and
+    // the throw that follows is not a server error however much it looks like one.
+    if (refuseIfUnknownTimezone()) return;
     mount(viewEl, errorBox(err, () => reload()));
   }
   paintBanners();
@@ -503,9 +519,17 @@ function wireEvents() {
   bus.addEventListener('offline', () => paintBanners());
 
   bus.addEventListener('authenticated', async () => {
+    let signedIn = true;
     try {
       await loadSession();
-    } catch (err) {
+    } catch (_) {
+      signedIn = false;
+    }
+    // Before deciding this was a failed sign-in. The password was right — the answer
+    // came back 200 — and the only thing wrong is a zone /me has just delivered that
+    // this browser cannot resolve. Handing the login form back for that is the loop.
+    if (refuseIfUnknownTimezone()) return;
+    if (!signedIn) {
       clearSession();
       go('/login', { replace: true });
       return;
@@ -592,6 +616,32 @@ function refuseUnknownTimezone(tz) {
       button(t('action.retry'), { variant: 'quiet', onclick: () => location.reload() }))));
 }
 
+/**
+ * Ask whether this browser can resolve the zone it has been given, and refuse if not.
+ *
+ * The zone arrives from two places, not one: /config at boot, and /me at every sign-in
+ * and every refresh (js/state.js). #58 asked only after /config, which left the login
+ * loop it describes fully reachable — one failed /config, a server still starting or a
+ * proxy blip, and the app sailed past the check on the built-in Europe/Paris, met the
+ * bad zone in /me instead, and read the throw as "not signed in". Every POST
+ * /auth/login answered 200 and every one of them came back to the login form.
+ *
+ * So the question is asked wherever an answer can have changed, rather than once. It is
+ * a null check on a module variable, and the alternative — reasoning about which
+ * arrival points exist today — is what was wrong before. The screen is drawn once: a
+ * later render asking again gets the same answer, and re-mounting would take the focus
+ * off the button under somebody's finger.
+ */
+function refuseIfUnknownTimezone() {
+  const tz = unknownTimezone();
+  if (!tz) return false;
+  if (!refused) {
+    refused = true;
+    refuseUnknownTimezone(tz);
+  }
+  return true;
+}
+
 async function boot() {
   // Invite and password-reset links were once emitted without the "#/", and some are
   // already in inboxes. Translate them rather than dropping their holder on the login
@@ -617,20 +667,21 @@ async function boot() {
 
   // After the catalogue, so the refusal can be read, and before /me, because reading
   // it sets the cursor to today and there is no today in a zone that does not resolve.
-  // This is the only place that asks: a zone that fails here fails for the whole run,
-  // and adding a second check on some later screen would be machinery for a state that
-  // cannot arrive without another reload.
-  const badTz = unknownTimezone();
-  if (badTz) {
-    refuseUnknownTimezone(badTz);
-    return;
-  }
+  if (refuseIfUnknownTimezone()) return;
 
   try {
     await loadSession();
   } catch (_) {
     clearSession();
   }
+
+  // And again on the other side of it, because /config is not the only place the zone
+  // comes from. A /config that did not answer — a server still starting, a proxy blip,
+  // a 5xx — leaves the check above looking at the built-in Europe/Paris, which every
+  // browser resolves, and the real zone arrives with /me a moment later. A session
+  // already in the cookie jar reaches it here; somebody typing a password reaches it
+  // in the 'authenticated' handler above.
+  if (refuseIfUnknownTimezone()) return;
 
   registerRoutes();
   wireEvents();
