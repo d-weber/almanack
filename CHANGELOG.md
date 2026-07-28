@@ -668,7 +668,10 @@ Notable changes to this project. The format follows
   twice. Reminders already queued keep the name they were queued under, so the upgrade
   strands none of them; an occurrence inside the next two days at the moment of the upgrade
   can be announced twice, an hour apart, which is the trade this application always makes in
-  that direction. Nothing changed in the database.
+  that direction. **A daily digest or an activity summary set for a time in that hour moves
+  the same way**, for the same reason — the slot is a wall clock in the family timezone like
+  any other — so one already queued for the day of the upgrade can also arrive twice, an
+  hour apart, and once thereafter. Nothing changed in the database.
   ([#57](https://github.com/d-weber/almanack/issues/57))
 - **Searching for a late-night activity that has finished, and tapping it, said "Not
   found."** Search lists events rather than occurrences, so the results screen has to work
