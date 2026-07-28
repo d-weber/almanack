@@ -8,7 +8,9 @@ Migration is two independent jobs, and they should stay independent:
 
 1. **Get the data out**, verbatim and completely, while the account still exists.
    `tools/timetree-export/export.py` does this. **Done — see below.**
-2. **Turn it into Almanack rows.** Not built. This document is its specification.
+2. **Turn it into Almanack rows.** `tools/timetree-import/import.py` does this, and
+   this document is what it implements. **Done — see
+   [its README](../tools/timetree-import/README.md) for the order to do things in.**
 
 Step 1 had the deadline: it depends on an undocumented API belonging to someone else,
 which can change without notice. Step 2 reads files on your disk and can be redone as
@@ -97,7 +99,7 @@ came from there. The export confirms it: both calendars have exactly ten labels,
 | `author_id` | `CreatedBy` | |
 | `alerts` | `Reminder` | minutes, signed; see below |
 | `recurrences` | `Recurrence` | RRULE strings; see below |
-| `created_at` / `updated_at` | `CreatedAt` / `UpdatedAt` | preserve the audit trail |
+| `created_at` / `updated_at` | `CreatedAt` / `UpdatedAt` | **not carried** — see below |
 | `uuid` | — | keep as the import key, for idempotent re-runs |
 | `type: 1` (birthday) | yearly all-day event | 3 events; Almanack has no birthday type |
 | `category: 2` (memo) | — | exactly 1 event; see below |
@@ -171,7 +173,16 @@ hand-written map of the seven ids. `CreatedBy` and `Participants` both depend on
 
 **Idempotency.** Give the importer a dry-run mode and key inserts on the TimeTree
 `uuid`, so a re-run after a fix does not duplicate the family's history. The first run
-will be wrong in some small way.
+will be wrong in some small way. Both are built: `--dry-run`, and a `--journal` of
+completed actions keyed on the `uuid`, so an interrupted run resumes rather than
+duplicating.
+
+**The audit trail is the one row of the table above that cannot be honoured.** The API
+stamps `created_at` and `updated_at` from the server's clock when it creates a row and
+offers no way to say otherwise, so every imported event reads as created on the day of
+the import. Writing them would mean importing through the store rather than over HTTP —
+a second, privileged path into the database, for a field nothing in the application
+displays. The raw export keeps the real values if they are ever wanted.
 
 ### Open decisions
 
