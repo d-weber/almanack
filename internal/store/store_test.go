@@ -3682,6 +3682,78 @@ func TestReplaceRemindersIsScopedToOneUser(t *testing.T) {
 // Every case here also watches Marc, who never saves anything: reminders are per person,
 // and reconciliation reads and writes through exactly the scope ReplaceReminders was
 // given.
+// TestReminderMatchingTakesTheLowestIDHoweverTheRowsArrive: #65 keeps the *lowest* id of
+// each shape, so that saving one list twice settles on the same rows both times and
+// dropping a duplicate keeps the ones that have been there longest. Everything downstream
+// of that — which reference the outbox files the reminder under, and therefore whether the
+// row already delivered absorbs the re-plan — depends on it being the same answer twice.
+//
+// It is tested here rather than through ReplaceReminders because through the database it
+// cannot be tested at all: every access path SQLite has to `reminders` walks the rowid
+// b-tree in order, so the rows arrive sorted whether or not the query says so, and a
+// matching that took the highest id, or whatever order a map produced, would be caught by
+// nothing. Handing them over shuffled is the one thing no fixture can do.
+func TestReminderMatchingTakesTheLowestIDHoweverTheRowsArrive(t *testing.T) {
+	m := func(id int64, minutes int) domain.Reminder {
+		return domain.Reminder{ID: id, OffsetMinutes: &minutes}
+	}
+	want := func(minutes ...int) []domain.Reminder {
+		out := make([]domain.Reminder, 0, len(minutes))
+		for _, v := range minutes {
+			out = append(out, domain.Reminder{OffsetMinutes: &v})
+		}
+		return out
+	}
+	// Three rows of one shape and two of another, and the ids deliberately not in the
+	// order the shapes are in.
+	stored := []domain.Reminder{m(9, 10), m(4, 60), m(7, 10), m(2, 10), m(11, 60)}
+
+	for _, tc := range []struct {
+		name     string
+		saved    []domain.Reminder
+		wantKeep []int64
+		wantAdd  int
+	}{
+		{"one of a shape held three times", want(10), []int64{2}, 0},
+		{"two of it", want(10, 10), []int64{2, 7}, 0},
+		{"all three, in the other order", want(10, 10, 10), []int64{2, 7, 9}, 0},
+		{"one of each", want(10, 60), []int64{2, 4}, 0},
+		{"more than there are rows for", want(10, 10, 10, 10), []int64{2, 7, 9}, 1},
+		{"a shape with no row at all", want(30), nil, 1},
+		{"the empty list", nil, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every ordering of the same rows must give the same answer, which is the
+			// claim: a rotation is enough to break a matching that took what it was
+			// handed, and reversal is enough to break one that took the highest.
+			for _, order := range [][]domain.Reminder{
+				stored,
+				{stored[4], stored[3], stored[2], stored[1], stored[0]},
+				{stored[2], stored[0], stored[4], stored[1], stored[3]},
+			} {
+				rows := slices.Clone(order)
+				keep, add := matchReminders(rows, tc.saved)
+				got := make([]int64, 0, len(keep))
+				for id := range keep {
+					got = append(got, id)
+				}
+				slices.Sort(got)
+				if !slices.Equal(got, tc.wantKeep) {
+					ids := make([]int64, 0, len(rows))
+					for _, r := range rows {
+						ids = append(ids, r.ID)
+					}
+					t.Errorf("rows %v kept %v, want %v: the reminder that keeps its row has to be "+
+						"the same one whichever order they were read in", ids, got, tc.wantKeep)
+				}
+				if len(add) != tc.wantAdd {
+					t.Errorf("rows %v produced %d new reminders, want %d", order, len(add), tc.wantAdd)
+				}
+			}
+		})
+	}
+}
+
 func TestReplaceRemindersKeepsTheRowsThatDidNotChange(t *testing.T) {
 	s, _, _ := newStore(t)
 	claire := mustUser(t, s, "claire@example.test", "Claire")
