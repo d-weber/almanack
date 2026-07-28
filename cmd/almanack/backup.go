@@ -52,8 +52,8 @@ type backupResult struct {
 // check could never fire. A server whose backup timer was never installed reported
 // itself healthy indefinitely — the exact silent failure the whole design is
 // arranged to prevent.
-func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (backupResult, error) {
-	res, err := takeBackup(ctx, cfg, dir, prune)
+func runBackup(ctx context.Context, cfg config.Config, clk clock.Clock, dir string, prune bool) (backupResult, error) {
+	res, err := takeBackup(ctx, cfg, clk, dir, prune)
 	outcome := "ok"
 	if err != nil {
 		outcome = err.Error()
@@ -69,7 +69,7 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 			"path", cfg.DataPath, "error", statErr)
 		return res, err
 	}
-	if noteErr := recordBackupOutcome(ctx, cfg, outcome); noteErr != nil {
+	if noteErr := recordBackupOutcome(ctx, cfg, clk, outcome); noteErr != nil {
 		slog.Warn("could not record the backup result for /healthz", "error", noteErr)
 	}
 	return res, err
@@ -77,19 +77,22 @@ func runBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (
 
 // recordBackupOutcome opens the live database briefly to leave a breadcrumb. A
 // failure here is reported but never masks the backup's own result.
-func recordBackupOutcome(ctx context.Context, cfg config.Config, outcome string) error {
-	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clock.Real{})
+func recordBackupOutcome(ctx context.Context, cfg config.Config, clk clock.Clock, outcome string) error {
+	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if err := st.SetMeta(ctx, httpapi.MetaLastBackupAt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if err := st.SetMeta(ctx, httpapi.MetaLastBackupAt, clk.Now().UTC().Format(time.RFC3339)); err != nil {
 		return err
 	}
 	return st.SetMeta(ctx, httpapi.MetaLastBackupResult, outcome)
 }
 
-func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) (backupResult, error) {
+func takeBackup(ctx context.Context, cfg config.Config, clk clock.Clock, dir string, prune bool) (backupResult, error) {
+	// A stopwatch, not a clock reading: this measures how long the snapshot took, and a
+	// controllable clock would report zero. Every read in this file that asks *when*
+	// something happened goes through clk; this one asks how long, which is different.
 	start := time.Now()
 	if dir == "" {
 		dir = cfg.BackupDir
@@ -104,7 +107,7 @@ func takeBackup(ctx context.Context, cfg config.Config, dir string, prune bool) 
 		return backupResult{}, err
 	}
 
-	stamp := time.Now().UTC().Format(backupTimeLayout)
+	stamp := clk.Now().UTC().Format(backupTimeLayout)
 	final := filepath.Join(dir, "almanack-"+stamp+".db")
 	// The PID is in the temporary name so that two runs starting in the same second —
 	// the hourly timer and an operator at a shell — cannot end up writing to, and

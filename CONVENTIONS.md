@@ -56,7 +56,12 @@ e2e/                    dev-only browser smoke tests
 
 - **Never call `time.Now()` directly.** Take a `clock.Clock`. Tests use `clock.NewFake`,
   and dev mode can travel through time (`POST /dev/clock`), which is how reminders and digests
-  get tested locally without waiting a day.
+  get tested locally without waiting a day. This includes the one-shot subcommands: they
+  read the real clock in `main`, but they take it as an argument, which is what lets the
+  seeder be run at a chosen date instead of only at today's.
+- Measuring **how long** something took is a stopwatch rather than a clock read, and stays
+  on `time.Now()` — a controllable clock would report zero. `cmd/almanack/backup.go` is the
+  one place this comes up.
 - **Timed events** are stored as UTC (`TEXT` ISO-8601 with `Z`). **All-day events** are stored as
   `domain.Date` (`TEXT` `YYYY-MM-DD`) — never as midnight instants. An all-day event has no
   timezone; treating it as one is the off-by-one-day bug.

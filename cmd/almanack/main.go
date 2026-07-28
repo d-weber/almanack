@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 
+	"almanack/internal/clock"
 	"almanack/internal/config"
 	"almanack/internal/webpush"
 	"almanack/web"
@@ -105,10 +106,10 @@ func run() error {
 	case "serve":
 		return runServe(ctx, cfg)
 	case "bootstrap":
-		return runBootstrap(ctx, cfg, args)
+		return runBootstrap(ctx, cfg, clock.Real{}, args)
 	case "seed":
 		force := hasFlag(args, "--force", "-force")
-		return runSeed(ctx, cfg, force)
+		return runSeed(ctx, cfg, clock.Real{}, force)
 	case "backup":
 		dir := ""
 		for _, a := range args {
@@ -117,7 +118,7 @@ func run() error {
 			}
 		}
 		prune := hasFlag(args, "--prune", "-prune")
-		res, err := runBackup(ctx, cfg, dir, prune)
+		res, err := runBackup(ctx, cfg, clock.Real{}, dir, prune)
 		if err != nil {
 			return err
 		}

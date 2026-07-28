@@ -162,7 +162,7 @@ func TestBackupRoundTripsContent(t *testing.T) {
 	ctx := context.Background()
 	_, cfg, want := liveDatabase(t)
 
-	res, err := takeBackup(ctx, cfg, "", false)
+	res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestBackupRoundTripsContent(t *testing.T) {
 func TestBackupNamesSnapshotsByTimestamp(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestBackupClearsPartialFilesFromAnInterruptedRun(t *testing.T) {
 		t.Fatalf("age the stale partial: %v", err)
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
 		t.Fatalf("write the in-flight partial: %v", err)
 	}
 
-	if _, err := takeBackup(context.Background(), cfg, "", false); err != nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false); err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
 	if _, err := os.Stat(inFlight); err != nil {
@@ -286,7 +286,7 @@ func TestBackupLeavesAConcurrentRunsPartialAlone(t *testing.T) {
 func TestBackupSnapshotIsNotReadableByOthers(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
-	res, err := takeBackup(context.Background(), cfg, "", false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestBackupSucceedsTwiceInARow(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 
 	for i := range 2 {
-		res, err := takeBackup(ctx, cfg, "", false)
+		res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 		if err != nil {
 			t.Fatalf("takeBackup run %d: %v", i+1, err)
 		}
@@ -369,7 +369,7 @@ func TestBackupFailsWhenTheDatabaseIsMissing(t *testing.T) {
 	}
 	dir := t.TempDir()
 
-	if _, err := takeBackup(context.Background(), cfg, dir, false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, dir, false); err == nil {
 		t.Fatal("takeBackup succeeded with no database to back up")
 	}
 	if got := remaining(t, dir); len(got) != 0 {
@@ -383,7 +383,7 @@ func TestBackupNeedsADirectory(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 	cfg.BackupDir = ""
 
-	if _, err := takeBackup(context.Background(), cfg, "", false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, "", false); err == nil {
 		t.Fatal("takeBackup accepted an empty destination")
 	}
 }
@@ -400,7 +400,7 @@ func TestBackupRefusesToPublishASnapshotThatFailsVerification(t *testing.T) {
 	}
 	dir := filepath.Join(root, "snapshots")
 
-	if _, err := takeBackup(context.Background(), cfg, dir, false); err == nil {
+	if _, err := takeBackup(context.Background(), cfg, clock.Real{}, dir, false); err == nil {
 		t.Fatal("takeBackup published a snapshot of a database that is not this application's")
 	}
 	if got := remaining(t, dir); len(got) != 0 {
@@ -437,7 +437,7 @@ func TestBackupHandlesAwkwardPathCharacters(t *testing.T) {
 	root := t.TempDir()
 	_, cfg, want := liveDatabaseIn(t, filepath.Join(root, "data#2"), filepath.Join(root, "snap?shots"))
 
-	res, err := takeBackup(ctx, cfg, "", false)
+	res, err := takeBackup(ctx, cfg, clock.Real{}, "", false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestRunBackupRecordsSuccessForHealthz(t *testing.T) {
 	ctx := context.Background()
 	st, cfg, _ := liveDatabase(t)
 
-	if _, err := runBackup(ctx, cfg, "", false); err != nil {
+	if _, err := runBackup(ctx, cfg, clock.Real{}, "", false); err != nil {
 		t.Fatalf("runBackup: %v", err)
 	}
 
@@ -617,7 +617,7 @@ func TestRunBackupRecordsFailureForHealthz(t *testing.T) {
 	st, cfg, _ := liveDatabase(t)
 	cfg.BackupDir = ""
 
-	if _, err := runBackup(ctx, cfg, "", false); err == nil {
+	if _, err := runBackup(ctx, cfg, clock.Real{}, "", false); err == nil {
 		t.Fatal("runBackup succeeded with no destination")
 	}
 
@@ -648,7 +648,7 @@ func TestFailedBackupDoesNotRecreateAMissingDatabase(t *testing.T) {
 		FamilyTZ: testTZ(t),
 	}
 
-	if _, err := runBackup(context.Background(), cfg, filepath.Join(root, "snapshots"), false); err == nil {
+	if _, err := runBackup(context.Background(), cfg, clock.Real{}, filepath.Join(root, "snapshots"), false); err == nil {
 		t.Fatal("runBackup succeeded with no database to back up")
 	}
 	if got := remaining(t, dataDir); len(got) != 0 {
@@ -699,7 +699,7 @@ func TestBackupWithPruneKeepsTheSnapshotItJustWrote(t *testing.T) {
 		t.Fatalf("write the older snapshot: %v", err)
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", true)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", true)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestBackupPrunesOldGenerationsWithoutTouchingItsOwn(t *testing.T) {
 		}
 	}
 
-	res, err := takeBackup(context.Background(), cfg, "", true)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, "", true)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestBackupWritesWhereItIsTold(t *testing.T) {
 	_, cfg, _ := liveDatabase(t)
 	explicit := filepath.Join(t.TempDir(), "before-the-upgrade")
 
-	res, err := takeBackup(context.Background(), cfg, explicit, false)
+	res, err := takeBackup(context.Background(), cfg, clock.Real{}, explicit, false)
 	if err != nil {
 		t.Fatalf("takeBackup: %v", err)
 	}

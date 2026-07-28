@@ -29,8 +29,8 @@ type seedUser struct {
 	admin bool
 }
 
-func runSeed(ctx context.Context, cfg config.Config, force bool) error {
-	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clock.Real{})
+func runSeed(ctx context.Context, cfg config.Config, clk clock.Clock, force bool) error {
+	st, err := store.Open(cfg.DataPath, cfg.FamilyTZ, clk)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 
 	svc := events.New(st, cfg.FamilyTZ, clock.Real{})
 	loc := cfg.FamilyTZ
-	today := domain.DateIn(time.Now(), loc)
+	today := domain.DateIn(clk.Now(), loc)
 
 	// --- people -------------------------------------------------------------
 	// Gran reads the app in French. One person on the other language is the point:
@@ -72,7 +72,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 			WeekStart:   time.Monday,
 			TimeFormat:  "24h",
 			IsAdmin:     p.admin,
-			CreatedAt:   time.Now().UTC(),
+			CreatedAt:   clk.Now().UTC(),
 		}, hash)
 		if err != nil {
 			return fmt.Errorf("create %s: %w", p.name, err)
@@ -101,7 +101,7 @@ func runSeed(ctx context.Context, cfg config.Config, force bool) error {
 		{"Kids' activities", "#2fa84f", "Dad", []string{"Mum", "Leo"}},
 	} {
 		cal, err := st.CreateCalendar(ctx, domain.Calendar{
-			Name: c.name, Color: c.color, CreatorID: ids[c.creator], CreatedAt: time.Now().UTC(),
+			Name: c.name, Color: c.color, CreatorID: ids[c.creator], CreatedAt: clk.Now().UTC(),
 		})
 		if err != nil {
 			return fmt.Errorf("create calendar %s: %w", c.name, err)
